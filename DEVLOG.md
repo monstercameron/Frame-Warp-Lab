@@ -1,5 +1,12 @@
 # Development log
 
+## v0.21.1 — Add runnable PAR quality report + PNG diff generator and live desktop demo scripts
+
+- Added two zero-dependency PowerShell scripts under `scripts/`:
+  - `scripts/run_par_quality_report.ps1`: runs the exact matched-timestamp (`t = 408,366 µs`) PSNR/SSIM/Sharpness/P99 comparison suite across `occlusion_sweep` and `fast_pan`, saves lossless PNGs and 4×-amplified error-diff PNGs to `build/Release/captures/report/`, and executes the 4-stage `500 Hz` closed-loop auto-budgeter stress shock test.
+  - `scripts/demo_par_live.ps1`: launches `frame_warp_lab.exe` visibly on the interactive desktop and walks through whole-frame baseline, VRS Tier 2, PAR `15%`, live `view=priority` heatmap, `view=tiles` map, and Clean-Feed PAR + DLSS-G with live telemetry readouts.
+- Verified script execution cleanly and pushed to `main`.
+
 ## v0.21.0 — PAR-4 + PAR-6 + Closed-Loop Auto-Budgeter: Matched-reference PSNR/SSIM proof, Catmull-Rom + TCSF TRM cache sharpening, and deadline-driven tile budgeting
 
 - Implemented three major validation and quality subsystems to directly test the previously unproven claims of the Inverse Rendering / PAR thesis (`shaders/selective_tiles.hlsl`, `src/adaptive_scheduler.h`, `src/runtime_state.h`, `src/renderer.h`, `src/renderer.cpp`, `src/main.cpp`, `src/cli.cpp`, `CMakeLists.txt`):
