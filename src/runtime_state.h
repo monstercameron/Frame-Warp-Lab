@@ -10,7 +10,7 @@
 namespace frame_warp_lab {
 
 inline constexpr wchar_t window_class_name[] = L"FrameWarpLabWindow";
-inline constexpr std::uint32_t runtime_state_version = 29;
+inline constexpr std::uint32_t runtime_state_version = 30;
 inline constexpr std::size_t runtime_event_capacity = 64;
 inline constexpr std::size_t runtime_frame_trace_capacity = 256;
 inline constexpr std::size_t hud_graph_sample_count = 128;
@@ -67,6 +67,8 @@ enum class ControlCommand : WPARAM {
     range_reload = 43,
     reload_lua_scripts = 44,
     emit_range_event = 45,
+    set_reactive_invalidation = 46,
+    set_shadow_delta_invalidation = 47,
 };
 
 enum class SceneKind : std::int32_t {
@@ -217,6 +219,8 @@ enum class ConfigKey : std::int32_t {
     pbr_enabled = 33,
     aniso_mip_enabled = 34,
     scene_kind = 35,
+    reactive_invalidation = 36,
+    shadow_delta_invalidation = 37,
 };
 
 enum class RuntimeEventType : std::int32_t {
@@ -410,6 +414,8 @@ struct RuntimeState {
     std::int32_t cache_sharpen_enabled;
     std::int32_t coarse_fallback_enabled;
     std::int32_t subtile_interleave_enabled;
+    std::int32_t reactive_invalidation_enabled;
+    std::int32_t shadow_delta_invalidation_enabled;
     std::int32_t par_bypass_active;
     std::int32_t smoothed_damage_pct;
     std::int32_t render_scale_pct;
@@ -523,6 +529,8 @@ inline const char* config_key_name(std::int32_t key) {
         case ConfigKey::pbr_enabled: return "pbr";
         case ConfigKey::aniso_mip_enabled: return "aniso_mip";
         case ConfigKey::scene_kind: return "scene";
+        case ConfigKey::reactive_invalidation: return "reactive_invalidation";
+        case ConfigKey::shadow_delta_invalidation: return "shadow_delta_invalidation";
         default: return "unknown";
     }
 }

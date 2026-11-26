@@ -140,6 +140,8 @@ public:
         bool cache_sharpen_enabled,
         bool coarse_fallback_enabled,
         bool subtile_interleave_enabled,
+        bool reactive_invalidation_enabled,
+        bool shadow_delta_invalidation_enabled,
         std::uint64_t frame_id,
         LatencyMonitor& latency_monitor,
         bool wait_for_completion,

@@ -617,6 +617,8 @@ bool Renderer::submit_scene_async(
     bool cache_sharpen_enabled,
     bool coarse_fallback_enabled,
     bool subtile_interleave_enabled,
+    bool reactive_invalidation_enabled,
+    bool shadow_delta_invalidation_enabled,
     std::uint64_t frame_id,
     LatencyMonitor& latency_monitor,
     bool wait_for_completion,
@@ -702,7 +704,9 @@ bool Renderer::submit_scene_async(
         ? source_slots_[static_cast<std::size_t>(prev_slot_index)].active_height
         : render_height_;
     const std::uint32_t policy_flags = (tile_policy == TilePolicy::priority_stbn ? 1U : 0U)
-        | (subtile_interleave_enabled ? 2U : 0U);
+        | (subtile_interleave_enabled ? 2U : 0U)
+        | (reactive_invalidation_enabled ? 4U : 0U)
+        | (shadow_delta_invalidation_enabled ? 8U : 0U);
     simd::store_uint4(
         scene_constants->policy_params,
         policy_flags,
@@ -730,10 +734,13 @@ bool Renderer::submit_scene_async(
             scene_constants->ball_center_stress,
             range_frame->hud.muzzle_world_pos,
             range_frame->hud.muzzle_flash_alpha);
+        const float prev_scene_time = can_use_prev_cache
+            ? static_cast<float>(source_slots_[static_cast<std::size_t>(prev_slot_index)].snapshot.scene_time_seconds)
+            : static_cast<float>(snapshot.scene_time_seconds);
         write_float4(
             scene_constants->previous_ball_center_unused,
-            Float3{pbr_enabled ? 1.0f : 0.0f, aniso_mip_enabled ? 1.0f : 0.0f, 0.0f},
-            0.0f);
+            Float3{pbr_enabled ? 1.0f : 0.0f, aniso_mip_enabled ? 1.0f : 0.0f, prev_scene_time},
+            static_cast<float>(shader_flags & 0xFFU));
 
         const std::size_t inst_slot_bytes = max_range_instances * sizeof(RangeInstanceGpu);
         const std::size_t inst_offset = static_cast<std::size_t>(slot_index) * inst_slot_bytes;

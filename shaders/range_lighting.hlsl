@@ -94,6 +94,42 @@ float3 eval_spot_light(
     return pbr_eval_direct_light(n, view_dir, l, eff_rad, diffuse_color, f0, perceptual_roughness, alpha, energy_comp, clearcoat, cc_alpha);
 }
 
+float3 eval_range_moving_spot_pos(float scene_time) {
+    return float3(3.1 * sin(scene_time * 1.65), 4.05, 11.2 + 4.4 * cos(scene_time * 1.15));
+}
+
+float eval_range_moving_shadow_vis(float3 world_pos, float scene_time) {
+    float3 light_pos = eval_range_moving_spot_pos(scene_time);
+    float3 blocker_c = float3(1.85 * sin(scene_time * 2.15), 2.35, 10.8 + 2.8 * sin(scene_time * 1.35));
+    float blocker_r = 0.62;
+    float3 seg = light_pos - world_pos;
+    float seg_len2 = dot(seg, seg);
+    if (seg_len2 < 1e-4) return 1.0;
+    float t = saturate(dot(blocker_c - world_pos, seg) / seg_len2);
+    if (t <= 0.01 || t >= 0.99) return 1.0;
+    float3 closest = world_pos + seg * t;
+    float3 d = closest - blocker_c;
+    float dist2 = dot(d, d);
+    return dist2 < (blocker_r * blocker_r) ? 0.08 : 1.0;
+}
+
+uint eval_range_shadow_signature(float3 world_pos, float scene_time, uint shader_flags) {
+    uint sig = 0u;
+    if ((shader_flags & 32u) != 0u) {
+        float vis = eval_range_moving_shadow_vis(world_pos, scene_time);
+        sig |= (vis > 0.5) ? 1u : 0u;
+    }
+    if ((shader_flags & 8u) != 0u) {
+        float3 lp = eval_range_moving_spot_pos(scene_time);
+        float3 to_l = lp - world_pos;
+        float d2 = max(dot(to_l, to_l), 0.30);
+        float env = saturate(18.0 / (1.0 + 0.14 * d2));
+        uint q = min(31u, (uint)(env * 31.0 + 0.5));
+        sig |= (q << 1u);
+    }
+    return sig;
+}
+
 float3 shade_range_surface_pbr(
     float3 world_pos,
     float3 geo_n,
@@ -108,6 +144,8 @@ float3 shade_range_surface_pbr(
     float emissive_weight,
     bool is_viewmodel,
     bool aniso_enabled,
+    float scene_time,
+    uint shader_flags,
     float3 cam_pos,
     float3 cam_forward,
     float4 muzzle_light_pos_intensity,
@@ -118,6 +156,10 @@ float3 shade_range_surface_pbr(
     geo_n = normalize(geo_n);
     geo_t = normalize(geo_t - geo_n * dot(geo_t, geo_n));
     float3 geo_b = normalize(cross(geo_n, geo_t));
+
+    if ((shader_flags & 2u) != 0u && !is_viewmodel && (material_id == 6u || material_id == 8u)) {
+        uv += float2(scene_time * 0.55, scene_time * 0.35);
+    }
 
     float slice = clamp((float)material_id, 0.0, 11.0);
     float3 albedo;
@@ -248,6 +290,18 @@ float3 shade_range_surface_pbr(
         }
     }
 
+    if ((shader_flags & (8u | 32u)) != 0u && !is_viewmodel) {
+        float3 dyn_lp = eval_range_moving_spot_pos(scene_time);
+        float3 to_dyn = dyn_lp - world_pos;
+        float dyn_d2 = max(dot(to_dyn, to_dyn), 0.30);
+        float dyn_vis = ((shader_flags & 32u) != 0u) ? eval_range_moving_shadow_vis(world_pos, scene_time) : 1.0;
+        float3 dyn_rad = float3(34.0, 26.0, 12.0) * (dyn_vis / (1.0 + 0.14 * dyn_d2));
+        color += pbr_eval_direct_light(n, view_dir, to_dyn * rsqrt(dyn_d2), dyn_rad, diffuse_color, f0, perceptual_roughness, alpha, energy_comp, clearcoat, cc_alpha);
+        if ((shader_flags & 32u) != 0u) {
+            color *= lerp(0.32, 1.0, dyn_vis);
+        }
+    }
+
     if (muzzle_light_pos_intensity.w > 0.01) {
         float3 to_m = muzzle_light_pos_intensity.xyz - world_pos;
         float md2 = max(dot(to_m, to_m), 0.08);
@@ -255,12 +309,13 @@ float3 shade_range_surface_pbr(
         color += pbr_eval_direct_light(n, view_dir, to_m * rsqrt(md2), mrad, diffuse_color, f0, perceptual_roughness, alpha, energy_comp, clearcoat, cc_alpha);
     }
 
+    float em_pulse = ((shader_flags & 16u) != 0u) ? (0.20 + 1.65 * (0.5 + 0.5 * sin(scene_time * 9.5 + world_pos.z * 0.7))) : 1.0;
     if (emissive_weight > 25.0) {
-        color += float3(0.16, 0.85, 1.35) * 3.8;
+        color += float3(0.16, 0.85, 1.35) * (3.8 * em_pulse);
     } else if (emissive_weight > 15.0) {
-        color += float3(1.45, 0.72, 0.12) * 3.8;
+        color += float3(1.45, 0.72, 0.12) * (3.8 * em_pulse);
     } else if (emissive_weight > 8.0) {
-        color += float3(1.65, 0.10, 0.08) * 4.4;
+        color += float3(1.65, 0.10, 0.08) * (4.4 * em_pulse);
     } else {
         float em_total = emissive_weight * max(tint_emissive.w, 1.0) + (emissive_weight < 0.01 ? tint_emissive.w : 0.0);
         if (em_total > 0.001) {
@@ -269,6 +324,10 @@ float3 shade_range_surface_pbr(
                 : (emissive_weight > 0.5 ? float3(0.96, 0.97, 1.0) : tint_emissive.rgb);
             color += em_col * em_total;
         }
+    }
+    if ((shader_flags & 16u) != 0u && !is_viewmodel && material_id == 8u) {
+        float stripe = step(0.84, frac(uv.x * 2.0 + scene_time * 1.4));
+        color += float3(0.18, 1.85, 2.20) * stripe * (0.35 + 0.95 * em_pulse);
     }
 
     float view_z = max(dot(world_pos - cam_pos, cam_forward), 0.04);

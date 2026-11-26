@@ -1,5 +1,22 @@
 # Development log
 
+## v0.32.0 — Priorities 2 & 3: Material Revision IDs / Reactive Masks and Shadow-Delta Invalidation
+
+- Solved animated-material stale caching (Priority 2) and nonlocal moving-shadow invalidation on stationary surfaces (Priority 3) across both the **14-Light PBR Gun Range (Hardware VisBuffer + `PAR-3`)** and the **8-Shader Theory Corridor** (`shaders/range_lighting.hlsl`, `shaders/range_mesh.hlsl`, `shaders/range_vis_par.hlsl`, `shaders/selective_tiles.hlsl`, `src/runtime_state.h`, `src/renderer.h`, `src/renderer.cpp`, `src/main.cpp`, `src/cli.cpp`, `CMakeLists.txt`, `scripts/run_invalidation_experiment.ps1`):
+  - **Priority 2 — Material Revision IDs & Reactive Masks**:
+    - Added 6-bit per-material revision IDs (`vis_word` bits `16..21` in `selective_tiles.hlsl`) and reactive animated-material masks (vertex `material_id` / `emissive_weight` checks in `range_vis_classify_main`) so animated UV scrolling and strobing emissive beacons/stripes immediately promote only their affected tiles to `PAR-3` Bucket 0/1 while static materials remain cached.
+  - **Priority 3 — Shadow-Delta Invalidation**:
+    - Added an analytical moving overhead tactical searchlight + oscillating rail-carriage hard shadow caster (`eval_range_moving_shadow_vis` / `eval_range_shadow_signature` in `range_lighting.hlsl`) and an 8-bit shadow/moving-light state signature (`vis_word` bits `22..29` in `selective_tiles.hlsl`).
+    - Comparing previous-frame vs current-frame shadow state on stationary pixels detects moving shadow boundaries in <10 ALU ops and invalidates only the exact tiles crossed by the shadow penumbra/edge.
+  - **Runtime & CLI Observability (`RuntimeState` v30)**:
+    - Added `set <pid> reactive_invalidation on|off` and `set <pid> shadow_delta_invalidation on|off` toggles (packed into `policy_params.x` bits 2 & 3, exposed in `status.selective_tiles`) for clean A/B validation.
+- Verified zero code comments, ARM64 Release + Debug builds, Debug D3D12 Debug Layer (`0` errors), and `scripts/run_invalidation_experiment.ps1` A/B benchmark on **NVIDIA RTX Spark N1X**:
+  - **Range | P2 Animated Emissive (`PAR-3 25%`, `GT=816 µs`)**: `Naive 22.58 dB / SSIM 0.9397 / tRMSE 25.27 / P99 104.9` → **`Inv ON 30.41 dB (+7.83 dB) / SSIM 0.9772 / tRMSE 6.64 (3.8× lower!) / P99 24.3 (4.3× lower!)`** at `271 µs` (`3.01×` faster than GT).
+  - **Range | P2 Animated UV (`PAR-3 40%`, `GT=1,221 µs`)**: `Naive 29.07 dB / SSIM 0.8760 / tRMSE 9.83` → **`Inv ON 30.14 dB (+1.07 dB) / SSIM 0.9688 (+0.0928) / tRMSE 6.61`** at `304 µs` (`4.02×` faster than GT).
+  - **Range | P3 Moving Spotlight + Hard Shadows (`PAR-3 25%`, `GT=1,483 µs`)**: `Naive 27.97 dB / SSIM 0.9559 / P99 46.8` → **`Inv ON 29.02 dB (+1.05 dB) / SSIM 0.9651 / P99 38.6`** at **`234 µs`** (`6.34×` faster than GT, only `20.7%` tiles shaded).
+  - **Corridor | P2 Animated Emissive (`PAR-3 30%`)**: `Naive 30.49 dB / tRMSE 10.69` → **`Inv ON 32.21 dB (+1.72 dB) / tRMSE 8.83`** (`17.1%` tiles shaded).
+  - **Corridor | P3 Hard Moving Shadows (`PAR-3 30%`)**: `Naive 30.79 dB / SSIM 0.9209` → **`Inv ON 32.38 dB (+1.59 dB) / SSIM 0.9485`** (`22.6%` tiles shaded).
+
 ## v0.31.0 — Priority 1: Hardware Triangle Visibility Buffer + Deferred PAR-3 Selective Tile Shading (14-Light PBR Gun Range)
 
 - Replaced expensive ray-marched visibility on the 14-light PBR Indoor Gun Range with a true **4-Pass Hardware Triangle Visibility Buffer + Deferred `PAR-3` Selective Tile Shading** pipeline (`shaders/range_lighting.hlsl`, `shaders/range_mesh.hlsl`, `shaders/range_vis_par.hlsl`, `src/renderer.h`, `src/renderer.cpp`, `CMakeLists.txt`, `scripts/run_visbuffer_par_experiment.ps1`):

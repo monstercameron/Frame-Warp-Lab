@@ -123,6 +123,8 @@ SceneOutput range_ps_main(RangeVertexOut input) {
         input.emissive_weight,
         draw_meta.y != 0u,
         range_flags.y > 0.5,
+        previous_camera_forward_time.w,
+        (uint)(range_flags.w + 0.5),
         camera_position_tan_y.xyz,
         camera_forward_rcp_height.xyz,
         muzzle_light_pos_intensity,

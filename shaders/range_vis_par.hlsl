@@ -222,6 +222,8 @@ void shade_vis_pixel(uint2 pixel_coord, uint width, uint height) {
         em_w,
         is_viewmodel,
         range_flags.y > 0.5,
+        previous_camera_forward_time.w,
+        (uint)(range_flags.w + 0.5),
         camera_position_tan_y.xyz,
         camera_forward_rcp_height.xyz,
         muzzle_light_pos_intensity,
@@ -247,6 +249,11 @@ void range_vis_classify_main(
     uint height = cache_params.w;
     bool use_priority_stbn = (policy_params.x & 1u) != 0u;
     bool use_subtile_interleave = use_priority_stbn && ((policy_params.x & 2u) != 0u);
+    bool use_reactive_invalidation = (policy_params.x & 4u) != 0u;
+    bool use_shadow_delta_invalidation = (policy_params.x & 8u) != 0u;
+    uint shader_flags = (uint)(range_flags.w + 0.5);
+    float curr_scene_time = previous_camera_forward_time.w;
+    float prev_scene_time = range_flags.z;
     uint total_tiles = policy_params.y;
     bool use_catmull_rom = (policy_params.z != 0u);
 
@@ -276,6 +283,8 @@ void range_vis_classify_main(
             float2 prev_uv = curr_uv + motion;
 
             bool is_moving = is_vm || (muzzle_light_pos_intensity.w > 0.02);
+            bool is_reactive_miss = false;
+            bool is_shadow_delta_miss = false;
             if (inst_enc > 1u) {
                 InstanceData inst = range_instances[inst_enc - 1u];
                 float3 d_tr = float3(
@@ -289,6 +298,29 @@ void range_vis_classify_main(
                     is_moving = true;
                 }
             }
+            if (use_reactive_invalidation && (shader_flags & (2u | 16u)) != 0u && !is_vm) {
+                uint tri_id = vis_word & 0xFFFFFFu;
+                RangeVertexGpu rv0 = range_vertices[range_indices[tri_id * 3u]];
+                bool anim_uv_mat = ((shader_flags & 2u) != 0u) && (rv0.material_id == 6u || rv0.material_id == 8u);
+                bool anim_em_mat = ((shader_flags & 16u) != 0u) && (rv0.emissive_weight > 8.0 || rv0.material_id == 8u);
+                if (anim_uv_mat || anim_em_mat) {
+                    is_reactive_miss = true;
+                    is_moving = true;
+                }
+            }
+            if (use_shadow_delta_invalidation && (shader_flags & (8u | 32u)) != 0u && !is_vm && has_prev) {
+                float2 p_ndc = float2(curr_uv.x * 2.0 - 1.0, 1.0 - curr_uv.y * 2.0);
+                float3 ray_d = camera_right_tan_x.xyz * (p_ndc.x * camera_right_tan_x.w)
+                    + camera_up_rcp_width.xyz * (p_ndc.y * camera_position_tan_y.w)
+                    + camera_forward_rcp_height.xyz;
+                float3 recon_wp = camera_position_tan_y.xyz + ray_d * depth;
+                uint cur_sig = eval_range_shadow_signature(recon_wp, curr_scene_time, shader_flags);
+                uint prv_sig = eval_range_shadow_signature(recon_wp, prev_scene_time, shader_flags);
+                if (cur_sig != prv_sig) {
+                    is_shadow_delta_miss = true;
+                    is_moving = true;
+                }
+            }
             if (is_moving) {
                 InterlockedAdd(g_moving_count, 1u);
             }
@@ -297,7 +329,7 @@ void range_vis_classify_main(
             float3 cached_rgb = float3(0.035, 0.050, 0.068);
             uint next_age = 255u;
 
-            if (has_prev && prev_uv.x > 0.001 && prev_uv.x < 0.999 && prev_uv.y > 0.001 && prev_uv.y < 0.999) {
+            if (has_prev && !is_reactive_miss && !is_shadow_delta_miss && prev_uv.x > 0.001 && prev_uv.x < 0.999 && prev_uv.y > 0.001 && prev_uv.y < 0.999) {
                 float2 prev_active_size = float2(max(prev_and_alloc_dims.x, 1u), max(prev_and_alloc_dims.y, 1u));
                 float2 inv_alloc_size = float2(rcp(float(max(prev_and_alloc_dims.z, 1u))), rcp(float(max(prev_and_alloc_dims.w, 1u))));
                 float2 uv_min = 0.5 * inv_alloc_size;

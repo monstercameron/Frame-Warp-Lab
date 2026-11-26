@@ -223,7 +223,39 @@ void vis_classify_main(
         if (material > 0.0) {
             pixel_non_sky = true;
             linear_view_depth = max(dot(world_position - camera_position, camera_forward), 0.01);
-            surf_hash = compute_surface_hash(world_position, material);
+            uint s_flags = sky_flags_init & 255u;
+            float s_time = previous_camera_forward_unused.w;
+            bool use_reactive_inv = (policy_params.x & 4u) != 0u;
+            bool use_shadow_inv = (policy_params.x & 8u) != 0u;
+
+            uint mat_rev = 0u;
+            bool reactive_mat = false;
+            if ((s_flags & 2u) != 0u && mat_id >= 1u && mat_id <= 4u) {
+                mat_rev = ((uint)(s_time * 60.0) + 1u) & 63u;
+                reactive_mat = true;
+            } else if ((s_flags & 16u) != 0u && (mat_id == 3u || mat_id == 4u)) {
+                mat_rev = ((uint)(s_time * 60.0) + 1u) & 63u;
+                reactive_mat = true;
+            }
+
+            uint shadow_sig = 0u;
+            if ((s_flags & (8u | 32u)) != 0u) {
+                float3 pt_pos = float3(
+                    2.1 * sin(s_time * 1.9),
+                    2.2 + 0.55 * cos(s_time * 1.4),
+                    10.5 + 4.2 * cos(s_time * 1.1));
+                if ((s_flags & 32u) != 0u) {
+                    float hs = trace_hard_shadow(world_position + float3(0.0, 0.03, 0.0), pt_pos, ball_center);
+                    shadow_sig |= (hs > 0.5) ? 1u : 0u;
+                }
+                if ((s_flags & 8u) != 0u) {
+                    float3 to_pt = pt_pos - world_position;
+                    float env = saturate(16.0 / (1.0 + 0.25 * max(dot(to_pt, to_pt), 0.30)));
+                    uint q = min(31u, (uint)(env * 31.0 + 0.5));
+                    shadow_sig |= (q << 1u);
+                }
+            }
+            surf_hash = (mat_rev & 63u) | ((shadow_sig & 255u) << 6u);
 
             float3 previous_world_position = world_position;
             if (mat_id == 5u) {
@@ -253,7 +285,14 @@ void vis_classify_main(
                 uint prev_vis = prev_vis_texture.Load(int3(prev_coord, 0));
                 uint prev_mat = prev_vis & 255u;
                 uint prev_age = (prev_vis >> 8u) & 255u;
+                uint prev_mat_rev = (prev_vis >> 16u) & 63u;
+                uint prev_shadow_sig = (prev_vis >> 22u) & 255u;
                 bool prev_authoritative = prev_age < 255u;
+                bool reactive_invalid = use_reactive_inv && (reactive_mat || (prev_mat_rev != mat_rev));
+                bool shadow_invalid = use_shadow_inv && (prev_shadow_sig != shadow_sig);
+                if (reactive_invalid || shadow_invalid) {
+                    pixel_moving = true;
+                }
                 if (policy_params.z != 0u) {
                     cached_color = sample_catmull_rom_5tap(
                         previous_uv,
