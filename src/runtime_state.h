@@ -10,10 +10,12 @@
 namespace frame_warp_lab {
 
 inline constexpr wchar_t window_class_name[] = L"FrameWarpLabWindow";
-inline constexpr std::uint32_t runtime_state_version = 5;
+inline constexpr std::uint32_t runtime_state_version = 6;
 inline constexpr std::size_t runtime_event_capacity = 64;
 inline constexpr std::size_t runtime_frame_trace_capacity = 256;
 inline constexpr std::int32_t max_stress_level = 64;
+inline constexpr std::int32_t max_source_divider = 8;
+inline constexpr std::int64_t max_reprojection_source_age_us = 250000;
 inline constexpr UINT control_message = WM_APP + 1;
 
 enum class ControlCommand : WPARAM {
@@ -24,12 +26,22 @@ enum class ControlCommand : WPARAM {
     set_camera_path = 5,
     set_stress_level = 6,
     set_overlay_enabled = 7,
+    set_presentation_mode = 8,
+    set_source_divider = 9,
+    set_vsync_enabled = 10,
+};
+
+enum class PresentationMode : std::int32_t {
+    full_render = 0,
+    repeat = 1,
+    reproject = 2,
 };
 
 enum class DiagnosticView : std::int32_t {
     final_color = 0,
     depth = 1,
     motion_vectors = 2,
+    reprojection_holes = 3,
 };
 
 enum class CameraPath : std::int32_t {
@@ -37,6 +49,21 @@ enum class CameraPath : std::int32_t {
     fast_pan = 1,
     occlusion_sweep = 2,
     camera_cut = 3,
+    manual = 4,
+};
+
+enum class FrameKind : std::int32_t {
+    rendered = 0,
+    repeated = 1,
+    warped = 2,
+    fallback = 3,
+};
+
+enum class FallbackReason : std::int32_t {
+    none = 0,
+    camera_cut = 1,
+    stale_source = 2,
+    no_source_frame = 3,
 };
 
 enum class RuntimeEventType : std::int32_t {
@@ -47,6 +74,7 @@ enum class RuntimeEventType : std::int32_t {
     scene_resumed = 5,
     scene_reset = 6,
     config_updated = 7,
+    reprojection_fallback = 8,
 };
 
 struct RuntimeEvent {
@@ -65,9 +93,17 @@ struct RuntimeFrameSample {
     std::int64_t source_age_us;
     std::int64_t scene_gpu_us;
     std::int64_t present_gpu_us;
+    std::uint32_t invalid_pixel_count;
+    std::uint32_t total_pixel_count;
+    std::int32_t presentation_mode;
+    std::int32_t frame_kind;
+    std::int32_t fallback_reason;
     std::int32_t diagnostic_view;
     std::int32_t camera_path;
     std::int32_t stress_level;
+    std::int32_t source_divider;
+    std::int32_t source_rendered;
+    std::int32_t gpu_slot_warped;
     std::int32_t discontinuity;
 };
 
@@ -81,16 +117,28 @@ struct RuntimeState {
     std::int64_t scene_time_ms;
     std::int64_t source_frame_id;
     std::int64_t display_frame_id;
+    std::int64_t rendered_frame_count;
+    std::int64_t repeated_frame_count;
+    std::int64_t warped_frame_count;
+    std::int64_t fallback_frame_count;
     std::int64_t last_present_interval_us;
     std::int64_t last_source_age_us;
     std::int64_t last_scene_gpu_us;
     std::int64_t last_present_gpu_us;
+    std::uint32_t last_invalid_pixel_count;
+    std::uint32_t last_total_pixel_count;
+    std::int32_t presentation_mode;
+    std::int32_t source_divider;
+    std::int32_t vsync_enabled;
+    std::int32_t allow_tearing_enabled;
+    std::int32_t waitable_swap_chain;
     std::int32_t diagnostic_view;
     std::int32_t camera_path;
     std::int32_t stress_level;
     std::int32_t overlay_enabled;
     std::int32_t gpu_timing_available;
     std::int32_t event_count;
+    std::int32_t reserved;
     std::int64_t trace_count;
     RuntimeEvent events[runtime_event_capacity];
     RuntimeFrameSample trace[runtime_frame_trace_capacity];
@@ -109,6 +157,36 @@ inline const char* runtime_event_name(std::int32_t event_type) {
         case RuntimeEventType::scene_resumed: return "scene_resumed";
         case RuntimeEventType::scene_reset: return "scene_reset";
         case RuntimeEventType::config_updated: return "config_updated";
+        case RuntimeEventType::reprojection_fallback: return "reprojection_fallback";
+        default: return "unknown";
+    }
+}
+
+inline const char* presentation_mode_name(std::int32_t mode) {
+    switch (static_cast<PresentationMode>(mode)) {
+        case PresentationMode::full_render: return "full_render";
+        case PresentationMode::repeat: return "repeat";
+        case PresentationMode::reproject: return "reproject";
+        default: return "unknown";
+    }
+}
+
+inline const char* frame_kind_name(std::int32_t kind) {
+    switch (static_cast<FrameKind>(kind)) {
+        case FrameKind::rendered: return "rendered";
+        case FrameKind::repeated: return "repeated";
+        case FrameKind::warped: return "warped";
+        case FrameKind::fallback: return "fallback";
+        default: return "unknown";
+    }
+}
+
+inline const char* fallback_reason_name(std::int32_t reason) {
+    switch (static_cast<FallbackReason>(reason)) {
+        case FallbackReason::none: return "none";
+        case FallbackReason::camera_cut: return "camera_cut";
+        case FallbackReason::stale_source: return "stale_source";
+        case FallbackReason::no_source_frame: return "no_source_frame";
         default: return "unknown";
     }
 }
@@ -118,6 +196,7 @@ inline const char* diagnostic_view_name(std::int32_t view) {
         case DiagnosticView::final_color: return "final";
         case DiagnosticView::depth: return "depth";
         case DiagnosticView::motion_vectors: return "motion";
+        case DiagnosticView::reprojection_holes: return "holes";
         default: return "unknown";
     }
 }
@@ -128,6 +207,7 @@ inline const char* camera_path_name(std::int32_t path) {
         case CameraPath::fast_pan: return "fast_pan";
         case CameraPath::occlusion_sweep: return "occlusion_sweep";
         case CameraPath::camera_cut: return "camera_cut";
+        case CameraPath::manual: return "manual";
         default: return "unknown";
     }
 }

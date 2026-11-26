@@ -1,5 +1,22 @@
 # Development log
 
+## v0.6.0 — Repeat control, depth-based late camera reprojection, waitable tearing swap chain, and hole telemetry
+
+- Added `repeat` and `reproject` presentation modes alongside `full_render`, controllable `source_divider` (1..8 display frames per full scene render), explicit frame-kind accounting (`rendered`, `repeated`, `warped`, `fallback`), safe camera-cut and stale-source fallbacks (`reprojection_fallback` events), and manual keyboard camera movement (`path=manual` using WASD + arrow keys).
+- Implemented 4-iteration depth-guided backward camera reprojection in `shaders/present.hlsl` with round-trip consistency and 4-neighbor depth-edge checks, a magenta `holes` diagnostic view, and a GPU `RWByteAddressBuffer` invalid-pixel counter (`invalid_pixel_count` and `invalid_pixel_ratio`) resolved per swap-chain slot.
+- Enabled `DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT` (`SetMaximumFrameLatency(1)`) and `DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING` when supported, plus runtime `vsync` (`on`/`off`) control.
+- Expanded CLI (`schema_version: 3`) with `set <pid>` support for `mode`, `divider`, `vsync`, and `view=holes` / `path=manual`, plus `trace <pid> [limit] summary` for compact statistical summaries.
+- Implementation surprises caught and resolved:
+  - Shader Model 5.0 pixel shader compilation failed with FXC `error X4509` when binding the stats UAV to `register(u0)` because `SV_Target0` shares slot 0; moving the UAV to `register(u1)` resolved it cleanly.
+  - Because double-buffered GPU readback lags by 2 frames, non-matching dividers (`divider=4`) initially attributed a completed warped slot's invalid-pixel count to a newly rendered frame's trace entry; adding explicit `gpu_slot_warped` tagging fixed summary attribution (45/45 warped samples at `divider=4`, 101/101 at `divider=8`).
+  - A 2.0-second `camera_cut` interval synchronized with 120 Hz * 8 = 240 frames and always landed on rendered frames after reset; changing the cut period to 1.63 s reliably exercised `camera_cut` fallback on warped frames.
+- Verified ARM64 Debug build with zero `/W4` warnings and comparative live CLI runs on `NVIDIA RTX Spark N1X` (`1264x681`, `\\.\DISPLAY6` nominal 120 Hz / 8333 µs interval):
+  - At `stress=0`: `scene_gpu_us` median 630–695 µs; unwarped `present_gpu_us` median 31–52 µs; warped `present_gpu_us` median 118–124 µs (~0.12 ms). Invalid-pixel ratio rose from median 0.079% (`occlusion_sweep`, `divider=2`, max source age 17.3 ms) to median 1.95% / max 3.99% (`fast_pan`, `divider=4`, max source age 34.5 ms).
+  - At `stress=48` (`occlusion_sweep`, VSync on): `scene_gpu_us` median ~3.80 ms. `full_render` spiked to max `cpu_present_interval_us` 16,230 µs (missed 120 Hz interval), whereas `repeat` (`divider=2`) and `reproject` (`divider=2`) held max `cpu_present_interval_us` at 9,613–9,775 µs while `reproject` added only ~43–65 µs GPU warp cost at boosted clocks.
+  - With `vsync=off` (`allow_tearing_enabled=true`), `reproject` (`divider=2`, `stress=48`) reached median `cpu_present_interval_us` 3,903 µs (min 150 µs on warp-only frames).
+  - With `camera_cut` (`divider=8`), 4 `reprojection_fallback` events (`camera_cut`) fired cleanly across the cut boundary.
+- Limitations: `cpu_present_interval_us` is Present return cadence, not physical display scanout timing (PresentMon/FrameView and verified upper-bound monitor validation remain to be integrated); single-threaded submission means scene and warp still share one direct queue; motion-vector object prediction, VRS rendering, and NVIDIA Streamline/DLSS-G ARM64 verification remain to be built.
+
 ## v0.5.0 — CPU camera simulation, offscreen G-buffer targets, GPU timing, and trace CLI
 
 - Split rendering into cohesive modules (`src/simulation.h`, `src/renderer.h`, `src/renderer.cpp`) and moved camera basis, deterministic Motion Lab paths (`corridor_sway`, `fast_pan`, `occlusion_sweep`, `camera_cut`), moving-ball kinematics, and discontinuity flags to the CPU.

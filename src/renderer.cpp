@@ -30,6 +30,15 @@ struct SceneConstantsData {
 
 struct PresentConstantsData {
     float viewport_and_flags[4];
+    float warp_flags_and_aspect[4];
+    float source_camera_position_tan_y[4];
+    float source_camera_right_unused[4];
+    float source_camera_up_unused[4];
+    float source_camera_forward_unused[4];
+    float target_camera_position_tan_y[4];
+    float target_camera_right_unused[4];
+    float target_camera_up_unused[4];
+    float target_camera_forward_unused[4];
 };
 
 static_assert(sizeof(SceneConstantsData) <= 256);
@@ -74,9 +83,15 @@ D3D12_RESOURCE_BARRIER transition_barrier(ID3D12Resource* resource, D3D12_RESOUR
     return barrier;
 }
 
-ComPtr<ID3D12Resource> create_upload_buffer(ID3D12Device* device, std::size_t size_bytes, const char* operation) {
+ComPtr<ID3D12Resource> create_buffer(
+    ID3D12Device* device,
+    D3D12_HEAP_TYPE heap_type,
+    std::size_t size_bytes,
+    D3D12_RESOURCE_FLAGS flags,
+    D3D12_RESOURCE_STATES initial_state,
+    const char* operation) {
     D3D12_HEAP_PROPERTIES heap{};
-    heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+    heap.Type = heap_type;
     D3D12_RESOURCE_DESC description{};
     description.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
     description.Width = size_bytes;
@@ -85,8 +100,9 @@ ComPtr<ID3D12Resource> create_upload_buffer(ID3D12Device* device, std::size_t si
     description.MipLevels = 1;
     description.SampleDesc.Count = 1;
     description.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    description.Flags = flags;
     ComPtr<ID3D12Resource> resource;
-    check(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &description, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&resource)), operation);
+    check(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &description, initial_state, nullptr, IID_PPV_ARGS(&resource)), operation);
     return resource;
 }
 
@@ -105,6 +121,13 @@ ComPtr<ID3D12Resource> create_offscreen_texture(ID3D12Device* device, UINT width
     ComPtr<ID3D12Resource> resource;
     check(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &description, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr, IID_PPV_ARGS(&resource)), operation);
     return resource;
+}
+
+void write_float4(float (&destination)[4], Float3 vector, float w) {
+    destination[0] = vector.x;
+    destination[1] = vector.y;
+    destination[2] = vector.z;
+    destination[3] = w;
 }
 
 }
@@ -128,6 +151,14 @@ Renderer::Renderer(HWND window)
     }
 #endif
     check(CreateDXGIFactory2(flags, IID_PPV_ARGS(&factory_)), "Create DXGI factory");
+    ComPtr<IDXGIFactory5> factory5;
+    if (SUCCEEDED(factory_.As(&factory5))) {
+        BOOL tearing = FALSE;
+        if (SUCCEEDED(factory5->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING, &tearing, sizeof(tearing)))) {
+            allow_tearing_supported_ = tearing != FALSE;
+        }
+    }
+
     check(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device_)), "Create D3D12 device");
     D3D12_COMMAND_QUEUE_DESC queue_description{};
     queue_description.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
@@ -140,6 +171,11 @@ Renderer::Renderer(HWND window)
     const UINT initial_width = std::max<UINT>(1, static_cast<UINT>(client_rectangle.right - client_rectangle.left));
     const UINT initial_height = std::max<UINT>(1, static_cast<UINT>(client_rectangle.bottom - client_rectangle.top));
 
+    swap_chain_flags_ = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
+    if (allow_tearing_supported_) {
+        swap_chain_flags_ |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+    }
+
     DXGI_SWAP_CHAIN_DESC1 swap_chain_description{};
     swap_chain_description.Width = initial_width;
     swap_chain_description.Height = initial_height;
@@ -148,10 +184,14 @@ Renderer::Renderer(HWND window)
     swap_chain_description.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     swap_chain_description.BufferCount = swap_chain_buffer_count;
     swap_chain_description.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+    swap_chain_description.Flags = swap_chain_flags_;
+
     ComPtr<IDXGISwapChain1> swap_chain;
     check(factory_->CreateSwapChainForHwnd(queue_.Get(), window, &swap_chain_description, nullptr, nullptr, &swap_chain), "Create swap chain");
     check(swap_chain.As(&swap_chain_), "Query swap chain");
     check(factory_->MakeWindowAssociation(window, DXGI_MWA_NO_ALT_ENTER), "Configure window association");
+    check(swap_chain_->SetMaximumFrameLatency(1), "Set maximum frame latency");
+    frame_latency_waitable_object_ = swap_chain_->GetFrameLatencyWaitableObject();
 
     D3D12_DESCRIPTOR_HEAP_DESC rtv_heap_description{};
     rtv_heap_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
@@ -179,6 +219,7 @@ Renderer::Renderer(HWND window)
     create_offscreen_targets();
     create_constant_buffers();
     create_timestamp_resources();
+    create_reprojection_stats_resources();
     create_pipelines();
 }
 
@@ -189,81 +230,83 @@ Renderer::~Renderer() noexcept {
         } catch (...) {
         }
     }
+    if (frame_latency_waitable_object_) {
+        CloseHandle(frame_latency_waitable_object_);
+        frame_latency_waitable_object_ = nullptr;
+    }
 }
 
 FrameExecutionMetrics Renderer::render_and_present(const FrameRenderRequest& request) {
+    FrameExecutionMetrics metrics{-1, -1, 0, 0, false, false, false, gpu_timing_available()};
     if (viewport_width_ == 0 || viewport_height_ == 0) {
-        return FrameExecutionMetrics{last_scene_gpu_us_, last_present_gpu_us_, gpu_timing_available()};
+        return metrics;
+    }
+
+    if (frame_latency_waitable_object_) {
+        WaitForSingleObjectEx(frame_latency_waitable_object_, 1000, TRUE);
     }
 
     const UINT buffer_index = swap_chain_->GetCurrentBackBufferIndex();
     wait_for_fence(buffer_fence_values_[buffer_index]);
 
-    if (buffer_has_timestamps_[buffer_index] && mapped_timestamps_ && gpu_timestamp_frequency_ > 0) {
-        const std::size_t base_index = static_cast<std::size_t>(buffer_index) * timestamps_per_frame;
-        const std::uint64_t scene_begin = mapped_timestamps_[base_index + 0];
-        const std::uint64_t scene_end = mapped_timestamps_[base_index + 1];
-        const std::uint64_t present_begin = mapped_timestamps_[base_index + 2];
-        const std::uint64_t present_end = mapped_timestamps_[base_index + 3];
-        if (scene_end >= scene_begin) {
-            last_scene_gpu_us_ = static_cast<std::int64_t>(((scene_end - scene_begin) * 1000000ULL) / gpu_timestamp_frequency_);
+    if (buffer_has_data_[buffer_index]) {
+        metrics.completed_slot_valid = true;
+        metrics.completed_slot_source_rendered = buffer_source_rendered_[buffer_index];
+        metrics.completed_slot_warped = buffer_warped_[buffer_index];
+        metrics.completed_total_pixel_count = buffer_total_pixels_[buffer_index];
+        if (mapped_timestamps_ && gpu_timestamp_frequency_ > 0) {
+            const std::size_t base_index = static_cast<std::size_t>(buffer_index) * timestamps_per_frame;
+            const std::uint64_t scene_begin = mapped_timestamps_[base_index + 0];
+            const std::uint64_t scene_end = mapped_timestamps_[base_index + 1];
+            const std::uint64_t present_begin = mapped_timestamps_[base_index + 2];
+            const std::uint64_t present_end = mapped_timestamps_[base_index + 3];
+            if (buffer_source_rendered_[buffer_index] && scene_end >= scene_begin) {
+                metrics.completed_scene_gpu_us = static_cast<std::int64_t>(((scene_end - scene_begin) * 1000000ULL) / gpu_timestamp_frequency_);
+            }
+            if (present_end >= present_begin) {
+                metrics.completed_present_gpu_us = static_cast<std::int64_t>(((present_end - present_begin) * 1000000ULL) / gpu_timestamp_frequency_);
+            }
         }
-        if (present_end >= present_begin) {
-            last_present_gpu_us_ = static_cast<std::int64_t>(((present_end - present_begin) * 1000000ULL) / gpu_timestamp_frequency_);
+        if (buffer_warped_[buffer_index] && mapped_reprojection_stats_) {
+            metrics.completed_invalid_pixel_count = mapped_reprojection_stats_[buffer_index];
         }
     }
 
     const float aspect_ratio = static_cast<float>(viewport_width_) / static_cast<float>(viewport_height_);
-    SceneConstantsData scene_constants{};
-    scene_constants.camera_position_tan_y[0] = request.snapshot.camera.position.x;
-    scene_constants.camera_position_tan_y[1] = request.snapshot.camera.position.y;
-    scene_constants.camera_position_tan_y[2] = request.snapshot.camera.position.z;
-    scene_constants.camera_position_tan_y[3] = request.snapshot.camera.tan_half_fov_y;
-    scene_constants.camera_right_aspect[0] = request.snapshot.camera.right.x;
-    scene_constants.camera_right_aspect[1] = request.snapshot.camera.right.y;
-    scene_constants.camera_right_aspect[2] = request.snapshot.camera.right.z;
-    scene_constants.camera_right_aspect[3] = aspect_ratio;
-    scene_constants.camera_up_width[0] = request.snapshot.camera.up.x;
-    scene_constants.camera_up_width[1] = request.snapshot.camera.up.y;
-    scene_constants.camera_up_width[2] = request.snapshot.camera.up.z;
-    scene_constants.camera_up_width[3] = static_cast<float>(viewport_width_);
-    scene_constants.camera_forward_height[0] = request.snapshot.camera.forward.x;
-    scene_constants.camera_forward_height[1] = request.snapshot.camera.forward.y;
-    scene_constants.camera_forward_height[2] = request.snapshot.camera.forward.z;
-    scene_constants.camera_forward_height[3] = static_cast<float>(viewport_height_);
-    scene_constants.previous_camera_position_tan_y[0] = request.snapshot.previous_camera.position.x;
-    scene_constants.previous_camera_position_tan_y[1] = request.snapshot.previous_camera.position.y;
-    scene_constants.previous_camera_position_tan_y[2] = request.snapshot.previous_camera.position.z;
-    scene_constants.previous_camera_position_tan_y[3] = request.snapshot.previous_camera.tan_half_fov_y;
-    scene_constants.previous_camera_right_aspect[0] = request.snapshot.previous_camera.right.x;
-    scene_constants.previous_camera_right_aspect[1] = request.snapshot.previous_camera.right.y;
-    scene_constants.previous_camera_right_aspect[2] = request.snapshot.previous_camera.right.z;
-    scene_constants.previous_camera_right_aspect[3] = aspect_ratio;
-    scene_constants.previous_camera_up_cut[0] = request.snapshot.previous_camera.up.x;
-    scene_constants.previous_camera_up_cut[1] = request.snapshot.previous_camera.up.y;
-    scene_constants.previous_camera_up_cut[2] = request.snapshot.previous_camera.up.z;
-    scene_constants.previous_camera_up_cut[3] = request.snapshot.discontinuity ? 1.0f : 0.0f;
-    scene_constants.previous_camera_forward_unused[0] = request.snapshot.previous_camera.forward.x;
-    scene_constants.previous_camera_forward_unused[1] = request.snapshot.previous_camera.forward.y;
-    scene_constants.previous_camera_forward_unused[2] = request.snapshot.previous_camera.forward.z;
-    scene_constants.previous_camera_forward_unused[3] = 0.0f;
-    scene_constants.ball_center_stress[0] = request.snapshot.ball_center.x;
-    scene_constants.ball_center_stress[1] = request.snapshot.ball_center.y;
-    scene_constants.ball_center_stress[2] = request.snapshot.ball_center.z;
-    scene_constants.ball_center_stress[3] = static_cast<float>(request.stress_level);
-    scene_constants.previous_ball_center_unused[0] = request.snapshot.previous_ball_center.x;
-    scene_constants.previous_ball_center_unused[1] = request.snapshot.previous_ball_center.y;
-    scene_constants.previous_ball_center_unused[2] = request.snapshot.previous_ball_center.z;
-    scene_constants.previous_ball_center_unused[3] = 0.0f;
-
     const std::size_t constant_offset = static_cast<std::size_t>(buffer_index) * constant_buffer_stride;
-    std::memcpy(mapped_scene_constants_ + constant_offset, &scene_constants, sizeof(scene_constants));
+
+    if (request.render_scene_pass) {
+        SceneConstantsData scene_constants{};
+        write_float4(scene_constants.camera_position_tan_y, request.source_snapshot.camera.position, request.source_snapshot.camera.tan_half_fov_y);
+        write_float4(scene_constants.camera_right_aspect, request.source_snapshot.camera.right, aspect_ratio);
+        write_float4(scene_constants.camera_up_width, request.source_snapshot.camera.up, static_cast<float>(viewport_width_));
+        write_float4(scene_constants.camera_forward_height, request.source_snapshot.camera.forward, static_cast<float>(viewport_height_));
+        write_float4(scene_constants.previous_camera_position_tan_y, request.source_snapshot.previous_camera.position, request.source_snapshot.previous_camera.tan_half_fov_y);
+        write_float4(scene_constants.previous_camera_right_aspect, request.source_snapshot.previous_camera.right, aspect_ratio);
+        write_float4(scene_constants.previous_camera_up_cut, request.source_snapshot.previous_camera.up, request.source_snapshot.discontinuity ? 1.0f : 0.0f);
+        write_float4(scene_constants.previous_camera_forward_unused, request.source_snapshot.previous_camera.forward, 0.0f);
+        write_float4(scene_constants.ball_center_stress, request.source_snapshot.ball_center, static_cast<float>(request.stress_level));
+        write_float4(scene_constants.previous_ball_center_unused, request.source_snapshot.previous_ball_center, 0.0f);
+        std::memcpy(mapped_scene_constants_ + constant_offset, &scene_constants, sizeof(scene_constants));
+    }
 
     PresentConstantsData present_constants{};
     present_constants.viewport_and_flags[0] = static_cast<float>(viewport_width_);
     present_constants.viewport_and_flags[1] = static_cast<float>(viewport_height_);
     present_constants.viewport_and_flags[2] = static_cast<float>(static_cast<std::int32_t>(request.diagnostic_view));
     present_constants.viewport_and_flags[3] = request.overlay_enabled ? 1.0f : 0.0f;
+    present_constants.warp_flags_and_aspect[0] = request.warp_enabled ? 1.0f : 0.0f;
+    present_constants.warp_flags_and_aspect[1] = aspect_ratio;
+    present_constants.warp_flags_and_aspect[2] = 0.0f;
+    present_constants.warp_flags_and_aspect[3] = 0.0f;
+    write_float4(present_constants.source_camera_position_tan_y, request.source_snapshot.camera.position, request.source_snapshot.camera.tan_half_fov_y);
+    write_float4(present_constants.source_camera_right_unused, request.source_snapshot.camera.right, 0.0f);
+    write_float4(present_constants.source_camera_up_unused, request.source_snapshot.camera.up, 0.0f);
+    write_float4(present_constants.source_camera_forward_unused, request.source_snapshot.camera.forward, 0.0f);
+    write_float4(present_constants.target_camera_position_tan_y, request.target_camera.position, request.target_camera.tan_half_fov_y);
+    write_float4(present_constants.target_camera_right_unused, request.target_camera.right, 0.0f);
+    write_float4(present_constants.target_camera_up_unused, request.target_camera.up, 0.0f);
+    write_float4(present_constants.target_camera_forward_unused, request.target_camera.forward, 0.0f);
     std::memcpy(mapped_present_constants_ + constant_offset, &present_constants, sizeof(present_constants));
 
     check(command_allocators_[buffer_index]->Reset(), "Reset command allocator");
@@ -306,6 +349,15 @@ FrameExecutionMetrics Renderer::render_and_present(const FrameRenderRequest& req
 
     if (timestamp_query_heap_) {
         command_list_->EndQuery(timestamp_query_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, query_base + 1);
+    }
+
+    const auto stats_to_copy_dest = transition_barrier(reprojection_stats_uav_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST);
+    command_list_->ResourceBarrier(1, &stats_to_copy_dest);
+    command_list_->CopyBufferRegion(reprojection_stats_uav_.Get(), 0, reprojection_stats_zero_upload_.Get(), 0, sizeof(std::uint32_t));
+    const auto stats_to_uav = transition_barrier(reprojection_stats_uav_.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    command_list_->ResourceBarrier(1, &stats_to_uav);
+
+    if (timestamp_query_heap_) {
         command_list_->EndQuery(timestamp_query_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, query_base + 2);
     }
 
@@ -322,6 +374,7 @@ FrameExecutionMetrics Renderer::render_and_present(const FrameRenderRequest& req
     command_list_->SetPipelineState(present_pipeline_.Get());
     command_list_->SetGraphicsRootConstantBufferView(0, present_constant_buffer_->GetGPUVirtualAddress() + constant_offset);
     command_list_->SetGraphicsRootDescriptorTable(1, shader_resource_heap_->GetGPUDescriptorHandleForHeapStart());
+    command_list_->SetGraphicsRootUnorderedAccessView(2, reprojection_stats_uav_->GetGPUVirtualAddress());
     command_list_->DrawInstanced(3, 1, 0, 0);
 
     const auto back_buffer_to_present = transition_barrier(render_targets_[buffer_index].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
@@ -336,18 +389,36 @@ FrameExecutionMetrics Renderer::render_and_present(const FrameRenderRequest& req
             timestamps_per_frame,
             timestamp_readback_buffer_.Get(),
             static_cast<UINT64>(query_base) * sizeof(std::uint64_t));
-        buffer_has_timestamps_[buffer_index] = true;
     }
+
+    const auto stats_to_copy_source = transition_barrier(reprojection_stats_uav_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    command_list_->ResourceBarrier(1, &stats_to_copy_source);
+    command_list_->CopyBufferRegion(
+        reprojection_stats_readback_.Get(),
+        static_cast<UINT64>(buffer_index) * sizeof(std::uint32_t),
+        reprojection_stats_uav_.Get(),
+        0,
+        sizeof(std::uint32_t));
+    const auto stats_restore_uav = transition_barrier(reprojection_stats_uav_.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    command_list_->ResourceBarrier(1, &stats_restore_uav);
 
     check(command_list_->Close(), "Close command list");
     ID3D12CommandList* command_lists[] = {command_list_.Get()};
     queue_->ExecuteCommandLists(1, command_lists);
-    check(swap_chain_->Present(1, 0), "Present");
+
+    const UINT sync_interval = request.vsync_enabled ? 1U : 0U;
+    const UINT present_flags = (!request.vsync_enabled && allow_tearing_supported_) ? DXGI_PRESENT_ALLOW_TEARING : 0U;
+    check(swap_chain_->Present(sync_interval, present_flags), "Present");
+
     const auto value = next_fence_value_++;
     check(queue_->Signal(fence_.Get(), value), "Signal frame fence");
     buffer_fence_values_[buffer_index] = value;
+    buffer_has_data_[buffer_index] = true;
+    buffer_source_rendered_[buffer_index] = request.render_scene_pass;
+    buffer_warped_[buffer_index] = request.warp_enabled;
+    buffer_total_pixels_[buffer_index] = viewport_width_ * viewport_height_;
 
-    return FrameExecutionMetrics{last_scene_gpu_us_, last_present_gpu_us_, gpu_timing_available()};
+    return metrics;
 }
 
 void Renderer::resize(UINT width, UINT height) {
@@ -357,11 +428,14 @@ void Renderer::resize(UINT width, UINT height) {
     scene_color_target_.Reset();
     scene_depth_target_.Reset();
     scene_motion_target_.Reset();
-    check(swap_chain_->ResizeBuffers(swap_chain_buffer_count, width, height, DXGI_FORMAT_R8G8B8A8_UNORM, 0), "Resize swap chain");
+    check(swap_chain_->ResizeBuffers(swap_chain_buffer_count, width, height, DXGI_FORMAT_R8G8B8A8_UNORM, swap_chain_flags_), "Resize swap chain");
     viewport_width_ = width;
     viewport_height_ = height;
     buffer_fence_values_.fill(0);
-    buffer_has_timestamps_.fill(false);
+    buffer_has_data_.fill(false);
+    buffer_source_rendered_.fill(false);
+    buffer_warped_.fill(false);
+    buffer_total_pixels_.fill(0);
     create_swap_chain_targets();
     create_offscreen_targets();
 }
@@ -421,7 +495,7 @@ void Renderer::create_pipelines() {
     srv_range.BaseShaderRegister = 0;
     srv_range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
 
-    std::array<D3D12_ROOT_PARAMETER, 2> present_parameters{};
+    std::array<D3D12_ROOT_PARAMETER, 3> present_parameters{};
     present_parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
     present_parameters[0].Descriptor.ShaderRegister = 0;
     present_parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
@@ -429,22 +503,29 @@ void Renderer::create_pipelines() {
     present_parameters[1].DescriptorTable.NumDescriptorRanges = 1;
     present_parameters[1].DescriptorTable.pDescriptorRanges = &srv_range;
     present_parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    present_parameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+    present_parameters[2].Descriptor.ShaderRegister = 1;
+    present_parameters[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
-    D3D12_STATIC_SAMPLER_DESC sampler{};
-    sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
-    sampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-    sampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-    sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-    sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
-    sampler.MaxLOD = D3D12_FLOAT32_MAX;
-    sampler.ShaderRegister = 0;
-    sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    std::array<D3D12_STATIC_SAMPLER_DESC, 2> samplers{};
+    samplers[0].Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    samplers[0].AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    samplers[0].AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    samplers[0].AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    samplers[0].ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
+    samplers[0].MaxLOD = D3D12_FLOAT32_MAX;
+    samplers[0].ShaderRegister = 0;
+    samplers[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    samplers[1] = samplers[0];
+    samplers[1].Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+    samplers[1].ShaderRegister = 1;
 
     D3D12_ROOT_SIGNATURE_DESC present_root_description{};
     present_root_description.NumParameters = static_cast<UINT>(present_parameters.size());
     present_root_description.pParameters = present_parameters.data();
-    present_root_description.NumStaticSamplers = 1;
-    present_root_description.pStaticSamplers = &sampler;
+    present_root_description.NumStaticSamplers = static_cast<UINT>(samplers.size());
+    present_root_description.pStaticSamplers = samplers.data();
     present_root_description.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
 
     serialized_root.Reset();
@@ -472,8 +553,8 @@ void Renderer::create_pipelines() {
 
 void Renderer::create_constant_buffers() {
     const std::size_t total_size = static_cast<std::size_t>(swap_chain_buffer_count) * constant_buffer_stride;
-    scene_constant_buffer_ = create_upload_buffer(device_.Get(), total_size, "Create scene constant buffer");
-    present_constant_buffer_ = create_upload_buffer(device_.Get(), total_size, "Create present constant buffer");
+    scene_constant_buffer_ = create_buffer(device_.Get(), D3D12_HEAP_TYPE_UPLOAD, total_size, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ, "Create scene constant buffer");
+    present_constant_buffer_ = create_buffer(device_.Get(), D3D12_HEAP_TYPE_UPLOAD, total_size, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ, "Create present constant buffer");
     D3D12_RANGE empty_range{0, 0};
     check(scene_constant_buffer_->Map(0, &empty_range, reinterpret_cast<void**>(&mapped_scene_constants_)), "Map scene constant buffer");
     check(present_constant_buffer_->Map(0, &empty_range, reinterpret_cast<void**>(&mapped_present_constants_)), "Map present constant buffer");
@@ -491,26 +572,49 @@ void Renderer::create_timestamp_resources() {
         gpu_timestamp_frequency_ = 0;
         return;
     }
-    D3D12_HEAP_PROPERTIES readback_heap{};
-    readback_heap.Type = D3D12_HEAP_TYPE_READBACK;
-    D3D12_RESOURCE_DESC buffer_description{};
-    buffer_description.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-    buffer_description.Width = static_cast<UINT64>(query_heap_description.Count) * sizeof(std::uint64_t);
-    buffer_description.Height = 1;
-    buffer_description.DepthOrArraySize = 1;
-    buffer_description.MipLevels = 1;
-    buffer_description.SampleDesc.Count = 1;
-    buffer_description.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-    if (FAILED(device_->CreateCommittedResource(&readback_heap, D3D12_HEAP_FLAG_NONE, &buffer_description, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&timestamp_readback_buffer_)))) {
-        timestamp_query_heap_.Reset();
-        gpu_timestamp_frequency_ = 0;
-        return;
-    }
+    timestamp_readback_buffer_ = create_buffer(
+        device_.Get(),
+        D3D12_HEAP_TYPE_READBACK,
+        static_cast<std::size_t>(query_heap_description.Count) * sizeof(std::uint64_t),
+        D3D12_RESOURCE_FLAG_NONE,
+        D3D12_RESOURCE_STATE_COPY_DEST,
+        "Create timestamp readback buffer");
     if (FAILED(timestamp_readback_buffer_->Map(0, nullptr, reinterpret_cast<void**>(const_cast<std::uint64_t**>(&mapped_timestamps_))))) {
         timestamp_readback_buffer_.Reset();
         timestamp_query_heap_.Reset();
         gpu_timestamp_frequency_ = 0;
     }
+}
+
+void Renderer::create_reprojection_stats_resources() {
+    reprojection_stats_uav_ = create_buffer(
+        device_.Get(),
+        D3D12_HEAP_TYPE_DEFAULT,
+        16,
+        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+        "Create reprojection stats UAV");
+    reprojection_stats_zero_upload_ = create_buffer(
+        device_.Get(),
+        D3D12_HEAP_TYPE_UPLOAD,
+        16,
+        D3D12_RESOURCE_FLAG_NONE,
+        D3D12_RESOURCE_STATE_GENERIC_READ,
+        "Create reprojection stats zero buffer");
+    void* zero_pointer = nullptr;
+    D3D12_RANGE empty_range{0, 0};
+    check(reprojection_stats_zero_upload_->Map(0, &empty_range, &zero_pointer), "Map reprojection stats zero buffer");
+    std::memset(zero_pointer, 0, 16);
+    reprojection_stats_zero_upload_->Unmap(0, nullptr);
+
+    reprojection_stats_readback_ = create_buffer(
+        device_.Get(),
+        D3D12_HEAP_TYPE_READBACK,
+        static_cast<std::size_t>(swap_chain_buffer_count) * sizeof(std::uint32_t),
+        D3D12_RESOURCE_FLAG_NONE,
+        D3D12_RESOURCE_STATE_COPY_DEST,
+        "Create reprojection stats readback buffer");
+    check(reprojection_stats_readback_->Map(0, nullptr, reinterpret_cast<void**>(const_cast<std::uint32_t**>(&mapped_reprojection_stats_))), "Map reprojection stats readback buffer");
 }
 
 void Renderer::create_swap_chain_targets() {

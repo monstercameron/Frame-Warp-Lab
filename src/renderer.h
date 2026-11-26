@@ -16,15 +16,23 @@ namespace frame_warp_lab {
 struct FrameExecutionMetrics {
     std::int64_t completed_scene_gpu_us;
     std::int64_t completed_present_gpu_us;
+    std::uint32_t completed_invalid_pixel_count;
+    std::uint32_t completed_total_pixel_count;
+    bool completed_slot_valid;
+    bool completed_slot_source_rendered;
+    bool completed_slot_warped;
     bool gpu_timing_available;
 };
 
 struct FrameRenderRequest {
-    SceneSnapshot snapshot;
+    SceneSnapshot source_snapshot;
+    CameraBasis target_camera;
     DiagnosticView diagnostic_view;
     std::int32_t stress_level;
     bool overlay_enabled;
     bool render_scene_pass;
+    bool warp_enabled;
+    bool vsync_enabled;
 };
 
 class Renderer {
@@ -39,6 +47,8 @@ public:
     void resize(UINT width, UINT height);
     void flush();
     bool gpu_timing_available() const { return gpu_timestamp_frequency_ > 0; }
+    bool allow_tearing_enabled() const { return allow_tearing_supported_; }
+    bool waitable_swap_chain_enabled() const { return frame_latency_waitable_object_ != nullptr; }
 
 private:
     static constexpr UINT swap_chain_buffer_count = 2;
@@ -60,11 +70,13 @@ private:
     void create_pipelines();
     void create_constant_buffers();
     void create_timestamp_resources();
+    void create_reprojection_stats_resources();
     void create_swap_chain_targets();
     void create_offscreen_targets();
     void wait_for_fence(std::uint64_t value);
 
     OsHandle fence_completion_event_;
+    HANDLE frame_latency_waitable_object_ = nullptr;
     Microsoft::WRL::ComPtr<IDXGIFactory4> factory_;
     Microsoft::WRL::ComPtr<ID3D12Device> device_;
     Microsoft::WRL::ComPtr<ID3D12CommandQueue> queue_;
@@ -90,11 +102,18 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Resource> timestamp_readback_buffer_;
     const std::uint64_t* mapped_timestamps_ = nullptr;
     std::uint64_t gpu_timestamp_frequency_ = 0;
+    Microsoft::WRL::ComPtr<ID3D12Resource> reprojection_stats_uav_;
+    Microsoft::WRL::ComPtr<ID3D12Resource> reprojection_stats_zero_upload_;
+    Microsoft::WRL::ComPtr<ID3D12Resource> reprojection_stats_readback_;
+    const std::uint32_t* mapped_reprojection_stats_ = nullptr;
     std::array<std::uint64_t, swap_chain_buffer_count> buffer_fence_values_{};
-    std::array<bool, swap_chain_buffer_count> buffer_has_timestamps_{};
+    std::array<bool, swap_chain_buffer_count> buffer_has_data_{};
+    std::array<bool, swap_chain_buffer_count> buffer_source_rendered_{};
+    std::array<bool, swap_chain_buffer_count> buffer_warped_{};
+    std::array<std::uint32_t, swap_chain_buffer_count> buffer_total_pixels_{};
     std::uint64_t next_fence_value_ = 1;
-    std::int64_t last_scene_gpu_us_ = -1;
-    std::int64_t last_present_gpu_us_ = -1;
+    UINT swap_chain_flags_ = 0;
+    bool allow_tearing_supported_ = false;
     UINT render_target_descriptor_stride_ = 0;
     UINT shader_resource_descriptor_stride_ = 0;
     UINT viewport_width_ = 0;

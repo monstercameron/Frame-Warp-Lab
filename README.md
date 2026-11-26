@@ -6,7 +6,7 @@ Read [experiment-plan.md](experiment-plan.md) for the prioritized experiment, [r
 
 ## Current baseline
 
-The native application renders a CPU-driven procedural Motion Lab scene with selectable deterministic camera paths (`corridor_sway`, `fast_pan`, `occlusion_sweep`, `camera_cut`), occluding pillars, moving ball, fine rail, controllable synthetic shading stress, and offscreen linear color, linear view-space depth and 2D screen-space motion-vector targets. A second pass composites tone-mapped output (or depth/motion diagnostic views) and a toggleable late reticle onto a double-buffered D3D12 flip-discard swap chain with VSync, GPU timestamp queries, resize handling and explicit fence synchronization. It does not yet provide repeat/reprojection presentation modes, displayed-frame scanout verification, NVIDIA frame generation, VRS rendering, or adaptive pacing. It is not a benchmark. See [DEVLOG.md](DEVLOG.md) for development history.
+The native application renders a CPU-driven procedural Motion Lab scene with selectable deterministic camera paths (`corridor_sway`, `fast_pan`, `occlusion_sweep`, `camera_cut`) and manual keyboard movement (`manual`: WASD + arrow keys), occluding pillars, moving ball, fine rail, controllable synthetic shading stress, and offscreen linear color, linear view-space depth and 2D screen-space motion-vector targets. A second presentation pass supports `full_render`, `repeat`, and depth-based late camera `reproject` modes (with `source_divider` 1..8, camera-cut/stale-source fallbacks, diagnostic `depth`/`motion`/`holes` views, GPU invalid-pixel counting, and a toggleable late reticle) on a waitable, tearing-capable D3D12 flip-discard swap chain with D3D12 GPU timestamp queries. It does not yet provide verified physical displayed-frame scanout timing, async multithreaded/multi-queue submission, NVIDIA frame generation, VRS rendering, or adaptive pacing. It is not a benchmark. See [DEVLOG.md](DEVLOG.md) for development history.
 
 ## Build and run on Windows ARM64
 
@@ -30,7 +30,7 @@ The console executable emits JSON and uses exit code 0 for success and 1 for err
 ./build/Debug/frame_warp_cli.exe instances
 ./build/Debug/frame_warp_cli.exe status <pid>
 ./build/Debug/frame_warp_cli.exe events <pid>
-./build/Debug/frame_warp_cli.exe trace <pid> [limit]
+./build/Debug/frame_warp_cli.exe trace <pid> [limit] [summary]
 ./build/Debug/frame_warp_cli.exe set <pid> <key> <value>
 ./build/Debug/frame_warp_cli.exe pause <pid>
 ./build/Debug/frame_warp_cli.exe resume <pid>
@@ -43,8 +43,8 @@ The console executable emits JSON and uses exit code 0 for success and 1 for err
 
 `events` reads a bounded in-memory journal of the 64 most recent runtime lifecycle, resize and scene-control events, with UTC timestamps and sequence numbers. Events are available only while the instance's shared state exists; the journal is not persisted, and detailed frame traces and error events are not yet implemented. A concurrent overwrite can cause a record to be omitted from a snapshot. Shared state uses a local Windows named mapping and the process's default security descriptor; it is intended for local inspection, not a remote interface.
 
-`trace` reads up to the 256 most recent per-frame telemetry records from the bounded in-memory ring buffer and reports min/median/p95/max summaries in microseconds for CPU Present return interval, CPU source age, and D3D12 GPU timestamp durations (`scene_gpu_us` and `present_gpu_us`). `set` updates runtime parameters asynchronously: `view` (`final`, `depth`, `motion`), `path` (`corridor_sway`, `fast_pan`, `occlusion_sweep`, `camera_cut`), `stress` (`0..64`), and `overlay` (`on`, `off`).
+`trace` reads up to the 256 most recent per-frame telemetry records from the bounded in-memory ring buffer (pass `summary` as the fifth argument to omit individual sample records) and reports frame-kind counts (`rendered`, `repeated`, `warped`, `fallback`) plus min/median/p95/max summaries for CPU Present return interval, CPU source age, D3D12 GPU timestamp durations (`scene_gpu_us` and `present_gpu_us`), and GPU-measured reprojection `invalid_pixel_ratio`. `set` updates runtime parameters asynchronously: `mode` (`full_render`, `repeat`, `reproject`), `divider` (`1..8`), `vsync` (`on`, `off`), `view` (`final`, `depth`, `motion`, `holes`), `path` (`corridor_sway`, `fast_pan`, `occlusion_sweep`, `camera_cut`, `manual`), `stress` (`0..64`), and `overlay` (`on`, `off`).
 
-The CLI does not yet manage persistent capture files, measure physical input-to-photon latency, or control reprojection, frame generation or VRS.
+The CLI does not yet manage persistent capture files, measure physical input-to-photon latency or display scanout timing, or control NVIDIA frame generation or VRS.
 
 `status` reports the Motion Lab timeline and pause state. `pause`, `resume` and `reset` queue scene-control requests; inspect `status` to confirm they were applied. Reset returns the timeline to zero and preserves the pause state. The scripted camera and ball movement are functions of scene time; real-time execution and frame sampling are not yet a deterministic capture or benchmark system.

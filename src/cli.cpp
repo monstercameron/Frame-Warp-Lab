@@ -9,6 +9,7 @@
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <string>
@@ -151,6 +152,15 @@ void print_nullable_int64(std::int64_t value) {
     else std::cout << value;
 }
 
+void print_ratio(std::uint32_t invalid_pixels, std::uint32_t total_pixels) {
+    if (total_pixels == 0) {
+        std::cout << "null";
+        return;
+    }
+    const double ratio = static_cast<double>(invalid_pixels) / static_cast<double>(total_pixels);
+    std::cout << std::fixed << std::setprecision(6) << ratio;
+}
+
 void print_metric_summary(std::vector<std::int64_t> values) {
     if (values.empty()) {
         std::cout << "null";
@@ -170,6 +180,21 @@ void print_metric_summary(std::vector<std::int64_t> values) {
               << ",\"max\":" << max_value << "}";
 }
 
+void print_double_summary(std::vector<double> values) {
+    if (values.empty()) {
+        std::cout << "null";
+        return;
+    }
+    std::sort(values.begin(), values.end());
+    const std::size_t count = values.size();
+    const std::size_t p95_index = std::min(count - 1, (count * 95) / 100);
+    std::cout << "{\"count\":" << count
+              << ",\"min\":" << std::fixed << std::setprecision(6) << values.front()
+              << ",\"median\":" << values[count / 2]
+              << ",\"p95\":" << values[p95_index]
+              << ",\"max\":" << values.back() << "}";
+}
+
 int print_status(const WindowInstance& instance) {
     RuntimeStateView state_view;
     const char* error_code = nullptr;
@@ -183,10 +208,21 @@ int print_status(const WindowInstance& instance) {
     const std::int32_t scene_paused = std::atomic_ref<std::int32_t>(state->scene_paused).load(std::memory_order_acquire);
     const std::int64_t source_frame_id = std::atomic_ref<std::int64_t>(state->source_frame_id).load(std::memory_order_acquire);
     const std::int64_t display_frame_id = std::atomic_ref<std::int64_t>(state->display_frame_id).load(std::memory_order_acquire);
+    const std::int64_t rendered_frames = std::atomic_ref<std::int64_t>(state->rendered_frame_count).load(std::memory_order_acquire);
+    const std::int64_t repeated_frames = std::atomic_ref<std::int64_t>(state->repeated_frame_count).load(std::memory_order_acquire);
+    const std::int64_t warped_frames = std::atomic_ref<std::int64_t>(state->warped_frame_count).load(std::memory_order_acquire);
+    const std::int64_t fallback_frames = std::atomic_ref<std::int64_t>(state->fallback_frame_count).load(std::memory_order_acquire);
     const std::int64_t present_interval_us = std::atomic_ref<std::int64_t>(state->last_present_interval_us).load(std::memory_order_acquire);
     const std::int64_t source_age_us = std::atomic_ref<std::int64_t>(state->last_source_age_us).load(std::memory_order_acquire);
     const std::int64_t scene_gpu_us = std::atomic_ref<std::int64_t>(state->last_scene_gpu_us).load(std::memory_order_acquire);
     const std::int64_t present_gpu_us = std::atomic_ref<std::int64_t>(state->last_present_gpu_us).load(std::memory_order_acquire);
+    const std::uint32_t invalid_pixels = std::atomic_ref<std::uint32_t>(state->last_invalid_pixel_count).load(std::memory_order_acquire);
+    const std::uint32_t total_pixels = std::atomic_ref<std::uint32_t>(state->last_total_pixel_count).load(std::memory_order_acquire);
+    const std::int32_t presentation_mode = std::atomic_ref<std::int32_t>(state->presentation_mode).load(std::memory_order_acquire);
+    const std::int32_t source_divider = std::atomic_ref<std::int32_t>(state->source_divider).load(std::memory_order_acquire);
+    const std::int32_t vsync_enabled = std::atomic_ref<std::int32_t>(state->vsync_enabled).load(std::memory_order_acquire);
+    const std::int32_t allow_tearing_enabled = std::atomic_ref<std::int32_t>(state->allow_tearing_enabled).load(std::memory_order_acquire);
+    const std::int32_t waitable_swap_chain = std::atomic_ref<std::int32_t>(state->waitable_swap_chain).load(std::memory_order_acquire);
     const std::int32_t diagnostic_view = std::atomic_ref<std::int32_t>(state->diagnostic_view).load(std::memory_order_acquire);
     const std::int32_t camera_path = std::atomic_ref<std::int32_t>(state->camera_path).load(std::memory_order_acquire);
     const std::int32_t stress_level = std::atomic_ref<std::int32_t>(state->stress_level).load(std::memory_order_acquire);
@@ -195,17 +231,26 @@ int print_status(const WindowInstance& instance) {
 
     RECT client_rectangle{};
     const bool has_client_size = GetClientRect(instance.window, &client_rectangle) != 0;
-    std::cout << "{\"ok\":true,\"schema_version\":2,\"process_id\":" << instance.process_id
+    std::cout << "{\"ok\":true,\"schema_version\":3,\"process_id\":" << instance.process_id
               << ",\"running\":" << (running ? "true" : "false")
               << ",\"present_calls_completed\":" << present_count
               << ",\"display_frame_id\":" << display_frame_id
               << ",\"source_frame_id\":" << source_frame_id
+              << ",\"frame_counts\":{\"rendered\":" << rendered_frames
+              << ",\"repeated\":" << repeated_frames
+              << ",\"warped\":" << warped_frames
+              << ",\"fallback\":" << fallback_frames << "}"
               << ",\"resize_count\":" << resize_count << ",\"client_size_px\":";
     if (has_client_size) std::cout << "{\"width\":" << client_rectangle.right - client_rectangle.left << ",\"height\":" << client_rectangle.bottom - client_rectangle.top << "}";
     else std::cout << "null";
     std::cout << ",\"display\":";
     print_display(instance.window);
-    std::cout << ",\"presentation\":{\"mode\":\"full_render\",\"requested_sync_interval\":1,\"displayed_frame_timing\":null}"
+    std::cout << ",\"presentation\":{\"mode\":\"" << frame_warp_lab::presentation_mode_name(presentation_mode)
+              << "\",\"source_divider\":" << source_divider
+              << ",\"vsync_enabled\":" << (vsync_enabled ? "true" : "false")
+              << ",\"allow_tearing_enabled\":" << (allow_tearing_enabled ? "true" : "false")
+              << ",\"waitable_swap_chain\":" << (waitable_swap_chain ? "true" : "false")
+              << ",\"max_frame_latency\":1,\"displayed_frame_timing\":null}"
               << ",\"timing\":{\"cpu_present_interval_us\":" << present_interval_us
               << ",\"cpu_source_age_us\":" << source_age_us
               << ",\"gpu_timing_available\":" << (gpu_timing_available ? "true" : "false")
@@ -213,6 +258,9 @@ int print_status(const WindowInstance& instance) {
     print_nullable_int64(scene_gpu_us);
     std::cout << ",\"present_gpu_us\":";
     print_nullable_int64(present_gpu_us);
+    std::cout << ",\"invalid_pixel_count\":" << invalid_pixels
+              << ",\"invalid_pixel_ratio\":";
+    print_ratio(invalid_pixels, total_pixels);
     std::cout << ",\"note\":\"cpu_present_interval_us measures Present return cadence, not physical display scanout\"}"
               << ",\"scene\":{\"name\":\"motion_lab\",\"time_ms\":" << scene_time_ms
               << ",\"paused\":" << (scene_paused ? "true" : "false")
@@ -220,7 +268,7 @@ int print_status(const WindowInstance& instance) {
               << "\",\"diagnostic_view\":\"" << frame_warp_lab::diagnostic_view_name(diagnostic_view)
               << "\",\"stress_level\":" << stress_level
               << ",\"overlay_enabled\":" << (overlay_enabled ? "true" : "false") << "}"
-              << ",\"features\":{\"scene\":\"cpu_camera_gbuffer\",\"reprojection\":\"not_implemented\",\"frame_generation\":\"not_implemented\",\"vrs\":\"not_implemented\"}}\n";
+              << ",\"features\":{\"scene\":\"cpu_camera_gbuffer\",\"reprojection\":\"depth_camera_warp\",\"frame_generation\":\"not_implemented\",\"vrs\":\"not_implemented\"}}\n";
     return 0;
 }
 
@@ -233,7 +281,7 @@ int print_events(const WindowInstance& instance) {
     const std::int32_t event_count = std::atomic_ref<std::int32_t>(state->event_count).load(std::memory_order_acquire);
     const std::int32_t first_sequence = event_count > static_cast<std::int32_t>(frame_warp_lab::runtime_event_capacity)
         ? event_count - static_cast<std::int32_t>(frame_warp_lab::runtime_event_capacity) + 1 : 1;
-    std::cout << "{\"ok\":true,\"schema_version\":2,\"process_id\":" << instance.process_id
+    std::cout << "{\"ok\":true,\"schema_version\":3,\"process_id\":" << instance.process_id
               << ",\"capacity\":" << frame_warp_lab::runtime_event_capacity << ",\"total_events\":" << event_count << ",\"events\":[";
     bool first_event = true;
     for (std::int32_t sequence = first_sequence; sequence <= event_count; ++sequence) {
@@ -260,7 +308,7 @@ int print_events(const WindowInstance& instance) {
     return 0;
 }
 
-int print_trace(const WindowInstance& instance, std::size_t max_samples) {
+int print_trace(const WindowInstance& instance, std::size_t max_samples, bool include_samples) {
     RuntimeStateView state_view;
     const char* error_code = nullptr;
     const char* error_message = nullptr;
@@ -277,23 +325,18 @@ int print_trace(const WindowInstance& instance, std::size_t max_samples) {
     std::vector<std::int64_t> source_ages;
     std::vector<std::int64_t> scene_gpu_times;
     std::vector<std::int64_t> present_gpu_times;
+    std::vector<double> invalid_ratios;
+    std::int64_t rendered_count = 0;
+    std::int64_t repeated_count = 0;
+    std::int64_t warped_count = 0;
+    std::int64_t fallback_count = 0;
 
     for (std::int64_t sequence = first_sequence; sequence <= total_samples; ++sequence) {
         if (sequence <= 0) continue;
         auto& slot = state->trace[(static_cast<std::size_t>(sequence) - 1) % frame_warp_lab::runtime_frame_trace_capacity];
         if (std::atomic_ref<std::int64_t>(slot.sequence).load(std::memory_order_acquire) != sequence) continue;
-        frame_warp_lab::RuntimeFrameSample copy{};
+        frame_warp_lab::RuntimeFrameSample copy = slot;
         copy.sequence = sequence;
-        copy.display_frame_id = slot.display_frame_id;
-        copy.source_frame_id = slot.source_frame_id;
-        copy.present_interval_us = slot.present_interval_us;
-        copy.source_age_us = slot.source_age_us;
-        copy.scene_gpu_us = slot.scene_gpu_us;
-        copy.present_gpu_us = slot.present_gpu_us;
-        copy.diagnostic_view = slot.diagnostic_view;
-        copy.camera_path = slot.camera_path;
-        copy.stress_level = slot.stress_level;
-        copy.discontinuity = slot.discontinuity;
         std::atomic_thread_fence(std::memory_order_acquire);
         if (std::atomic_ref<std::int64_t>(slot.sequence).load(std::memory_order_acquire) != sequence) continue;
         captured.push_back(copy);
@@ -301,15 +344,28 @@ int print_trace(const WindowInstance& instance, std::size_t max_samples) {
         if (copy.source_age_us >= 0) source_ages.push_back(copy.source_age_us);
         if (copy.scene_gpu_us >= 0) scene_gpu_times.push_back(copy.scene_gpu_us);
         if (copy.present_gpu_us >= 0) present_gpu_times.push_back(copy.present_gpu_us);
+        if (copy.gpu_slot_warped && copy.total_pixel_count > 0) {
+            invalid_ratios.push_back(static_cast<double>(copy.invalid_pixel_count) / static_cast<double>(copy.total_pixel_count));
+        }
+        switch (static_cast<frame_warp_lab::FrameKind>(copy.frame_kind)) {
+            case frame_warp_lab::FrameKind::rendered: ++rendered_count; break;
+            case frame_warp_lab::FrameKind::repeated: ++repeated_count; break;
+            case frame_warp_lab::FrameKind::warped: ++warped_count; break;
+            case frame_warp_lab::FrameKind::fallback: ++fallback_count; break;
+        }
     }
 
-    std::cout << "{\"ok\":true,\"schema_version\":2,\"process_id\":" << instance.process_id
+    std::cout << "{\"ok\":true,\"schema_version\":3,\"process_id\":" << instance.process_id
               << ",\"capacity\":" << frame_warp_lab::runtime_frame_trace_capacity
               << ",\"total_frames_recorded\":" << total_samples
               << ",\"sample_count\":" << captured.size()
               << ",\"units\":\"microseconds\""
-              << ",\"note\":\"present_interval_us is CPU Present cadence; scene_gpu_us and present_gpu_us are D3D12 GPU timestamp durations from the completed swap-chain slot\""
-              << ",\"summary\":{\"cpu_present_interval_us\":";
+              << ",\"note\":\"cpu_present_interval_us is Present return cadence, not physical display scanout; GPU timings and invalid-pixel counts come from the completed swap-chain slot\""
+              << ",\"summary\":{\"frame_kinds\":{\"rendered\":" << rendered_count
+              << ",\"repeated\":" << repeated_count
+              << ",\"warped\":" << warped_count
+              << ",\"fallback\":" << fallback_count << "}"
+              << ",\"cpu_present_interval_us\":";
     print_metric_summary(present_intervals);
     std::cout << ",\"cpu_source_age_us\":";
     print_metric_summary(source_ages);
@@ -317,44 +373,79 @@ int print_trace(const WindowInstance& instance, std::size_t max_samples) {
     print_metric_summary(scene_gpu_times);
     std::cout << ",\"present_gpu_us\":";
     print_metric_summary(present_gpu_times);
-    std::cout << "},\"samples\":[";
-    for (std::size_t index = 0; index < captured.size(); ++index) {
-        const auto& sample = captured[index];
-        if (index) std::cout << ',';
-        std::cout << "{\"sequence\":" << sample.sequence
-                  << ",\"display_frame_id\":" << sample.display_frame_id
-                  << ",\"source_frame_id\":" << sample.source_frame_id
-                  << ",\"cpu_present_interval_us\":" << sample.present_interval_us
-                  << ",\"cpu_source_age_us\":" << sample.source_age_us
-                  << ",\"scene_gpu_us\":";
-        print_nullable_int64(sample.scene_gpu_us);
-        std::cout << ",\"present_gpu_us\":";
-        print_nullable_int64(sample.present_gpu_us);
-        std::cout << ",\"diagnostic_view\":\"" << frame_warp_lab::diagnostic_view_name(sample.diagnostic_view)
-                  << "\",\"camera_path\":\"" << frame_warp_lab::camera_path_name(sample.camera_path)
-                  << "\",\"stress_level\":" << sample.stress_level
-                  << ",\"discontinuity\":" << (sample.discontinuity ? "true" : "false") << "}";
+    std::cout << ",\"invalid_pixel_ratio\":";
+    print_double_summary(invalid_ratios);
+    std::cout << "}";
+
+    if (include_samples) {
+        std::cout << ",\"samples\":[";
+        for (std::size_t index = 0; index < captured.size(); ++index) {
+            const auto& sample = captured[index];
+            if (index) std::cout << ',';
+            std::cout << "{\"sequence\":" << sample.sequence
+                      << ",\"display_frame_id\":" << sample.display_frame_id
+                      << ",\"source_frame_id\":" << sample.source_frame_id
+                      << ",\"mode\":\"" << frame_warp_lab::presentation_mode_name(sample.presentation_mode)
+                      << "\",\"frame_kind\":\"" << frame_warp_lab::frame_kind_name(sample.frame_kind)
+                      << "\",\"fallback_reason\":\"" << frame_warp_lab::fallback_reason_name(sample.fallback_reason)
+                      << "\",\"source_rendered\":" << (sample.source_rendered ? "true" : "false")
+                      << ",\"source_divider\":" << sample.source_divider
+                      << ",\"cpu_present_interval_us\":" << sample.present_interval_us
+                      << ",\"cpu_source_age_us\":" << sample.source_age_us
+                      << ",\"scene_gpu_us\":";
+            print_nullable_int64(sample.scene_gpu_us);
+            std::cout << ",\"present_gpu_us\":";
+            print_nullable_int64(sample.present_gpu_us);
+            std::cout << ",\"invalid_pixel_count\":" << sample.invalid_pixel_count
+                      << ",\"invalid_pixel_ratio\":";
+            print_ratio(sample.invalid_pixel_count, sample.total_pixel_count);
+            std::cout << ",\"diagnostic_view\":\"" << frame_warp_lab::diagnostic_view_name(sample.diagnostic_view)
+                      << "\",\"camera_path\":\"" << frame_warp_lab::camera_path_name(sample.camera_path)
+                      << "\",\"stress_level\":" << sample.stress_level
+                      << ",\"discontinuity\":" << (sample.discontinuity ? "true" : "false") << "}";
+        }
+        std::cout << "]";
     }
-    std::cout << "]}\n";
+    std::cout << "}\n";
     return 0;
 }
 
 int apply_setting(const WindowInstance& instance, const std::wstring& key, const std::wstring& value) {
     frame_warp_lab::ControlCommand command{};
     LPARAM parameter = 0;
-    if (key == L"view") {
+    if (key == L"mode") {
+        command = frame_warp_lab::ControlCommand::set_presentation_mode;
+        if (value == L"full_render") parameter = static_cast<LPARAM>(frame_warp_lab::PresentationMode::full_render);
+        else if (value == L"repeat") parameter = static_cast<LPARAM>(frame_warp_lab::PresentationMode::repeat);
+        else if (value == L"reproject") parameter = static_cast<LPARAM>(frame_warp_lab::PresentationMode::reproject);
+        else return fail("invalid_value", "Expected mode in {full_render, repeat, reproject}");
+    } else if (key == L"divider") {
+        unsigned long parsed = 0;
+        if (!parse_unsigned_long(value.c_str(), parsed) || parsed < 1 || parsed > static_cast<unsigned long>(frame_warp_lab::max_source_divider)) {
+            return fail("invalid_value", "Expected divider integer in [1, 8]");
+        }
+        command = frame_warp_lab::ControlCommand::set_source_divider;
+        parameter = static_cast<LPARAM>(parsed);
+    } else if (key == L"vsync") {
+        command = frame_warp_lab::ControlCommand::set_vsync_enabled;
+        if (value == L"on" || value == L"1" || value == L"true") parameter = 1;
+        else if (value == L"off" || value == L"0" || value == L"false") parameter = 0;
+        else return fail("invalid_value", "Expected vsync in {on, off}");
+    } else if (key == L"view") {
         command = frame_warp_lab::ControlCommand::set_diagnostic_view;
         if (value == L"final") parameter = static_cast<LPARAM>(frame_warp_lab::DiagnosticView::final_color);
         else if (value == L"depth") parameter = static_cast<LPARAM>(frame_warp_lab::DiagnosticView::depth);
         else if (value == L"motion") parameter = static_cast<LPARAM>(frame_warp_lab::DiagnosticView::motion_vectors);
-        else return fail("invalid_value", "Expected view in {final, depth, motion}");
+        else if (value == L"holes") parameter = static_cast<LPARAM>(frame_warp_lab::DiagnosticView::reprojection_holes);
+        else return fail("invalid_value", "Expected view in {final, depth, motion, holes}");
     } else if (key == L"path") {
         command = frame_warp_lab::ControlCommand::set_camera_path;
         if (value == L"corridor_sway") parameter = static_cast<LPARAM>(frame_warp_lab::CameraPath::corridor_sway);
         else if (value == L"fast_pan") parameter = static_cast<LPARAM>(frame_warp_lab::CameraPath::fast_pan);
         else if (value == L"occlusion_sweep") parameter = static_cast<LPARAM>(frame_warp_lab::CameraPath::occlusion_sweep);
         else if (value == L"camera_cut") parameter = static_cast<LPARAM>(frame_warp_lab::CameraPath::camera_cut);
-        else return fail("invalid_value", "Expected path in {corridor_sway, fast_pan, occlusion_sweep, camera_cut}");
+        else if (value == L"manual") parameter = static_cast<LPARAM>(frame_warp_lab::CameraPath::manual);
+        else return fail("invalid_value", "Expected path in {corridor_sway, fast_pan, occlusion_sweep, camera_cut, manual}");
     } else if (key == L"stress") {
         unsigned long parsed = 0;
         if (!parse_unsigned_long(value.c_str(), parsed) || parsed > static_cast<unsigned long>(frame_warp_lab::max_stress_level)) {
@@ -368,7 +459,7 @@ int apply_setting(const WindowInstance& instance, const std::wstring& key, const
         else if (value == L"off" || value == L"0" || value == L"false") parameter = 0;
         else return fail("invalid_value", "Expected overlay in {on, off}");
     } else {
-        return fail("unknown_setting", "Supported settings are: view, path, stress, overlay");
+        return fail("unknown_setting", "Supported settings are: mode, divider, vsync, view, path, stress, overlay");
     }
 
     if (!PostMessageW(instance.window, frame_warp_lab::control_message, static_cast<WPARAM>(command), parameter)) {
@@ -440,7 +531,7 @@ int print_capabilities() {
     }
     D3D12_FEATURE_DATA_D3D12_OPTIONS6 options{};
     result = device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS6, &options, sizeof(options));
-    std::cout << "{\"ok\":true,\"schema_version\":2,\"scope\":\"new_default_d3d12_device_not_runtime_instance\",\"adapter\":";
+    std::cout << "{\"ok\":true,\"schema_version\":3,\"scope\":\"new_default_d3d12_device_not_runtime_instance\",\"adapter\":";
     print_adapter(device.Get(), factory.Get());
     std::cout << ",\"presentation\":{\"allow_tearing_query_available\":" << (tearing_query_available ? "true" : "false")
               << ",\"allow_tearing_supported\":" << (allow_tearing ? "true" : "false") << "},\"vrs\":";
@@ -456,14 +547,14 @@ int print_capabilities() {
 
 int wmain(int argument_count, wchar_t** arguments) {
     if (argument_count == 2 && std::wstring(arguments[1]) == L"help") {
-        std::cout << "{\"ok\":true,\"schema_version\":2,\"commands\":[\"help\",\"start\",\"instances\",\"status <pid>\",\"events <pid>\",\"trace <pid> [limit]\",\"set <pid> <key> <value>\",\"pause <pid>\",\"resume <pid>\",\"reset <pid>\",\"stop <pid>\",\"capabilities\"],\"settings\":{\"view\":[\"final\",\"depth\",\"motion\"],\"path\":[\"corridor_sway\",\"fast_pan\",\"occlusion_sweep\",\"camera_cut\"],\"stress\":\"0..64\",\"overlay\":[\"on\",\"off\"]}}\n";
+        std::cout << "{\"ok\":true,\"schema_version\":3,\"commands\":[\"help\",\"start\",\"instances\",\"status <pid>\",\"events <pid>\",\"trace <pid> [limit] [summary]\",\"set <pid> <key> <value>\",\"pause <pid>\",\"resume <pid>\",\"reset <pid>\",\"stop <pid>\",\"capabilities\"],\"settings\":{\"mode\":[\"full_render\",\"repeat\",\"reproject\"],\"divider\":\"1..8\",\"vsync\":[\"on\",\"off\"],\"view\":[\"final\",\"depth\",\"motion\",\"holes\"],\"path\":[\"corridor_sway\",\"fast_pan\",\"occlusion_sweep\",\"camera_cut\",\"manual\"],\"stress\":\"0..64\",\"overlay\":[\"on\",\"off\"]}}\n";
         return 0;
     }
     if (argument_count == 2 && std::wstring(arguments[1]) == L"capabilities") return print_capabilities();
     if (argument_count == 2 && std::wstring(arguments[1]) == L"start") return start_instance();
     const auto instances = find_instances();
     if (argument_count == 2 && std::wstring(arguments[1]) == L"instances") {
-        std::cout << "{\"ok\":true,\"schema_version\":2,\"instances\":[";
+        std::cout << "{\"ok\":true,\"schema_version\":3,\"instances\":[";
         for (std::size_t index = 0; index < instances.size(); ++index) {
             if (index) std::cout << ',';
             std::cout << "{\"process_id\":" << instances[index].process_id << "}";
@@ -490,16 +581,21 @@ int wmain(int argument_count, wchar_t** arguments) {
 
     if (command == L"status" && argument_count == 3) return print_status(*matched_instance);
     if (command == L"events" && argument_count == 3) return print_events(*matched_instance);
-    if (command == L"trace" && (argument_count == 3 || argument_count == 4)) {
+    if (command == L"trace" && (argument_count >= 3 && argument_count <= 5)) {
         std::size_t limit = 64;
-        if (argument_count == 4) {
+        bool include_samples = true;
+        if (argument_count >= 4) {
             unsigned long parsed_limit = 0;
             if (!parse_unsigned_long(arguments[3], parsed_limit) || parsed_limit == 0 || parsed_limit > frame_warp_lab::runtime_frame_trace_capacity) {
                 return fail("invalid_limit", "Expected trace limit in [1, 256]");
             }
             limit = static_cast<std::size_t>(parsed_limit);
         }
-        return print_trace(*matched_instance, limit);
+        if (argument_count == 5) {
+            if (std::wstring(arguments[4]) == L"summary") include_samples = false;
+            else return fail("invalid_arguments", "Expected optional fifth argument 'summary'");
+        }
+        return print_trace(*matched_instance, limit, include_samples);
     }
     if (command == L"set" && argument_count == 5) {
         return apply_setting(*matched_instance, arguments[3], arguments[4]);

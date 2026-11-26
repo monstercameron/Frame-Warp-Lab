@@ -100,7 +100,7 @@ PresentMon can capture Windows CPU, GPU and display-related metrics, but documen
 
 ## Machine observation
 
-On 26 November 2026, `nvidia-smi` reported an NVIDIA RTX Spark N1X in WDDM mode and driver 621.40; local Python is ARM64. This does not establish DLSS-G support, monitor refresh, usable SDK binaries or achievable timing. Verify those during implementation.
+On 26 November 2026, `nvidia-smi` and the D3D12 capability query reported an `NVIDIA RTX Spark N1X (6144-core Blackwell RTX GPU)` in WDDM mode (driver `621.40`, `98290 MiB` dedicated VRAM), `DXGI_FEATURE_PRESENT_ALLOW_TEARING` supported, and D3D12 Variable Rate Shading **Tier 2** (`additional_shading_rates_supported: true`, `tile_size_px: 16`). Active Windows display mode on `\\.\DISPLAY6` enumerated as `2880x1800` at nominal `120 Hz` (enumerated max `120 Hz` at active resolution; physical monitor upper bound and displayed scanout timing remain unverified). Local Python is ARM64. Initial `v0.6.0` Motion Lab runs measured depth-based camera reprojection GPU cost at ~43–124 µs (`1264x681`), with invalid/disoccluded pixel ratios scaling from ~0.08% (`occlusion_sweep`, 60->120 Hz) to ~1.95% median / ~3.99% max (`fast_pan`, 30->120 Hz). DLSS-G ARM64 binary availability and runtime support remain unverified.
 
 ## Sources
 
