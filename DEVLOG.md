@@ -1,5 +1,10 @@
 # Development log
 
+## v0.19.2 — Register PAR-1 through PAR-6 research items in research.md and experiment-plan.md
+
+- Added the six concrete Perceptually Amortized Rendering (PAR) research items (`PAR-1` priority-bucketed perceptual tile scheduler, `PAR-2` 3D STBN refresh phasing, `PAR-3` hybrid contiguous + `4×4` sub-tile interleaved shading with `3×3` sliding window, `PAR-4` TCSF-clamped TRM detail compensation, `PAR-5` authoritative vs. synthesized history firewall, and `PAR-6` matched-reference PAR quality matrix Modes A–F) to the `P0`/`P1` backlog and extended experiment sequence (`#21–26`) in `research.md` and `experiment-plan.md`.
+- Documentation-only change; verified with `git diff --check` and pushed to `main`.
+
 ## v0.19.1 — Add Perceptually Amortized Rendering (PAR) literature synthesis and experiment roadmap
 
 - Researched primary literature behind **Perceptually Amortized Rendering (PAR)** / **Deadline-Constrained Adaptive Frameless Rendering** — Bishop et al. (1994), Scher Zagier (1997), Cater et al. (2003), Dayal et al. (EGSR 2005), Andersson et al. (NVIDIA HPG 2019), Denes et al. (IEEE TVCG 2019), Wolfe et al. (NVIDIA EGSR 2022), Deodato & Melcher (*Journal of Vision* 2024), and Dixit & Sarangi (`PatchEX`, ACM TOG 2025) — and recorded concrete borrowable GPU algorithms, perceptual caveats, anti-recursive-drift invariants, and the `v0.20.0`–`v0.22.0` experiment sequence in `research.md`.

@@ -74,9 +74,22 @@ NVIDIA Streamline/DLSS-G can control its own swap chain, pacing and generated fr
 | Adaptive VRS | Essential |
 | Artifact-aware VRS | Essential |
 | Full-resolution depth and motion | Essential |
-| Selective regional repainting | High |
+| Selective regional repainting | High (implemented `v0.19.0`) |
 | Dynamic resolution | Optional fallback |
 | Temporal upscaling | Optional |
+
+## Perceptually Amortized Rendering (PAR) research items
+
+Track the following frameless/perceptual rendering items as explicit, independently verifiable experiments building on `v0.19.0`'s visibility-guided selective tile pipeline (see `research.md` for full literature notes and caveats):
+
+| ID | Priority | Research Item | Primary Source(s) | Hypothesis / Target Metric |
+| :--- | :---: | :--- | :--- | :--- |
+| **PAR-1** | P0 | **Priority-bucketed perceptual tile scheduler** (`P_i = E_i · S_i · A_i / C_i`) + `view=priority` heatmap | Dayal et al. (EGSR 2005); Cater et al. (EGSR 2003); Zagier (1997) | Replace FIFO CAS threadgroup bias with 8-bin GPU priority admission so tight budgets (`5%–20%`) always repaint reticle-area disocclusions, high-gradient edges, and aging tiles first. |
+| **PAR-2** | P0 | **3D Spatiotemporal Blue Noise (STBN) refresh phasing** | Wolfe et al. (NVIDIA, EGSR 2022) | Replace modular periodic tile hashing with a `64×64×16` 3D STBN mask to eliminate crawling refresh waves and temporal clumping. |
+| **PAR-3** | P0 | **Hybrid contiguous + `4×4` sub-tile interleaved shading with `3×3` sliding window** | Andersson et al. (NVIDIA, HPG 2019) | Repaint hard disocclusions as contiguous `16×16` tiles while interleaving background shading refreshes at `4×4` sub-tile granularity without EMA-TAA ghosting. |
+| **PAR-4** | P1 | **TCSF-clamped Temporal Resolution Multiplexing (TRM) detail compensation** | Denes, Maruszczyk, Ash & Mantiuk (IEEE TVCG 2019) | Apply flicker-bounded compensation `I + α(I - F_cached)` on freshly repainted tiles / alternating frames at `120–240+ Hz` to cancel bilinear cache softening without exceeding TCSF flicker limits. |
+| **PAR-5** | P0 | **Authoritative vs. synthesized history firewall + foreground/background repair** | Dixit & Sarangi (`PatchEX`, ACM TOG 2025) | Strictly prevent DLSS-G / warped display outputs from feeding back into the persistent scene cache, avoiding recursive geometry, motion, and lighting drift. |
+| **PAR-6** | P0 | **Matched-reference PAR quality & perceptual test matrix (Modes A–F)** | Deodato & Melcher (2024); FovVideoVDP (2021) | Compare `240 Hz native`, `60→240 Hz warp`, and `30→240/480 Hz` with `5% / 10% / 20%` priority patch budgets using matched-timestamp PSNR/SSIM/FovVideoVDP and blinded viewing under static gaze vs. smooth pursuit/fast turns. |
 
 ## Experiment progression and CLI
 
