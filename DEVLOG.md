@@ -1,5 +1,10 @@
 # Development log
 
+## v0.10.2 — Record five core architectural requirements in research docs
+
+- Added the five core architectural pillars (deadline-based scheduling beyond VSync alone, independent scene-rendering and reprojection queues, GPU execution headroom reservation, actual displayed-frame timing through PresentMon, and independent camera vs. world-state update frequencies) to `research.md` and `experiment-plan.md`.
+- Documentation-only change; verified with `git diff --check`. No code or binaries were modified.
+
 ## v0.10.1 — Record 10-step prioritized experiment roadmap
 
 - Added the 10-step prioritized experiment sequence (from physical display timing instrumentation and independent render/warp scheduling through motion-vector extrapolation, temporal history, guard bands, independent frame generation, VRS/dynamic resolution, adaptive scheduling, resolution scaling benchmarks, and complex game-like workloads) to `research.md` and `experiment-plan.md`.

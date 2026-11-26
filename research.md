@@ -98,6 +98,16 @@ Record separately: full scene FPS and frame-time distribution; actual displayed 
 
 PresentMon can capture Windows CPU, GPU and display-related metrics, but documents limitations including GPU timing accuracy with hardware-accelerated GPU scheduling. NVIDIA recommends FrameView's displayed-change metric for DLSS-G pacing because present-call timing alone can be misleading.
 
+## Core architectural requirements
+
+In addition to the ten prioritized experiments below, the renderer and measurement harness must be built around five foundational mechanisms:
+
+- **Deadline-based scheduling rather than relying solely on VSync:** drive presentation from explicit rational refresh deadlines so pacing remains predictable and overruns are measurable.
+- **Independent scene-rendering and reprojection queues:** decouple full-scene GPU work from late reprojection/presentation queues so heavy render spikes do not stall presentation.
+- **GPU execution headroom reservation:** reserve measurable GPU capacity so generation and late warp can finish before the display deadline even under sustained load.
+- **Actual displayed-frame timing through PresentMon:** validate physical displayed intervals, drops, and PC latency (`MsBetweenDisplayChange`, `MsUntilDisplayed`, `MsPCLatency`) rather than relying on `Present` return cadence alone.
+- **Independent camera and world-state update frequencies:** allow late camera pose sampling and reprojection at display cadence while authoritative world simulation and full scene rendering run at their own sustainable cadence, reporting both update rates and latencies separately.
+
 ## Prioritized experiment roadmap
 
 Execute the following ten experiments in priority order, validating each step with controlled measurements and recording limitations before advancing:

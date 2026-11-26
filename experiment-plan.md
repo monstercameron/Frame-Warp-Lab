@@ -43,6 +43,14 @@ NVIDIA Streamline/DLSS-G can control its own swap chain, pacing and generated fr
 - Test VRS at full-rate and controlled coarse rates or masks where supported. Inspect shading-rate boundaries, fine edges, motion and the effect on generated or warped frames. Compare dynamic resolution at matched pacing and workload.
 - Preserve pacing first and the chosen latency criteria second. Rank quality changes using predefined metrics and visual inspection. Report the workload and conditions where the tradeoff stops meeting the criteria.
 
+## Core architectural pillars
+
+- Deadline-based scheduling rather than relying solely on VSync.
+- Independent scene-rendering and reprojection queues.
+- GPU execution headroom reservation.
+- Actual displayed-frame timing through PresentMon.
+- Independent camera and world-state update frequencies.
+
 ## Prioritized experiment sequence
 
 | Priority | Experiment | Purpose |
