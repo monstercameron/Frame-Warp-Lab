@@ -47,14 +47,32 @@ public:
         InterlockedExchange(&state_->present_count, 0);
         InterlockedExchange(&state_->resize_count, 0);
         InterlockedExchange(&state_->running, 1);
+        record_event(1, 0);
     }
     ~RuntimeStatePublisher() {
+        record_event(3, 0);
         InterlockedExchange(&state_->running, 0);
         UnmapViewOfFile(state_);
     }
     void record_present() { InterlockedIncrement(&state_->present_count); }
-    void record_resize() { InterlockedIncrement(&state_->resize_count); }
+    void record_resize() {
+        const LONG resize_count = InterlockedIncrement(&state_->resize_count);
+        record_event(2, resize_count);
+    }
 private:
+    void record_event(LONG event_type, LONG value) {
+        const LONG event_sequence = state_->event_count + 1;
+        auto& event = state_->events[(static_cast<std::size_t>(event_sequence) - 1) % frame_warp_lab::runtime_event_capacity];
+        InterlockedExchange(&event.sequence, 0);
+        FILETIME timestamp{};
+        GetSystemTimeAsFileTime(&timestamp);
+        event.timestamp_low = timestamp.dwLowDateTime;
+        event.timestamp_high = timestamp.dwHighDateTime;
+        event.event_type = event_type;
+        event.value = value;
+        InterlockedExchange(&event.sequence, event_sequence);
+        InterlockedExchange(&state_->event_count, event_sequence);
+    }
     Handle mapping_;
     frame_warp_lab::RuntimeState* state_ = nullptr;
 };

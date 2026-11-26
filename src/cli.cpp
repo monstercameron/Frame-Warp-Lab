@@ -6,6 +6,7 @@
 #include <wrl/client.h>
 
 #include <cstdlib>
+#include <cstdio>
 #include <iostream>
 #include <limits>
 #include <string>
@@ -115,6 +116,65 @@ int print_status(const WindowInstance& instance) {
     return 0;
 }
 
+int print_events(const WindowInstance& instance) {
+    HANDLE mapping = OpenFileMappingW(FILE_MAP_READ, FALSE, frame_warp_lab::runtime_mapping_name(instance.process_id).c_str());
+    if (!mapping) return fail("state_unavailable", "Runtime state is unavailable for this instance");
+    const auto* state = static_cast<const frame_warp_lab::RuntimeState*>(MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, sizeof(frame_warp_lab::RuntimeState)));
+    if (!state) { CloseHandle(mapping); return fail("state_unavailable", "Could not map runtime state"); }
+    if (state->version != frame_warp_lab::runtime_state_version || state->process_id != instance.process_id) {
+        UnmapViewOfFile(state); CloseHandle(mapping);
+        return fail("state_version_mismatch", "Runtime state version or process identity does not match");
+    }
+    const LONG event_count = state->event_count;
+    const LONG first_sequence = event_count > static_cast<LONG>(frame_warp_lab::runtime_event_capacity)
+        ? event_count - static_cast<LONG>(frame_warp_lab::runtime_event_capacity) + 1 : 1;
+    std::cout << "{\"ok\":true,\"schema_version\":1,\"process_id\":" << instance.process_id
+              << ",\"capacity\":" << frame_warp_lab::runtime_event_capacity << ",\"total_events\":" << event_count << ",\"events\":[";
+    bool first_event = true;
+    for (LONG sequence = first_sequence; sequence <= event_count; ++sequence) {
+        const auto& event = state->events[(static_cast<std::size_t>(sequence) - 1) % frame_warp_lab::runtime_event_capacity];
+        if (event.sequence != sequence) continue;
+        const DWORD timestamp_low = event.timestamp_low;
+        const DWORD timestamp_high = event.timestamp_high;
+        const LONG event_type = event.event_type;
+        const LONG value = event.value;
+        if (event.sequence != sequence) continue;
+        FILETIME file_time{timestamp_low, timestamp_high};
+        SYSTEMTIME utc{};
+        if (!FileTimeToSystemTime(&file_time, &utc)) continue;
+        char timestamp[32]{};
+        std::snprintf(timestamp, sizeof(timestamp), "%04u-%02u-%02uT%02u:%02u:%02u.%03uZ", utc.wYear, utc.wMonth, utc.wDay, utc.wHour, utc.wMinute, utc.wSecond, utc.wMilliseconds);
+        const char* event_name = event_type == 1 ? "runtime_started" : event_type == 2 ? "swap_chain_resized" : "runtime_stopping";
+        if (!first_event) std::cout << ',';
+        first_event = false;
+        std::cout << "{\"sequence\":" << sequence << ",\"timestamp_utc\":\"" << timestamp
+                  << "\",\"severity\":\"info\",\"subsystem\":\"runtime\",\"event\":\"" << event_name << "\",\"value\":" << value << "}";
+    }
+    std::cout << "]}\n";
+    UnmapViewOfFile(state);
+    CloseHandle(mapping);
+    return 0;
+}
+
+int start_instance() {
+    wchar_t executable_path[MAX_PATH]{};
+    const DWORD path_length = GetModuleFileNameW(nullptr, executable_path, MAX_PATH);
+    if (path_length == 0 || path_length == MAX_PATH) return fail("start_failed", "Could not locate the CLI executable");
+    std::wstring application_path(executable_path, path_length);
+    const auto separator = application_path.find_last_of(L"\\/");
+    if (separator == std::wstring::npos) return fail("start_failed", "Could not determine the executable directory");
+    application_path = application_path.substr(0, separator + 1) + L"frame_warp_lab.exe";
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+    if (!CreateProcessW(application_path.c_str(), nullptr, nullptr, nullptr, FALSE, 0, nullptr, nullptr, &startup, &process))
+        return fail("start_failed", "Could not launch frame_warp_lab.exe next to the CLI");
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    std::cout << "{\"ok\":true,\"process_id\":" << process.dwProcessId << ",\"started\":true,\"ready\":false}\n";
+    return 0;
+}
+
 int print_capabilities() {
     ComPtr<ID3D12Device> device;
     HRESULT result = D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device));
@@ -134,10 +194,11 @@ int print_capabilities() {
 
 int wmain(int argument_count, wchar_t** arguments) {
     if (argument_count == 2 && std::wstring(arguments[1]) == L"help") {
-        std::cout << "{\"ok\":true,\"schema_version\":1,\"commands\":[\"help\",\"instances\",\"status <pid>\",\"stop <pid>\",\"capabilities\"]}\n";
+        std::cout << "{\"ok\":true,\"schema_version\":1,\"commands\":[\"help\",\"start\",\"instances\",\"status <pid>\",\"events <pid>\",\"stop <pid>\",\"capabilities\"]}\n";
         return 0;
     }
     if (argument_count == 2 && std::wstring(arguments[1]) == L"capabilities") return print_capabilities();
+    if (argument_count == 2 && std::wstring(arguments[1]) == L"start") return start_instance();
     const auto instances = find_instances();
     if (argument_count == 2 && std::wstring(arguments[1]) == L"instances") {
         std::cout << "{\"ok\":true,\"schema_version\":1,\"instances\":[";
@@ -148,7 +209,7 @@ int wmain(int argument_count, wchar_t** arguments) {
         std::cout << "]}\n";
         return 0;
     }
-    if (argument_count != 3 || (std::wstring(arguments[1]) != L"status" && std::wstring(arguments[1]) != L"stop"))
+    if (argument_count != 3 || (std::wstring(arguments[1]) != L"status" && std::wstring(arguments[1]) != L"events" && std::wstring(arguments[1]) != L"stop"))
         return fail("invalid_arguments", "Use help for the command list");
     wchar_t* end = nullptr;
     const unsigned long requested_process = std::wcstoul(arguments[2], &end, 10);
@@ -157,6 +218,7 @@ int wmain(int argument_count, wchar_t** arguments) {
     for (const auto& instance : instances) {
         if (instance.process_id != requested_process) continue;
         if (std::wstring(arguments[1]) == L"status") return print_status(instance);
+        if (std::wstring(arguments[1]) == L"events") return print_events(instance);
         if (!PostMessageW(instance.window, WM_CLOSE, 0, 0)) return fail("stop_failed", "Could not send the close request");
         std::cout << "{\"ok\":true,\"process_id\":" << instance.process_id << ",\"stop_requested\":true}\n";
         return 0;

@@ -26,12 +26,16 @@ The console executable emits JSON and uses exit code 0 for success and 1 for err
 
 ```powershell
 ./build/Debug/frame_warp_cli.exe help
+./build/Debug/frame_warp_cli.exe start
 ./build/Debug/frame_warp_cli.exe instances
 ./build/Debug/frame_warp_cli.exe status <pid>
+./build/Debug/frame_warp_cli.exe events <pid>
 ./build/Debug/frame_warp_cli.exe capabilities
 ./build/Debug/frame_warp_cli.exe stop <pid>
 ```
 
-`instances` discovers application windows, including hidden ones. `status` reads local shared state for a specific process and reports completed present calls, resize count, client size and nominal Windows display modes. These are not displayed-frame measurements. Windows' enumerated highest nominal refresh for the active resolution is not a verified monitor upper bound, and actual displayed timing is unavailable. `stop` requests a normal window close and does not wait for exit. `capabilities` queries a newly created default D3D12 device, not necessarily the running instance's adapter; VRS support does not mean VRS rendering is implemented.
+`start` launches the executable next to the CLI and returns its process ID; `ready: false` means the command does not wait for initialization. `instances` discovers application windows, including hidden ones. `status` reads local shared state for a specific process and reports completed present calls, resize count, client size and nominal Windows display modes. These are not displayed-frame measurements. Windows' enumerated highest nominal refresh for the active resolution is not a verified monitor upper bound, and actual displayed timing is unavailable. `stop` requests a normal window close and does not wait for exit. `capabilities` queries a newly created default D3D12 device, not necessarily the running instance's adapter; VRS support does not mean VRS rendering is implemented.
 
-The CLI does not yet start instances, collect detailed traces, manage scenes or experiment configurations, measure latency, or control generation, reprojection or VRS. Structured event logging and the remaining agent operations are still planned.
+`events` reads a bounded in-memory journal of the 64 most recent runtime lifecycle and resize events, with UTC timestamps and sequence numbers. Events are available only while the instance's shared state exists; the journal is not persisted, and detailed frame traces and error events are not yet implemented. A concurrent overwrite can cause a record to be omitted from a snapshot. Shared state uses a local Windows named mapping and the process's default security descriptor; it is intended for local inspection, not a remote interface.
+
+The CLI does not yet collect detailed traces, manage scenes or experiment configurations, measure latency, or control generation, reprojection or VRS. Persistent structured logs and the remaining agent operations are still planned.
