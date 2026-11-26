@@ -1,4 +1,9 @@
 #include "pbr_assets.h"
+#include "gltf_loader.h"
+
+#define STB_IMAGE_IMPLEMENTATION
+#define STBI_NO_SIMD
+#include <stb_image.h>
 
 #include <algorithm>
 #include <array>
@@ -706,6 +711,173 @@ struct UploadTask {
     UINT64 staging_offset;
 };
 
+struct LoadedHeroPbrTextures {
+    UINT width = 256;
+    UINT height = 256;
+    UINT mip_count = 9;
+    bool loaded_from_disk = false;
+    std::vector<MipLevelRgba8> albedo_mips;
+    std::vector<MipLevelRgba8> normal_mips;
+    std::vector<MipLevelRgba8> orm_mips;
+};
+
+UINT compute_mip_levels(UINT width, UINT height) {
+    UINT mips = 1U;
+    UINT dim = std::max(width, height);
+    while (dim > 1U) {
+        dim >>= 1U;
+        ++mips;
+    }
+    return mips;
+}
+
+LoadedHeroPbrTextures build_hero_pbr_textures() {
+    LoadedHeroPbrTextures result{};
+    const auto diff_path = resolve_asset_path("assets/models/service_pistol/textures/service_pistol_diff_1k.jpg");
+    const auto norm_path = resolve_asset_path("assets/models/service_pistol/textures/service_pistol_nor_gl_1k.jpg");
+    const auto arm_path = resolve_asset_path("assets/models/service_pistol/textures/service_pistol_arm_1k.jpg");
+
+    int dw = 0, dh = 0, dc = 0;
+    int nw = 0, nh = 0, nc = 0;
+    int aw = 0, ah = 0, ac = 0;
+    stbi_uc* diff_img = stbi_load(diff_path.string().c_str(), &dw, &dh, &dc, 4);
+    stbi_uc* norm_img = stbi_load(norm_path.string().c_str(), &nw, &nh, &nc, 4);
+    stbi_uc* arm_img = stbi_load(arm_path.string().c_str(), &aw, &ah, &ac, 4);
+
+    if (diff_img == nullptr || norm_img == nullptr || arm_img == nullptr || dw <= 0 || dh <= 0 || dw != nw || dh != nh || dw != aw || dh != ah) {
+        if (diff_img != nullptr) stbi_image_free(diff_img);
+        if (norm_img != nullptr) stbi_image_free(norm_img);
+        if (arm_img != nullptr) stbi_image_free(arm_img);
+        result.width = k_material_size;
+        result.height = k_material_size;
+        result.mip_count = k_material_mips;
+        build_material_mip_chain(10U, result.albedo_mips, result.normal_mips, result.orm_mips);
+        return result;
+    }
+
+    result.loaded_from_disk = true;
+    result.width = static_cast<UINT>(dw);
+    result.height = static_cast<UINT>(dh);
+    result.mip_count = compute_mip_levels(result.width, result.height);
+
+    const std::size_t pixel_count = static_cast<std::size_t>(result.width) * result.height;
+    std::vector<Vec3> lin_albedo(pixel_count);
+    std::vector<Vec3> normals(pixel_count);
+    std::vector<float> ao_map(pixel_count);
+    std::vector<float> rough_map(pixel_count);
+    std::vector<float> metal_map(pixel_count);
+
+    for (std::size_t i = 0; i < pixel_count; ++i) {
+        const std::size_t o = i * 4U;
+        lin_albedo[i] = {
+            srgb_to_linear(static_cast<float>(diff_img[o + 0]) / 255.0f),
+            srgb_to_linear(static_cast<float>(diff_img[o + 1]) / 255.0f),
+            srgb_to_linear(static_cast<float>(diff_img[o + 2]) / 255.0f),
+        };
+        const float nx = (static_cast<float>(norm_img[o + 0]) / 255.0f) * 2.0f - 1.0f;
+        const float ny = -((static_cast<float>(norm_img[o + 1]) / 255.0f) * 2.0f - 1.0f);
+        const float nz = std::max(0.05f, (static_cast<float>(norm_img[o + 2]) / 255.0f) * 2.0f - 1.0f);
+        normals[i] = normalize3({nx, ny, nz});
+
+        ao_map[i] = static_cast<float>(arm_img[o + 0]) / 255.0f;
+        rough_map[i] = std::clamp(static_cast<float>(arm_img[o + 1]) / 255.0f, 0.08f, 1.0f);
+        metal_map[i] = static_cast<float>(arm_img[o + 2]) / 255.0f;
+    }
+
+    stbi_image_free(diff_img);
+    stbi_image_free(norm_img);
+    stbi_image_free(arm_img);
+
+    result.albedo_mips.resize(result.mip_count);
+    result.normal_mips.resize(result.mip_count);
+    result.orm_mips.resize(result.mip_count);
+
+    UINT w = result.width;
+    UINT h = result.height;
+    for (UINT mip = 0; mip < result.mip_count; ++mip) {
+        result.albedo_mips[mip] = {w, h, std::vector<std::uint8_t>(static_cast<std::size_t>(w) * h * 4U)};
+        result.normal_mips[mip] = {w, h, std::vector<std::uint8_t>(static_cast<std::size_t>(w) * h * 4U)};
+        result.orm_mips[mip] = {w, h, std::vector<std::uint8_t>(static_cast<std::size_t>(w) * h * 4U)};
+        for (UINT y = 0; y < h; ++y) {
+            for (UINT x = 0; x < w; ++x) {
+                const std::size_t i = static_cast<std::size_t>(y) * w + x;
+                const std::size_t o = i * 4U;
+                result.albedo_mips[mip].pixels[o + 0] = float_to_u8(linear_to_srgb(lin_albedo[i].x));
+                result.albedo_mips[mip].pixels[o + 1] = float_to_u8(linear_to_srgb(lin_albedo[i].y));
+                result.albedo_mips[mip].pixels[o + 2] = float_to_u8(linear_to_srgb(lin_albedo[i].z));
+                result.albedo_mips[mip].pixels[o + 3] = 255U;
+
+                const Vec3 n = normalize3(normals[i]);
+                result.normal_mips[mip].pixels[o + 0] = float_to_u8(n.x * 0.5f + 0.5f);
+                result.normal_mips[mip].pixels[o + 1] = float_to_u8(n.y * 0.5f + 0.5f);
+                result.normal_mips[mip].pixels[o + 2] = float_to_u8(n.z * 0.5f + 0.5f);
+                result.normal_mips[mip].pixels[o + 3] = 255U;
+
+                result.orm_mips[mip].pixels[o + 0] = float_to_u8(ao_map[i]);
+                result.orm_mips[mip].pixels[o + 1] = float_to_u8(rough_map[i]);
+                result.orm_mips[mip].pixels[o + 2] = float_to_u8(metal_map[i]);
+                result.orm_mips[mip].pixels[o + 3] = 0U;
+            }
+        }
+        if (mip + 1U >= result.mip_count) {
+            break;
+        }
+        const UINT next_w = std::max<UINT>(1U, w / 2U);
+        const UINT next_h = std::max<UINT>(1U, h / 2U);
+        std::vector<Vec3> next_albedo(static_cast<std::size_t>(next_w) * next_h);
+        std::vector<Vec3> next_normals(static_cast<std::size_t>(next_w) * next_h);
+        std::vector<float> next_ao(static_cast<std::size_t>(next_w) * next_h);
+        std::vector<float> next_rough(static_cast<std::size_t>(next_w) * next_h);
+        std::vector<float> next_metal(static_cast<std::size_t>(next_w) * next_h);
+        for (UINT y = 0; y < next_h; ++y) {
+            const UINT sy0 = std::min(y * 2U, h - 1U);
+            const UINT sy1 = std::min(y * 2U + 1U, h - 1U);
+            for (UINT x = 0; x < next_w; ++x) {
+                const UINT sx0 = std::min(x * 2U, w - 1U);
+                const UINT sx1 = std::min(x * 2U + 1U, w - 1U);
+                const std::size_t ids[4] = {
+                    static_cast<std::size_t>(sy0) * w + sx0,
+                    static_cast<std::size_t>(sy0) * w + sx1,
+                    static_cast<std::size_t>(sy1) * w + sx0,
+                    static_cast<std::size_t>(sy1) * w + sx1,
+                };
+                Vec3 a_sum{0.0f, 0.0f, 0.0f};
+                Vec3 n_sum{0.0f, 0.0f, 0.0f};
+                float ao_sum = 0.0f;
+                float alpha2_sum = 0.0f;
+                float m_sum = 0.0f;
+                for (std::size_t k : ids) {
+                    a_sum = a_sum + lin_albedo[k];
+                    n_sum = n_sum + normals[k];
+                    ao_sum += ao_map[k];
+                    const float a = rough_map[k] * rough_map[k];
+                    alpha2_sum += a * a;
+                    m_sum += metal_map[k];
+                }
+                const Vec3 n_avg = n_sum * 0.25f;
+                const float n_len = std::clamp(length3(n_avg), 0.05f, 1.0f);
+                const float toksvig_var = std::clamp((1.0f - n_len) / std::max(n_len, 0.05f), 0.0f, 0.35f);
+                const float alpha2_filtered = std::clamp(alpha2_sum * 0.25f + toksvig_var * 0.5f, 0.0004f, 1.0f);
+                const std::size_t dst = static_cast<std::size_t>(y) * next_w + x;
+                next_albedo[dst] = a_sum * 0.25f;
+                next_normals[dst] = normalize3(n_avg);
+                next_ao[dst] = ao_sum * 0.25f;
+                next_rough[dst] = saturate(std::sqrt(std::sqrt(alpha2_filtered)));
+                next_metal[dst] = m_sum * 0.25f;
+            }
+        }
+        lin_albedo = std::move(next_albedo);
+        normals = std::move(next_normals);
+        ao_map = std::move(next_ao);
+        rough_map = std::move(next_rough);
+        metal_map = std::move(next_metal);
+        w = next_w;
+        h = next_h;
+    }
+
+    return result;
+}
+
 }
 
 PbrAssetBundle create_and_upload_pbr_assets(
@@ -719,11 +891,16 @@ PbrAssetBundle create_and_upload_pbr_assets(
     D3D12_CPU_DESCRIPTOR_HANDLE srv_heap_start,
     UINT srv_descriptor_stride) {
     PbrAssetBundle bundle{};
+    const auto hero_tex = build_hero_pbr_textures();
+    bundle.hero_textures_loaded = hero_tex.loaded_from_disk;
     bundle.albedo_array = create_default_texture(device, k_material_size, k_material_size, k_material_count, k_material_mips, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, "Create PBR albedo array");
     bundle.normal_array = create_default_texture(device, k_material_size, k_material_size, k_material_count, k_material_mips, DXGI_FORMAT_R8G8B8A8_UNORM, "Create PBR normal array");
     bundle.orm_array = create_default_texture(device, k_material_size, k_material_size, k_material_count, k_material_mips, DXGI_FORMAT_R8G8B8A8_UNORM, "Create PBR ORM array");
     bundle.dfg_lut = create_default_texture(device, k_dfg_size, k_dfg_size, 1, 1, DXGI_FORMAT_R16G16_FLOAT, "Create PBR DFG LUT");
     bundle.env_cubemap = create_default_texture(device, k_env_size, k_env_size, 6, k_env_mips, DXGI_FORMAT_R16G16B16A16_FLOAT, "Create PBR env cubemap");
+    bundle.hero_albedo = create_default_texture(device, hero_tex.width, hero_tex.height, 1, static_cast<UINT16>(hero_tex.mip_count), DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, "Create PBR hero albedo");
+    bundle.hero_normal = create_default_texture(device, hero_tex.width, hero_tex.height, 1, static_cast<UINT16>(hero_tex.mip_count), DXGI_FORMAT_R8G8B8A8_UNORM, "Create PBR hero normal");
+    bundle.hero_orm = create_default_texture(device, hero_tex.width, hero_tex.height, 1, static_cast<UINT16>(hero_tex.mip_count), DXGI_FORMAT_R8G8B8A8_UNORM, "Create PBR hero ORM");
 
     std::array<std::vector<MipLevelRgba8>, k_material_count> albedo_data;
     std::array<std::vector<MipLevelRgba8>, k_material_count> normal_data;
@@ -794,6 +971,24 @@ PbrAssetBundle create_and_upload_pbr_assets(
             t.src_row_pitch[i] = static_cast<std::size_t>(env_data[i].width) * 8U;
         }
     });
+    add_task(bundle.hero_albedo.Get(), hero_tex.mip_count, [&](UploadTask& t) {
+        for (UINT m = 0; m < hero_tex.mip_count; ++m) {
+            t.src_data[m] = hero_tex.albedo_mips[m].pixels.data();
+            t.src_row_pitch[m] = static_cast<std::size_t>(hero_tex.albedo_mips[m].width) * 4U;
+        }
+    });
+    add_task(bundle.hero_normal.Get(), hero_tex.mip_count, [&](UploadTask& t) {
+        for (UINT m = 0; m < hero_tex.mip_count; ++m) {
+            t.src_data[m] = hero_tex.normal_mips[m].pixels.data();
+            t.src_row_pitch[m] = static_cast<std::size_t>(hero_tex.normal_mips[m].width) * 4U;
+        }
+    });
+    add_task(bundle.hero_orm.Get(), hero_tex.mip_count, [&](UploadTask& t) {
+        for (UINT m = 0; m < hero_tex.mip_count; ++m) {
+            t.src_data[m] = hero_tex.orm_mips[m].pixels.data();
+            t.src_row_pitch[m] = static_cast<std::size_t>(hero_tex.orm_mips[m].width) * 4U;
+        }
+    });
 
     D3D12_HEAP_PROPERTIES upload_heap{};
     upload_heap.Type = D3D12_HEAP_TYPE_UPLOAD;
@@ -845,15 +1040,18 @@ PbrAssetBundle create_and_upload_pbr_assets(
 
     constexpr D3D12_RESOURCE_STATES final_state =
         D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-    std::array<D3D12_RESOURCE_BARRIER, 5> barriers{};
-    ID3D12Resource* all_res[5] = {
+    std::array<D3D12_RESOURCE_BARRIER, 8> barriers{};
+    ID3D12Resource* all_res[8] = {
         bundle.albedo_array.Get(),
         bundle.normal_array.Get(),
         bundle.orm_array.Get(),
         bundle.dfg_lut.Get(),
         bundle.env_cubemap.Get(),
+        bundle.hero_albedo.Get(),
+        bundle.hero_normal.Get(),
+        bundle.hero_orm.Get(),
     };
-    for (std::size_t i = 0; i < 5U; ++i) {
+    for (std::size_t i = 0; i < 8U; ++i) {
         barriers[i].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
         barriers[i].Transition.pResource = all_res[i];
         barriers[i].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
@@ -907,6 +1105,22 @@ PbrAssetBundle create_and_upload_pbr_assets(
     env_srv.TextureCube.MostDetailedMip = 0;
     env_srv.TextureCube.MipLevels = k_env_mips;
     device->CreateShaderResourceView(bundle.env_cubemap.Get(), &env_srv, cursor);
+    cursor.ptr += srv_descriptor_stride;
+
+    auto write_tex2d_srv = [&](ID3D12Resource* res, DXGI_FORMAT fmt, UINT mips, D3D12_CPU_DESCRIPTOR_HANDLE dst) {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = fmt;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Texture2D.MostDetailedMip = 0;
+        srv.Texture2D.MipLevels = mips;
+        device->CreateShaderResourceView(res, &srv, dst);
+    };
+    write_tex2d_srv(bundle.hero_albedo.Get(), DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, hero_tex.mip_count, cursor);
+    cursor.ptr += srv_descriptor_stride;
+    write_tex2d_srv(bundle.hero_normal.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, hero_tex.mip_count, cursor);
+    cursor.ptr += srv_descriptor_stride;
+    write_tex2d_srv(bundle.hero_orm.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, hero_tex.mip_count, cursor);
 
     return bundle;
 }

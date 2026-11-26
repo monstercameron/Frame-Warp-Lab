@@ -1,7 +1,10 @@
 #include "range_mesh.h"
+#include "gltf_loader.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <string>
 
 namespace frame_warp_lab {
 
@@ -151,6 +154,22 @@ struct MeshBuilder {
                 emissive);
         }
     }
+
+    void append_loaded_mesh(const LoadedGltfMesh& mesh, float uniform_scale) {
+        const auto base = static_cast<std::uint32_t>(verts.size());
+        verts.reserve(verts.size() + mesh.vertices.size());
+        for (const auto& src : mesh.vertices) {
+            RangeVertex v = src;
+            v.px *= uniform_scale;
+            v.py *= uniform_scale;
+            v.pz *= uniform_scale;
+            verts.push_back(v);
+        }
+        indices.reserve(indices.size() + mesh.indices.size());
+        for (std::uint32_t idx : mesh.indices) {
+            indices.push_back(base + idx);
+        }
+    }
 };
 
 constexpr std::array<Float3, k_range_target_count> k_base_positions = {{
@@ -163,6 +182,15 @@ constexpr std::array<Float3, k_range_target_count> k_base_positions = {{
     {-2.1f, 0.14f, 22.6f},
     { 2.6f, 0.14f, 22.8f},
 }};
+
+const LoadedGltfMesh* find_gltf_node(const LoadedGltfAsset& asset, const char* node_name) {
+    for (const auto& m : asset.meshes) {
+        if (m.node_name == node_name) {
+            return &m;
+        }
+    }
+    return nullptr;
+}
 
 }
 
@@ -230,52 +258,123 @@ RangeGeometryPackage build_tactical_range_geometry() {
         end_sub(RangeMeshKind::target_plate, s);
     }
 
-    {
-        const auto s = begin_sub(RangeMeshKind::pistol_frame);
-        mb.add_slanted_box({0.0f, -0.095f, -0.052f}, {0.0f, 0.014f, -0.020f}, 0.0155f, 0.023f, 11U);
-        mb.add_box({0.0f, 0.020f, 0.040f}, {0.0155f, 0.011f, 0.092f}, 11U, 1.0f, 1.0f, true);
-        mb.add_box({0.0f, 0.004f, 0.085f}, {0.013f, 0.006f, 0.036f}, 11U, 1.0f, 1.0f, true);
-        mb.add_box({0.0f, -0.020f, 0.028f}, {0.008f, 0.004f, 0.032f}, 11U, 1.0f, 1.0f, true);
-        mb.add_box({0.0f, -0.004f, 0.058f}, {0.008f, 0.016f, 0.004f}, 11U, 1.0f, 1.0f, true);
-        mb.add_box({0.0f, -0.004f, 0.026f}, {0.004f, 0.014f, 0.005f}, 10U, 1.0f, 1.0f, true);
-        end_sub(RangeMeshKind::pistol_frame, s);
-    }
+    const LoadedGltfAsset pistol_gltf = load_gltf_meshes(
+        "assets/models/service_pistol/service_pistol.gltf",
+        12U,
+        true,
+        false);
+    const LoadedGltfMesh* frame_mesh = pistol_gltf.loaded ? find_gltf_node(pistol_gltf, "service_pistol_pistol_a") : nullptr;
+    const LoadedGltfMesh* slide_mesh = pistol_gltf.loaded ? find_gltf_node(pistol_gltf, "service_pistol_slide_a") : nullptr;
+    const LoadedGltfMesh* hammer_mesh = pistol_gltf.loaded ? find_gltf_node(pistol_gltf, "service_pistol_hammer_a") : nullptr;
+    const LoadedGltfMesh* trigger_mesh = pistol_gltf.loaded ? find_gltf_node(pistol_gltf, "service_pistol_trigger_a") : nullptr;
+    const LoadedGltfMesh* mag_mesh = pistol_gltf.loaded ? find_gltf_node(pistol_gltf, "service_pistol_magazine_loaded") : nullptr;
 
-    {
-        const auto s = begin_sub(RangeMeshKind::pistol_slide);
-        mb.add_box({0.0f, 0.044f, 0.036f}, {0.0155f, 0.0145f, 0.098f}, 10U, 1.0f, 1.0f, true);
-        mb.add_box({0.0f, 0.0600f, 0.036f}, {0.0115f, 0.0028f, 0.095f}, 10U, 1.0f, 1.0f, true);
-        for (int g = 0; g < 6; ++g) {
-            const float gz = -0.044f + static_cast<float>(g) * 0.0065f;
-            mb.add_box({-0.0160f, 0.044f, gz}, {0.0010f, 0.011f, 0.0018f}, 4U, 1.0f, 1.0f, true);
-            mb.add_box({ 0.0160f, 0.044f, gz}, {0.0010f, 0.011f, 0.0018f}, 4U, 1.0f, 1.0f, true);
+    if (frame_mesh != nullptr && slide_mesh != nullptr) {
+        constexpr float pistol_scale = 1.25f;
+        pkg.hero_pistol_gltf_loaded = true;
+        pkg.pistol_slide_offset = {
+            slide_mesh->node_translation.x * pistol_scale,
+            slide_mesh->node_translation.y * pistol_scale,
+            slide_mesh->node_translation.z * pistol_scale};
+        pkg.pistol_hammer_offset = hammer_mesh != nullptr
+            ? Float3{hammer_mesh->node_translation.x * pistol_scale, hammer_mesh->node_translation.y * pistol_scale, hammer_mesh->node_translation.z * pistol_scale}
+            : Float3{0.0f, 0.061f, -0.036f};
+        pkg.pistol_trigger_offset = trigger_mesh != nullptr
+            ? Float3{trigger_mesh->node_translation.x * pistol_scale, trigger_mesh->node_translation.y * pistol_scale, trigger_mesh->node_translation.z * pistol_scale}
+            : Float3{0.0f, 0.044f, 0.064f};
+        pkg.pistol_magazine_offset = {0.0f, -0.008f * pistol_scale, -0.012f * pistol_scale};
+        pkg.pistol_muzzle_offset = {0.0f, 0.064f * pistol_scale, frame_mesh->max_bounds.z * pistol_scale + 0.012f};
+        pkg.pistol_eject_offset = {0.022f * pistol_scale, (slide_mesh->node_translation.y + 0.006f) * pistol_scale, (slide_mesh->node_translation.z + 0.018f) * pistol_scale};
+        const float top_sight_y = (slide_mesh->node_translation.y + slide_mesh->max_bounds.y) * pistol_scale;
+        pkg.pistol_ads_sight_y = top_sight_y - 0.0025f;
+
+        {
+            const auto s = begin_sub(RangeMeshKind::pistol_frame);
+            mb.append_loaded_mesh(*frame_mesh, pistol_scale);
+            end_sub(RangeMeshKind::pistol_frame, s);
         }
-        mb.add_box({-0.0095f, 0.0665f, -0.048f}, {0.0040f, 0.0050f, 0.0065f}, 10U, 1.0f, 1.0f, true);
-        mb.add_box({0.0095f, 0.0665f, -0.048f}, {0.0040f, 0.0050f, 0.0065f}, 10U, 1.0f, 1.0f, true);
-        mb.add_box({0.0f, 0.0675f, 0.122f}, {0.0020f, 0.0056f, 0.0055f}, 10U, 1.0f, 1.0f, true);
-        end_sub(RangeMeshKind::pistol_slide, s);
-    }
-
-    {
-        const auto s = begin_sub(RangeMeshKind::pistol_sights);
-        mb.add_box({-0.0095f, 0.0675f, -0.0550f}, {0.0016f, 0.0016f, 0.0010f}, 4U, 1.0f, 1.0f, true, 1.0f);
-        mb.add_box({0.0095f, 0.0675f, -0.0550f}, {0.0016f, 0.0016f, 0.0010f}, 4U, 1.0f, 1.0f, true, 1.0f);
-        mb.add_box({0.0f, 0.0680f, 0.1160f}, {0.0016f, 0.0018f, 0.0010f}, 4U, 1.0f, 1.0f, true, 1.0f);
-        end_sub(RangeMeshKind::pistol_sights, s);
-    }
-
-    {
-        const auto s = begin_sub(RangeMeshKind::pistol_barrel);
-        mb.add_cylinder_z({0.0f, 0.044f, 0.072f}, 0.0085f, 0.076f, 14, 4U);
-        mb.add_box({0.003f, 0.0535f, 0.025f}, {0.0135f, 0.0082f, 0.024f}, 4U, 1.0f, 1.0f, true);
-        end_sub(RangeMeshKind::pistol_barrel, s);
-    }
-
-    {
-        const auto s = begin_sub(RangeMeshKind::pistol_magazine);
-        mb.add_slanted_box({0.0f, -0.098f, -0.054f}, {0.0f, -0.008f, -0.026f}, 0.0115f, 0.017f, 10U);
-        mb.add_box({0.0f, -0.102f, -0.054f}, {0.016f, 0.006f, 0.024f}, 11U, 1.0f, 1.0f, true);
-        end_sub(RangeMeshKind::pistol_magazine, s);
+        {
+            const auto s = begin_sub(RangeMeshKind::pistol_slide);
+            mb.append_loaded_mesh(*slide_mesh, pistol_scale);
+            end_sub(RangeMeshKind::pistol_slide, s);
+        }
+        {
+            const auto s = begin_sub(RangeMeshKind::pistol_barrel);
+            end_sub(RangeMeshKind::pistol_barrel, s);
+        }
+        {
+            const auto s = begin_sub(RangeMeshKind::pistol_magazine);
+            if (mag_mesh != nullptr) {
+                mb.append_loaded_mesh(*mag_mesh, pistol_scale);
+            }
+            end_sub(RangeMeshKind::pistol_magazine, s);
+        }
+        {
+            const auto s = begin_sub(RangeMeshKind::pistol_hammer);
+            if (hammer_mesh != nullptr) {
+                mb.append_loaded_mesh(*hammer_mesh, pistol_scale);
+            }
+            end_sub(RangeMeshKind::pistol_hammer, s);
+        }
+        {
+            const auto s = begin_sub(RangeMeshKind::pistol_trigger);
+            if (trigger_mesh != nullptr) {
+                mb.append_loaded_mesh(*trigger_mesh, pistol_scale);
+            }
+            end_sub(RangeMeshKind::pistol_trigger, s);
+        }
+        {
+            const auto s = begin_sub(RangeMeshKind::pistol_sights);
+            end_sub(RangeMeshKind::pistol_sights, s);
+        }
+    } else {
+        {
+            const auto s = begin_sub(RangeMeshKind::pistol_frame);
+            mb.add_slanted_box({0.0f, -0.095f, -0.052f}, {0.0f, 0.014f, -0.020f}, 0.0155f, 0.023f, 11U);
+            mb.add_box({0.0f, 0.020f, 0.040f}, {0.0155f, 0.011f, 0.092f}, 11U, 1.0f, 1.0f, true);
+            mb.add_box({0.0f, 0.004f, 0.085f}, {0.013f, 0.006f, 0.036f}, 11U, 1.0f, 1.0f, true);
+            mb.add_box({0.0f, -0.020f, 0.028f}, {0.008f, 0.004f, 0.032f}, 11U, 1.0f, 1.0f, true);
+            mb.add_box({0.0f, -0.004f, 0.058f}, {0.008f, 0.016f, 0.004f}, 11U, 1.0f, 1.0f, true);
+            end_sub(RangeMeshKind::pistol_frame, s);
+        }
+        {
+            const auto s = begin_sub(RangeMeshKind::pistol_slide);
+            mb.add_box({0.0f, 0.044f, 0.036f}, {0.0155f, 0.0145f, 0.098f}, 10U, 1.0f, 1.0f, true);
+            mb.add_box({0.0f, 0.0600f, 0.036f}, {0.0115f, 0.0028f, 0.095f}, 10U, 1.0f, 1.0f, true);
+            mb.add_box({-0.0095f, 0.0665f, -0.048f}, {0.0040f, 0.0050f, 0.0065f}, 10U, 1.0f, 1.0f, true);
+            mb.add_box({ 0.0095f, 0.0665f, -0.048f}, {0.0040f, 0.0050f, 0.0065f}, 10U, 1.0f, 1.0f, true);
+            mb.add_box({ 0.0f, 0.0675f, 0.122f}, {0.0020f, 0.0056f, 0.0055f}, 10U, 1.0f, 1.0f, true);
+            end_sub(RangeMeshKind::pistol_slide, s);
+        }
+        {
+            const auto s = begin_sub(RangeMeshKind::pistol_barrel);
+            mb.add_cylinder_z({0.0f, 0.044f, 0.072f}, 0.0085f, 0.076f, 14, 4U);
+            mb.add_box({0.003f, 0.0535f, 0.025f}, {0.0135f, 0.0082f, 0.024f}, 4U, 1.0f, 1.0f, true);
+            end_sub(RangeMeshKind::pistol_barrel, s);
+        }
+        {
+            const auto s = begin_sub(RangeMeshKind::pistol_magazine);
+            mb.add_slanted_box({0.0f, -0.098f, -0.054f}, {0.0f, -0.008f, -0.026f}, 0.0115f, 0.017f, 10U);
+            mb.add_box({0.0f, -0.102f, -0.054f}, {0.016f, 0.006f, 0.024f}, 11U, 1.0f, 1.0f, true);
+            end_sub(RangeMeshKind::pistol_magazine, s);
+        }
+        {
+            const auto s = begin_sub(RangeMeshKind::pistol_sights);
+            mb.add_box({-0.0095f, 0.0675f, -0.0550f}, {0.0016f, 0.0016f, 0.0010f}, 4U, 1.0f, 1.0f, true, 1.0f);
+            mb.add_box({ 0.0095f, 0.0675f, -0.0550f}, {0.0016f, 0.0016f, 0.0010f}, 4U, 1.0f, 1.0f, true, 1.0f);
+            mb.add_box({ 0.0f, 0.0680f, 0.1160f}, {0.0016f, 0.0018f, 0.0010f}, 4U, 1.0f, 1.0f, true, 1.0f);
+            end_sub(RangeMeshKind::pistol_sights, s);
+        }
+        {
+            const auto s = begin_sub(RangeMeshKind::pistol_hammer);
+            mb.add_box({0.0f, 0.044f, -0.060f}, {0.003f, 0.008f, 0.005f}, 10U, 1.0f, 1.0f, true);
+            end_sub(RangeMeshKind::pistol_hammer, s);
+        }
+        {
+            const auto s = begin_sub(RangeMeshKind::pistol_trigger);
+            mb.add_box({0.0f, -0.004f, 0.026f}, {0.004f, 0.014f, 0.005f}, 10U, 1.0f, 1.0f, true);
+            end_sub(RangeMeshKind::pistol_trigger, s);
+        }
     }
 
     {

@@ -95,19 +95,36 @@ try {
     $tempPpms += $c4.path
     [RangeImgTools]::PpmToPng($c4.path, (Join-Path $reportDir 'range_target_knocked.png'))
 
-    Write-Host ("`n=== TACTICAL RANGE + JOLT PHYSICS VERIFICATION ===") -ForegroundColor Cyan
-    Write-Host ("  Scene={0}  HP={1}  Armor={2}  Ammo={3}/{4}  Shots={5}  Hits={6}  Headshots={7}  Score={8}  TargetsUp={9}/8" -f `
-        $stHit.scene.kind, $stHit.tactical_range.hp, $stHit.tactical_range.armor, $stHit.tactical_range.ammo_in_mag, $stHit.tactical_range.ammo_reserve, `
+    Write-Host ("`n=== TACTICAL RANGE + JOLT PHYSICS + ECS + LUA 5.4 VERIFICATION ===") -ForegroundColor Cyan
+    Write-Host ("  Scene={0}  GLTF={1}  PBR1K={2}  HP={3}  Armor={4}  Ammo={5}/{6}  Shots={7}  Hits={8}  Headshots={9}  Score={10}  TargetsUp={11}/8" -f `
+        $stHit.scene.kind, $stHit.tactical_range.hero_pistol_gltf_loaded, $stHit.tactical_range.hero_pbr_textures_loaded, `
+        $stHit.tactical_range.hp, $stHit.tactical_range.armor, $stHit.tactical_range.ammo_in_mag, $stHit.tactical_range.ammo_reserve, `
         $stHit.tactical_range.shots_fired, $stHit.tactical_range.hits, $stHit.tactical_range.headshots, $stHit.tactical_range.score, $stHit.tactical_range.targets_up)
+    Write-Host ("  ECS: entities={0} renderables={1} physics={2} scripts={3} | Lua 5.4: mods={4} err={5} step={6}us | Events: dispatched={7} subs={8}" -f `
+        $stHit.ecs.entities, $stHit.ecs.renderables, $stHit.ecs.physics_bodies, $stHit.ecs.scripts, `
+        $stHit.lua.loaded_scripts, $stHit.lua.error_count, $stHit.lua.last_step_us, `
+        $stHit.events.dispatched, $stHit.events.subscriptions)
 
+    if (-not $stHit.tactical_range.hero_pistol_gltf_loaded -or -not $stHit.tactical_range.hero_pbr_textures_loaded) {
+        throw "Expected Poly Haven Service Pistol glTF + 1K PBR textures to load!"
+    }
+    if ($stHit.lua.loaded_scripts -lt 4 -or $stHit.lua.error_count -ne 0) {
+        throw "Expected 4 Lua behavior modules with 0 errors!"
+    }
     if ($stHit.tactical_range.hits -lt 1 -or $stHit.tactical_range.targets_up -ge 8) {
         throw "Expected Jolt raycast bullet hit to knock down a target!"
     }
 
+    & $cli reload_scripts $fpid | Out-Null
     & $cli reload $fpid | Out-Null
     & $cli step $fpid 600 | Out-Null
     $stReload = (& $cli status $fpid | ConvertFrom-Json)
-    Write-Host ("  After Reload + 2.5s Flip-Up: Ammo={0}/{1}  TargetsUp={2}/8" -f $stReload.tactical_range.ammo_in_mag, $stReload.tactical_range.ammo_reserve, $stReload.tactical_range.targets_up)
+    Write-Host ("  After Lua Hot-Reload + Ammo Reload + 2.5s Flip-Up: Ammo={0}/{1}  TargetsUp={2}/8  LuaReloads={3}  LuaErr={4}" -f `
+        $stReload.tactical_range.ammo_in_mag, $stReload.tactical_range.ammo_reserve, $stReload.tactical_range.targets_up, `
+        $stReload.lua.reload_count, $stReload.lua.error_count)
+    if ($stReload.lua.reload_count -lt 1 -or $stReload.lua.error_count -ne 0) {
+        throw "Expected clean Lua hot-reload with 0 errors!"
+    }
 
     & $cli resume $fpid | Out-Null
     & $cli set $fpid fixed_dt_us 0 | Out-Null

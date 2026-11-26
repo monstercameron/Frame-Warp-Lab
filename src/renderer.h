@@ -166,6 +166,8 @@ public:
     const StreamlineCapabilities& streamline_capabilities() const { return streamline_.capabilities(); }
     void begin_streamline_frame(std::uint64_t frame_id, bool reflex_enabled, std::uint32_t frame_limit_us);
     void emit_streamline_pcl_marker(StreamlinePclMarker marker);
+    const RangeGeometryPackage& range_geometry_meta() const { return range_geometry_meta_; }
+    bool hero_pbr_textures_loaded() const { return pbr_assets_.hero_textures_loaded; }
 
 private:
     static constexpr UINT swap_chain_buffer_count = 2;
@@ -174,7 +176,7 @@ private:
     static constexpr UINT source_slot_count = 3;
     static constexpr UINT targets_per_source_slot = 3;
     static constexpr UINT compute_descriptors_per_source_slot = 8;
-    static constexpr UINT pbr_srv_descriptor_count = 5;
+    static constexpr UINT pbr_srv_descriptor_count = 8;
     static constexpr UINT max_dirty_tile_capacity = 131072;
     static constexpr UINT tile_indirect_u32_count = 24;
     static constexpr UINT tile_stats_readback_u32_count = 16;
@@ -182,7 +184,7 @@ private:
     static constexpr std::size_t scene_constant_buffer_stride = 256;
     static constexpr std::size_t present_constant_buffer_stride = 512;
     static constexpr std::size_t hud_constant_buffer_stride = 3072;
-    static constexpr std::size_t max_range_instances = 48;
+    static constexpr std::size_t max_range_instances = 64;
 
     class OsHandle {
     public:
@@ -289,6 +291,7 @@ private:
     D3D12_VERTEX_BUFFER_VIEW range_vb_view_{};
     D3D12_INDEX_BUFFER_VIEW range_ib_view_{};
     std::array<RangeSubmesh, static_cast<std::size_t>(RangeMeshKind::count)> range_submeshes_{};
+    RangeGeometryPackage range_geometry_meta_{};
     Microsoft::WRL::ComPtr<ID3D12RootSignature> present_root_signature_;
     std::array<Microsoft::WRL::ComPtr<ID3D12PipelineState>, 5> present_pipelines_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> present_dlss_inputs_pipeline_;

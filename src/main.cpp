@@ -132,7 +132,10 @@ public:
         std::atomic_ref<std::int32_t>(state_->flash_indicator_enabled).store(flash_indicator_enabled ? 1 : 0, std::memory_order_release);
     }
 
-    void update_tactical_range(const frame_warp_lab::TacticalHudSnapshot& h) {
+    void update_tactical_range(
+        const frame_warp_lab::TacticalHudSnapshot& h,
+        const frame_warp_lab::EcsLuaTelemetry& t,
+        bool hero_pbr_textures_loaded) {
         std::atomic_ref<std::int32_t>(state_->tactical_hp).store(h.hp, std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->tactical_armor).store(h.armor, std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->tactical_ammo_in_mag).store(h.ammo_in_mag, std::memory_order_release);
@@ -143,6 +146,18 @@ public:
         std::atomic_ref<std::int32_t>(state_->tactical_score).store(h.score, std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->tactical_targets_up).store(h.targets_up, std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->tactical_ads_active).store(h.ads_alpha > 0.5f ? 1 : 0, std::memory_order_release);
+        std::atomic_ref<std::uint32_t>(state_->ecs_entity_count).store(t.entity_count, std::memory_order_release);
+        std::atomic_ref<std::uint32_t>(state_->ecs_renderable_count).store(t.renderable_count, std::memory_order_release);
+        std::atomic_ref<std::uint32_t>(state_->ecs_physics_count).store(t.physics_body_count, std::memory_order_release);
+        std::atomic_ref<std::uint32_t>(state_->ecs_script_count).store(t.script_count, std::memory_order_release);
+        std::atomic_ref<std::uint32_t>(state_->lua_loaded_scripts).store(t.lua_loaded_scripts, std::memory_order_release);
+        std::atomic_ref<std::uint32_t>(state_->lua_reload_count).store(t.lua_reload_count, std::memory_order_release);
+        std::atomic_ref<std::uint32_t>(state_->lua_error_count).store(t.lua_error_count, std::memory_order_release);
+        std::atomic_ref<std::int64_t>(state_->lua_last_step_us).store(t.lua_last_step_us, std::memory_order_release);
+        std::atomic_ref<std::uint64_t>(state_->events_dispatched).store(t.events_dispatched, std::memory_order_release);
+        std::atomic_ref<std::uint32_t>(state_->event_subscriptions).store(t.event_subscriptions, std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->hero_pistol_gltf_loaded).store(t.hero_pistol_gltf_loaded ? 1 : 0, std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->hero_pbr_textures_loaded).store(hero_pbr_textures_loaded ? 1 : 0, std::memory_order_release);
     }
 
     void update_dlssg(
@@ -778,6 +793,18 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         frame_warp_lab::SceneKind scene_kind = frame_warp_lab::SceneKind::range;
         bool cli_ads_active = false;
         frame_warp_lab::TacticalRangeSimulation tactical_range;
+        {
+            const auto& meta = renderer.range_geometry_meta();
+            tactical_range.set_hero_pistol_geometry_meta(
+                meta.hero_pistol_gltf_loaded,
+                meta.pistol_slide_offset,
+                meta.pistol_hammer_offset,
+                meta.pistol_trigger_offset,
+                meta.pistol_magazine_offset,
+                meta.pistol_muzzle_offset,
+                meta.pistol_eject_offset,
+                meta.pistol_ads_sight_y);
+        }
         frame_warp_lab::TacticalRangeFrame tactical_range_frame{};
         simulation.reset_for_tactical_range();
         input_state.range_mode = true;
@@ -1037,6 +1064,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 tactical_range.set_ads_requested(cli_ads_active || input_state.right_mouse_down);
             } else if (command == frame_warp_lab::ControlCommand::range_reload) {
                 tactical_range.request_reload();
+            } else if (command == frame_warp_lab::ControlCommand::reload_lua_scripts) {
+                tactical_range.reload_lua_scripts();
+            } else if (command == frame_warp_lab::ControlCommand::emit_range_event) {
+                const auto event_code = static_cast<std::int32_t>(message_lparam);
+                if (event_code == 1) tactical_range.emit_named_event("weapon.fire_requested");
+                else if (event_code == 2) tactical_range.emit_named_event("weapon.reload_requested");
+                else if (event_code == 3) tactical_range.emit_named_event("target.force_reset");
+                else if (event_code == 4) tactical_range.emit_named_event("range.reset");
             } else if (command == frame_warp_lab::ControlCommand::set_render_scale) {
                 drs_mode = frame_warp_lab::DrsMode::off;
                 render_scale_pct = std::clamp(static_cast<std::int32_t>(message_lparam), 25, 200);
@@ -1283,6 +1318,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                         cadence_counter = 0;
                         pacer.reset();
                         runtime_state.record_event(frame_warp_lab::RuntimeEventType::scene_reset, 0);
+                    } else if (message.wParam == VK_F6) {
+                        tactical_range.reload_lua_scripts();
                     } else if (message.wParam == VK_TAB) {
                         scene_kind = (scene_kind == frame_warp_lab::SceneKind::range)
                             ? frame_warp_lab::SceneKind::corridor
@@ -1453,7 +1490,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 tactical_range.step(delta_seconds, scene_paused && !stepping_now, range_cam);
                 hud_state.tactical_hud_enabled = true;
                 hud_state.tactical_hud = tactical_range.hud_snapshot(range_cam);
-                runtime_state.update_tactical_range(hud_state.tactical_hud);
+                runtime_state.update_tactical_range(
+                    hud_state.tactical_hud,
+                    tactical_range.ecs_lua_telemetry(),
+                    renderer.hero_pbr_textures_loaded());
             } else {
                 hud_state.tactical_hud_enabled = false;
             }

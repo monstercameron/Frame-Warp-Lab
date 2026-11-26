@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(FrameWarpLab VERSION 0.28.0 LANGUAGES CXX)
+project(FrameWarpLab VERSION 0.29.0 LANGUAGES C CXX)
 
 if(NOT WIN32)
     message(FATAL_ERROR "Frame Warp Lab currently requires Windows and Direct3D 12.")
@@ -67,10 +67,23 @@ else()
     FetchContent_MakeAvailable(JoltPhysics)
 endif()
 
+file(GLOB LUA54_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/lua-5.4.7/src/*.c")
+list(FILTER LUA54_SOURCES EXCLUDE REGEX "(lua|luac|onelua)\\.c$")
+add_library(lua54 STATIC ${LUA54_SOURCES})
+target_include_directories(lua54 PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/third_party/lua-5.4.7/src")
+if(MSVC)
+    target_compile_options(lua54 PRIVATE /W0)
+    target_compile_definitions(lua54 PRIVATE _CRT_SECURE_NO_WARNINGS)
+endif()
+
 add_executable(frame_warp_lab WIN32
     src/main.cpp
     src/renderer.cpp
     src/pbr_assets.cpp
+    src/gltf_loader.cpp
+    src/ecs.cpp
+    src/event_bus.cpp
+    src/lua_engine.cpp
     src/tactical_range.cpp
     src/range_mesh.cpp
     src/latency_monitor.cpp
@@ -82,7 +95,11 @@ add_executable(frame_warp_cli
 )
 target_compile_features(frame_warp_lab PRIVATE cxx_std_20)
 target_compile_features(frame_warp_cli PRIVATE cxx_std_20)
-target_compile_definitions(frame_warp_lab PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_include_directories(frame_warp_lab SYSTEM PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/asset_loaders"
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/lua-5.4.7/src"
+)
+target_compile_definitions(frame_warp_lab PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS)
 target_compile_definitions(frame_warp_cli PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 
 if(FRAME_WARP_HAS_STREAMLINE)
@@ -90,12 +107,12 @@ if(FRAME_WARP_HAS_STREAMLINE)
     target_compile_definitions(frame_warp_cli PRIVATE FRAME_WARP_HAS_STREAMLINE=1)
     target_include_directories(frame_warp_lab SYSTEM PRIVATE "${STREAMLINE_INCLUDE_DIR}")
     target_include_directories(frame_warp_cli SYSTEM PRIVATE "${STREAMLINE_INCLUDE_DIR}")
-    target_link_libraries(frame_warp_lab PRIVATE Jolt "${STREAMLINE_LIB_FILE}" dxguid advapi32 dwmapi)
+    target_link_libraries(frame_warp_lab PRIVATE Jolt lua54 "${STREAMLINE_LIB_FILE}" dxguid advapi32 dwmapi)
     target_link_libraries(frame_warp_cli PRIVATE "${STREAMLINE_LIB_FILE}" dxguid)
 else()
     target_compile_definitions(frame_warp_lab PRIVATE FRAME_WARP_HAS_STREAMLINE=0)
     target_compile_definitions(frame_warp_cli PRIVATE FRAME_WARP_HAS_STREAMLINE=0)
-    target_link_libraries(frame_warp_lab PRIVATE Jolt d3d12 dxgi dxguid advapi32 dwmapi)
+    target_link_libraries(frame_warp_lab PRIVATE Jolt lua54 d3d12 dxgi dxguid advapi32 dwmapi)
     target_link_libraries(frame_warp_cli PRIVATE d3d12 dxgi dxguid)
 endif()
 
@@ -143,6 +160,7 @@ add_dependencies(frame_warp_lab frame_warp_shaders)
 add_custom_command(TARGET frame_warp_lab POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:frame_warp_lab>/shaders"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${COMPILED_SHADERS} "$<TARGET_FILE_DIR:frame_warp_lab>/shaders/"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/assets" "$<TARGET_FILE_DIR:frame_warp_lab>/assets"
 )
 
 if(FRAME_WARP_HAS_STREAMLINE)

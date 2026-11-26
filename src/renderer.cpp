@@ -2164,8 +2164,16 @@ void Renderer::create_pbr_assets() {
 }
 
 void Renderer::create_range_resources() {
-    const RangeGeometryPackage pkg = build_tactical_range_geometry();
+    RangeGeometryPackage pkg = build_tactical_range_geometry();
     range_submeshes_ = pkg.submeshes;
+    range_geometry_meta_.hero_pistol_gltf_loaded = pkg.hero_pistol_gltf_loaded;
+    range_geometry_meta_.pistol_slide_offset = pkg.pistol_slide_offset;
+    range_geometry_meta_.pistol_hammer_offset = pkg.pistol_hammer_offset;
+    range_geometry_meta_.pistol_trigger_offset = pkg.pistol_trigger_offset;
+    range_geometry_meta_.pistol_magazine_offset = pkg.pistol_magazine_offset;
+    range_geometry_meta_.pistol_muzzle_offset = pkg.pistol_muzzle_offset;
+    range_geometry_meta_.pistol_eject_offset = pkg.pistol_eject_offset;
+    range_geometry_meta_.pistol_ads_sight_y = pkg.pistol_ads_sight_y;
 
     const std::size_t vb_bytes = pkg.vertices.size() * sizeof(RangeVertex);
     const std::size_t ib_bytes = pkg.indices.size() * sizeof(std::uint32_t);

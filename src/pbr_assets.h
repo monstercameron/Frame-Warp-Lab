@@ -13,6 +13,10 @@ struct PbrAssetBundle {
     Microsoft::WRL::ComPtr<ID3D12Resource> orm_array;
     Microsoft::WRL::ComPtr<ID3D12Resource> dfg_lut;
     Microsoft::WRL::ComPtr<ID3D12Resource> env_cubemap;
+    Microsoft::WRL::ComPtr<ID3D12Resource> hero_albedo;
+    Microsoft::WRL::ComPtr<ID3D12Resource> hero_normal;
+    Microsoft::WRL::ComPtr<ID3D12Resource> hero_orm;
+    bool hero_textures_loaded = false;
 };
 
 PbrAssetBundle create_and_upload_pbr_assets(

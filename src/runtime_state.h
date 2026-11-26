@@ -10,7 +10,7 @@
 namespace frame_warp_lab {
 
 inline constexpr wchar_t window_class_name[] = L"FrameWarpLabWindow";
-inline constexpr std::uint32_t runtime_state_version = 27;
+inline constexpr std::uint32_t runtime_state_version = 28;
 inline constexpr std::size_t runtime_event_capacity = 64;
 inline constexpr std::size_t runtime_frame_trace_capacity = 256;
 inline constexpr std::size_t hud_graph_sample_count = 128;
@@ -65,6 +65,8 @@ enum class ControlCommand : WPARAM {
     range_fire = 41,
     set_range_ads = 42,
     range_reload = 43,
+    reload_lua_scripts = 44,
+    emit_range_event = 45,
 };
 
 enum class SceneKind : std::int32_t {
@@ -352,6 +354,18 @@ struct RuntimeState {
     std::int32_t tactical_score;
     std::int32_t tactical_targets_up;
     std::int32_t tactical_ads_active;
+    std::uint32_t ecs_entity_count;
+    std::uint32_t ecs_renderable_count;
+    std::uint32_t ecs_physics_count;
+    std::uint32_t ecs_script_count;
+    std::uint32_t lua_loaded_scripts;
+    std::uint32_t lua_reload_count;
+    std::uint32_t lua_error_count;
+    std::int64_t lua_last_step_us;
+    std::uint64_t events_dispatched;
+    std::uint32_t event_subscriptions;
+    std::int32_t hero_pistol_gltf_loaded;
+    std::int32_t hero_pbr_textures_loaded;
     std::int32_t overlay_enabled;
     std::int32_t flash_indicator_enabled;
     std::int32_t raw_input_enabled;

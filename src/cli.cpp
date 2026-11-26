@@ -283,6 +283,18 @@ int print_status(const WindowInstance& instance) {
     const std::int32_t tactical_score = std::atomic_ref<std::int32_t>(state->tactical_score).load(std::memory_order_acquire);
     const std::int32_t tactical_targets_up = std::atomic_ref<std::int32_t>(state->tactical_targets_up).load(std::memory_order_acquire);
     const std::int32_t tactical_ads_active = std::atomic_ref<std::int32_t>(state->tactical_ads_active).load(std::memory_order_acquire);
+    const std::uint32_t ecs_entity_count = std::atomic_ref<std::uint32_t>(state->ecs_entity_count).load(std::memory_order_acquire);
+    const std::uint32_t ecs_renderable_count = std::atomic_ref<std::uint32_t>(state->ecs_renderable_count).load(std::memory_order_acquire);
+    const std::uint32_t ecs_physics_count = std::atomic_ref<std::uint32_t>(state->ecs_physics_count).load(std::memory_order_acquire);
+    const std::uint32_t ecs_script_count = std::atomic_ref<std::uint32_t>(state->ecs_script_count).load(std::memory_order_acquire);
+    const std::uint32_t lua_loaded_scripts = std::atomic_ref<std::uint32_t>(state->lua_loaded_scripts).load(std::memory_order_acquire);
+    const std::uint32_t lua_reload_count = std::atomic_ref<std::uint32_t>(state->lua_reload_count).load(std::memory_order_acquire);
+    const std::uint32_t lua_error_count = std::atomic_ref<std::uint32_t>(state->lua_error_count).load(std::memory_order_acquire);
+    const std::int64_t lua_last_step_us = std::atomic_ref<std::int64_t>(state->lua_last_step_us).load(std::memory_order_acquire);
+    const std::uint64_t events_dispatched = std::atomic_ref<std::uint64_t>(state->events_dispatched).load(std::memory_order_acquire);
+    const std::uint32_t event_subscriptions = std::atomic_ref<std::uint32_t>(state->event_subscriptions).load(std::memory_order_acquire);
+    const std::int32_t hero_pistol_gltf_loaded = std::atomic_ref<std::int32_t>(state->hero_pistol_gltf_loaded).load(std::memory_order_acquire);
+    const std::int32_t hero_pbr_textures_loaded = std::atomic_ref<std::int32_t>(state->hero_pbr_textures_loaded).load(std::memory_order_acquire);
     const std::int32_t overlay_enabled = std::atomic_ref<std::int32_t>(state->overlay_enabled).load(std::memory_order_acquire);
     const std::int32_t flash_indicator_enabled = std::atomic_ref<std::int32_t>(state->flash_indicator_enabled).load(std::memory_order_acquire);
     const std::int32_t raw_input_enabled = std::atomic_ref<std::int32_t>(state->raw_input_enabled).load(std::memory_order_acquire);
@@ -432,6 +444,18 @@ int print_status(const WindowInstance& instance) {
               << ",\"score\":" << tactical_score
               << ",\"targets_up\":" << tactical_targets_up
               << ",\"ads_active\":" << (tactical_ads_active ? "true" : "false")
+              << ",\"hero_pistol_gltf_loaded\":" << (hero_pistol_gltf_loaded ? "true" : "false")
+              << ",\"hero_pbr_textures_loaded\":" << (hero_pbr_textures_loaded ? "true" : "false")
+              << "},\"ecs\":{\"entities\":" << ecs_entity_count
+              << ",\"renderables\":" << ecs_renderable_count
+              << ",\"physics_bodies\":" << ecs_physics_count
+              << ",\"scripts\":" << ecs_script_count
+              << "},\"lua\":{\"loaded_scripts\":" << lua_loaded_scripts
+              << ",\"reload_count\":" << lua_reload_count
+              << ",\"error_count\":" << lua_error_count
+              << ",\"last_step_us\":" << lua_last_step_us
+              << "},\"events\":{\"dispatched\":" << events_dispatched
+              << ",\"subscriptions\":" << event_subscriptions
               << "},\"vrs\":{\"tier\":" << vrs_tier
               << ",\"tile_size_px\":" << vrs_tile_size_px
               << ",\"additional_rates_supported\":" << (vrs_additional_rates ? "true" : "false")
@@ -1301,13 +1325,28 @@ int wmain(int argument_count, wchar_t** arguments) {
         }
         return step_instance_frames(*matched_instance, static_cast<std::int32_t>(parsed_count));
     }
-    if (argument_count == 3 && (command == L"pause" || command == L"resume" || command == L"reset" || command == L"fire" || command == L"reload")) {
+    if (command == L"emit" && argument_count == 4) {
+        const std::wstring ev_name = arguments[3];
+        LPARAM code = 0;
+        if (ev_name == L"fire" || ev_name == L"weapon.fire_requested") code = 1;
+        else if (ev_name == L"reload" || ev_name == L"weapon.reload_requested") code = 2;
+        else if (ev_name == L"reset_targets" || ev_name == L"target.force_reset") code = 3;
+        else if (ev_name == L"reset_range" || ev_name == L"range.reset") code = 4;
+        else return fail("invalid_event", "Expected event in {fire, reload, reset_targets, reset_range}");
+        if (!PostMessageW(matched_instance->window, frame_warp_lab::control_message, static_cast<WPARAM>(frame_warp_lab::ControlCommand::emit_range_event), code)) {
+            return fail("control_failed", "Could not dispatch range event");
+        }
+        std::cout << "{\"ok\":true,\"process_id\":" << matched_instance->process_id << ",\"event_dispatched\":" << json_string(ev_name) << "}\n";
+        return 0;
+    }
+    if (argument_count == 3 && (command == L"pause" || command == L"resume" || command == L"reset" || command == L"fire" || command == L"reload" || command == L"reload_scripts")) {
         const frame_warp_lab::ControlCommand operation = command == L"pause"
             ? frame_warp_lab::ControlCommand::scene_pause
             : command == L"resume" ? frame_warp_lab::ControlCommand::scene_resume
             : command == L"reset" ? frame_warp_lab::ControlCommand::scene_reset
             : command == L"fire" ? frame_warp_lab::ControlCommand::range_fire
-            : frame_warp_lab::ControlCommand::range_reload;
+            : command == L"reload" ? frame_warp_lab::ControlCommand::range_reload
+            : frame_warp_lab::ControlCommand::reload_lua_scripts;
         if (!PostMessageW(matched_instance->window, frame_warp_lab::control_message, static_cast<WPARAM>(operation), 0)) {
             return fail("control_failed", "Could not send scene control request");
         }

@@ -26,6 +26,10 @@ SamplerState linear_clamp_sampler : register(s0);
 
 #include "pbr_materials.hlsl"
 
+Texture2D<float4> pbr_hero_albedo : register(t8);
+Texture2D<float4> pbr_hero_normal : register(t9);
+Texture2D<float4> pbr_hero_orm : register(t10);
+
 struct RangeVertexIn {
     float3 position : POSITION;
     float3 normal : NORMAL;
@@ -109,7 +113,17 @@ SceneOutput range_ps_main(RangeVertexOut input) {
     float3 albedo;
     float3 ts_n;
     float4 orm;
-    if (range_flags.y > 0.5) {
+    if (input.material_id == 12u) {
+        if (range_flags.y > 0.5) {
+            albedo = pbr_hero_albedo.SampleGrad(pbr_aniso_sampler, input.uv, duv_dx, duv_dy).rgb;
+            ts_n = pbr_hero_normal.SampleGrad(pbr_aniso_sampler, input.uv, duv_dx, duv_dy).xyz * 2.0 - 1.0;
+            orm = pbr_hero_orm.SampleGrad(pbr_aniso_sampler, input.uv, duv_dx, duv_dy);
+        } else {
+            albedo = pbr_hero_albedo.SampleLevel(pbr_aniso_sampler, input.uv, 0.0).rgb;
+            ts_n = pbr_hero_normal.SampleLevel(pbr_aniso_sampler, input.uv, 0.0).xyz * 2.0 - 1.0;
+            orm = pbr_hero_orm.SampleLevel(pbr_aniso_sampler, input.uv, 0.0);
+        }
+    } else if (range_flags.y > 0.5) {
         albedo = pbr_albedo_array.SampleGrad(pbr_aniso_sampler, float3(input.uv, slice), duv_dx, duv_dy).rgb;
         ts_n = pbr_normal_array.SampleGrad(pbr_aniso_sampler, float3(input.uv, slice), duv_dx, duv_dy).xyz * 2.0 - 1.0;
         orm = pbr_orm_array.SampleGrad(pbr_aniso_sampler, float3(input.uv, slice), duv_dx, duv_dy);

@@ -26,6 +26,14 @@ struct RangeGeometryPackage {
     std::vector<RangeVertex> vertices;
     std::vector<std::uint32_t> indices;
     std::array<RangeSubmesh, static_cast<std::size_t>(RangeMeshKind::count)> submeshes{};
+    bool hero_pistol_gltf_loaded = false;
+    Float3 pistol_slide_offset{0.0f, 0.0f, 0.0f};
+    Float3 pistol_hammer_offset{0.0f, 0.0f, 0.0f};
+    Float3 pistol_trigger_offset{0.0f, 0.0f, 0.0f};
+    Float3 pistol_magazine_offset{0.0f, 0.0f, 0.0f};
+    Float3 pistol_muzzle_offset{0.0f, 0.042f, 0.145f};
+    Float3 pistol_eject_offset{0.028f, 0.050f, 0.025f};
+    float pistol_ads_sight_y = 0.068f;
 };
 
 RangeGeometryPackage build_tactical_range_geometry();
