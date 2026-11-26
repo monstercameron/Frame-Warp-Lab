@@ -279,6 +279,13 @@ Before expanding to complex rasterized mesh/PBR shaders, validate the architectu
 | 9 | Post-synthesis painting | Measurable improvement over uncorrected synthesis | Planned |
 | 10 | Blinded perceptual A/B tests | Establish perceptual equivalence thresholds | Planned |
 
+### 9. Pre-PBR 8-shader theory stress-test findings (`v0.26.0`)
+
+Testing each shading failure mode individually (`scripts/run_shader_theory_suite.ps1`, 12-frame sequence `F24..F112` @ 240 Hz, `stress=16`, `occlusion_sweep`) proved **why** naive geometry-only PAR (`depth + material_id`) breaks on real-game shaders and exactly which 3 architectural extensions are required before full PBR:
+- **Passed cleanly vs. VRS Tier 2**: `specular` (`36.59` vs `32.58 dB`), `normal_map` (`36.16` vs `32.38 dB`), `emissive` (`35.37` vs `32.31 dB`), `moving_light` (`34.63` vs `31.39 dB`, `-1.96 dB` lag).
+- **Exposed honest failures of geometry-only invalidation**: `anim_uv` collapsed to **`26.89 dB`** vs VRS `33.05 dB` (`-6.16 dB`, 2× flicker); `transparent` lost `-3.98 dB` (`32.61 dB`, `P99=35.8`, flicker `7.54 > VRS 7.44`) from single-layer background-depth reprojection; `hard_shadows` lost `-2.57 dB` (`34.02 dB`, flicker `7.05 > VRS 6.91`) from nonlocal shadow sweeps; `hf_checker` dropped both VRS (`18.28 dB`) and PAR-3 (`23.05 dB`) under Nyquist aliasing; and stacking **`all` 8 collapsed naive PAR-3 to `15.54 dB` / `0.436` SSIM** (losing to VRS `18.27 dB`).
+- **Required architectural fixes before PBR**: (1) reactive material/UV/emissive invalidation, (2) cheap shadow/lighting-delta invalidation (or separated view-dependent specular + direct lighting pass), and (3) forward transparent compositing pass separate from the opaque PAR cache.
+
 ## Inverse-rendering architecture and verified literature backlog
 
 In Frame Warp Lab's architectural sense, **inverse rendering** means fixing the presentation deadline first (`T_execution(S) <= T_deadline`) and treating image quality as the constrained optimization variable (`minimize E_perceptual + lambda * E_temporal`) across six decoupled layers:

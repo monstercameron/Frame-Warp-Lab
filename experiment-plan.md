@@ -108,6 +108,22 @@ Execute and gate the following 10 pre-complex-shader validation experiments befo
 | 9 | **Post-synthesis painting** | Measurable improvement over uncorrected synthesis | Planned (repairing residual holes/disocclusions after warp/synthesis rather than only pre-synthesis) |
 | 10 | **Blinded perceptual A/B tests** | Establish perceptual equivalence thresholds | Planned (static gaze + smooth-pursuit human viewing against native high-Hz reference) |
 
+## Pre-PBR 8-shader theory stress matrix (`v0.26.0`)
+
+Before building full PBR lighting & textures, isolate each shader failure mode individually against `1×1` Native Ground Truth and Hardware VRS Tier 2 (`scripts/run_shader_theory_suite.ps1`):
+
+| # | Shader (`shader_feature`) | Theory tested | Naive `PAR-3 15%` vs VRS Tier 2 (`v0.26.0` measured) | Architectural takeaway |
+| :-: | :--- | :--- | :--- | :--- |
+| 1 | **High-frequency checkerboard (`hf_checker`)** | Temporal resampling and detail preservation | `23.05 dB` (`0.872` SSIM) vs VRS `18.28 dB` (`0.669`) | Beats VRS `+4.77 dB`, but un-mipped Nyquist patterns still alias; needs mip/analytical filtering or surface cache. |
+| 2 | **Animated texture coordinates (`anim_uv`)** | Material invalidation | **`26.89 dB` (`tRMSE=15.61`)** vs VRS **`33.05 dB` (`8.07`)** | **Exposed failure (`-6.16 dB`)**: animated UV materials MUST emit a reactive invalidation mask. |
+| 3 | **Blinn-Phong specular (`specular`)** | View-dependent shading invalidation | `36.59 dB` (`0.975` SSIM) vs VRS `32.58 dB` (`0.945`) | Holds up `+4.01 dB` on corridor angles; sharp curved PBR speculars still warrant split diffuse/specular evaluation. |
+| 4 | **Moving point light (`moving_light`)** | Lighting-change propagation | `34.63 dB` (`tRMSE=6.42`) vs VRS `31.39 dB` (`8.21`) | Beats VRS `+3.24 dB`, `-1.96 dB` lag vs baseline; needs light-delta priority boost. |
+| 5 | **Animated emissive material (`emissive`)** | Temporal contrast sensitivity | `35.37 dB` (`tRMSE=5.87`) vs VRS `32.31 dB` (`7.61`) | Beats VRS `+3.06 dB`, `-1.22 dB` lag on `10 rad/s` pulsing strips; needs emissive reactive mask. |
+| 6 | **Hard moving shadows (`hard_shadows`)** | Nonlocal shading invalidation | `34.02 dB` (**`tRMSE=7.05`**, `P99=30.4`) vs VRS `33.32 dB` (`6.91`) | **Exposed nonlocal lag**: moving shadow edges sweep static walls with zero depth change; needs shadow-delta invalidation. |
+| 7 | **Normal mapping (`normal_map`)** | High-frequency surface shading stability | `36.16 dB` (`0.975` SSIM) vs VRS `32.38 dB` (`0.936`) | Rock-solid (`+3.78 dB` over VRS, only `-0.43 dB` vs baseline). |
+| 8 | **Simple transparent surfaces (`transparent`)** | Multilayer visibility and reprojection limitations | `32.61 dB` (**`P99=35.8`**, `tRMSE=7.54`) vs VRS `32.58 dB` (`7.44`) | **Exposed multilayer conflict (`-3.98 dB`)**: glass reprojects at background depth; transparency MUST composite in a separate forward pass after opaque PAR. |
+| All | **All 8 combined (`all`)** | Combined shader stress | **`15.54 dB` (`0.436` SSIM, `tRMSE=59.95`)** vs VRS `18.27 dB` (`0.686`) | **Naive geometry-only PAR fails when stacked** — motivates `v0.27.0` shader-aware invalidation + separate forward transparency pass before full PBR. |
+
 ## Experiment progression and CLI
 
 1. Build agent-accessible, structured logging and CLI inspection/control alongside the baseline. Expose supported and unavailable capabilities, display target, configuration, run lifecycle, per-frame correlation and bounded trace capture. See `AGENTS.md` for the full interface requirements.

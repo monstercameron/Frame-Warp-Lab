@@ -1,5 +1,25 @@
 # Development log
 
+## v0.26.0 — 8-shader theory stress-test suite: isolating material, lighting, shadow, normal-map, and transparency failure modes of naive geometry-only PAR
+
+- Implemented all 8 isolated shader theory stress features bit-identically in both `shaders/motion_lab.hlsl` (Ground Truth + Hardware VRS) and `shaders/selective_tiles.hlsl` (`PAR-3`), exposed via `set <pid> shader_feature <name|0..255>` (`RuntimeState` v25 / CLI schema v20) and benchmarked with `scripts/run_shader_theory_suite.ps1` (`src/runtime_state.h`, `src/renderer.h`, `src/renderer.cpp`, `src/main.cpp`, `src/cli.cpp`, `CMakeLists.txt`):
+  1. `hf_checker` (bit 0): 10–12× high-frequency sharp checkerboard (temporal resampling & detail preservation).
+  2. `anim_uv` (bit 1): continuous scrolling UV coordinates on static geometry (material invalidation).
+  3. `specular` (bit 2): view-dependent Blinn-Phong highlights (view-dependent invalidation).
+  4. `moving_light` (bit 3): orbiting warm point light (global lighting-change propagation).
+  5. `emissive` (bit 4): `10 rad/s` pulsing neon bands (temporal contrast sensitivity).
+  6. `hard_shadows` (bit 5): 32-step raymarched hard moving shadows cast by orbiting light/sphere/pillars (nonlocal shading invalidation).
+  7. `normal_map` (bit 6): high-frequency multi-axis bump/normal perturbation (surface shading stability).
+  8. `transparent` (bit 7): semi-transparent frosted Fresnel glass barrier at `z = 8.6` over single-layer opaque depth (multilayer visibility & reprojection limitations).
+- Verified zero code comments, zero-warning ARM64 Release + Debug builds (all 12 SM 6.0 DXIL shaders), Debug D3D12 Debug Layer validation (`shader_flags=255`, `510/3397` shaded tiles, `0` errors), and full 12-frame sequence evaluation (`F24..F112` @ 240 Hz, `stress=16`, `occlusion_sweep`) on **NVIDIA RTX Spark N1X**:
+  - **Held up well (naive `PAR-3 15%` beats VRS Tier 2 by `+3.1–4.0 dB` at lower GPU cost)**: `none` (`36.59` vs `32.66 dB`), `specular` (`36.59` vs `32.58 dB`), `normal_map` (`36.16` vs `32.38 dB`), `emissive` (`35.37` vs `32.31 dB`), `moving_light` (`34.63` vs `31.39 dB`, `-1.96 dB` lag vs baseline).
+  - **Honest failure boundaries exposed on naive geometry-only `PAR-3 15%`**:
+    - `anim_uv`: **`26.89 dB` / `0.8406` SSIM / `tRMSE=15.61`** vs VRS **`33.05 dB` / `0.9488` / `tRMSE=8.07`** (`-6.16 dB` behind VRS — proves animated materials require reactive invalidation).
+    - `transparent`: **`32.61 dB` / `P99=35.8` / `tRMSE=7.54`** (lost `-3.98 dB` vs baseline and higher flicker than VRS `7.44` — single-layer depth reprojects glass at background corridor depth).
+    - `hard_shadows`: **`34.02 dB` / `P99=30.4` / `tRMSE=7.05`** (lost `-2.57 dB` and exceeded VRS flicker `6.91` — nonlocal moving shadows sweep across static walls with zero depth change).
+    - `hf_checker`: both VRS (`18.28 dB`, `0.6685` SSIM) and PAR-3 (`23.05 dB`, `0.8720` SSIM) suffer severe sub-pixel aliasing on un-mipped 10× checkers, though PAR-3 stays `+4.77 dB` ahead.
+    - `all` (all 8 stacked): naive geometry-only `PAR-3` collapsed to **`15.54 dB` / `0.4356` SSIM / `tRMSE=59.95`** (losing to VRS `18.27 dB` / `0.6855`), directly proving that reactive material invalidation, shadow-delta invalidation, and post-PAR forward transparency are mandatory before full PBR.
+
 ## v0.25.0 — PAR-3 4×4 sub-tile interleaving, zero-contamination Temporal Video Quality Harness, PAR-5 500-frame drift proof, and damage-rate-aware auto-bypass scheduler
 
 - Completed all 4 pre-PBR validation milestones (Priorities 1, 2, 3, and 6 in `experiment-plan.md`) (`shaders/selective_tiles.hlsl`, `src/adaptive_scheduler.h`, `src/runtime_state.h`, `src/renderer.h`, `src/renderer.cpp`, `src/main.cpp`, `src/cli.cpp`, `CMakeLists.txt`, `scripts/run_temporal_and_firewall_suite.ps1`):

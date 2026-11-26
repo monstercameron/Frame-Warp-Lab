@@ -125,6 +125,7 @@ public:
         const SceneSnapshot& snapshot,
         std::chrono::steady_clock::time_point capture_time,
         std::int32_t stress_level,
+        std::uint32_t shader_flags,
         VrsMode vrs_mode,
         bool selective_tiles_enabled,
         std::int32_t tile_budget_pct,

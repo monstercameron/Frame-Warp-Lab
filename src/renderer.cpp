@@ -551,6 +551,7 @@ bool Renderer::submit_scene_async(
     const SceneSnapshot& snapshot,
     std::chrono::steady_clock::time_point capture_time,
     std::int32_t stress_level,
+    std::uint32_t shader_flags,
     VrsMode vrs_mode,
     bool selective_tiles_enabled,
     std::int32_t tile_budget_pct,
@@ -617,9 +618,9 @@ bool Renderer::submit_scene_async(
     write_float4(scene_constants->previous_camera_position_tan_y, prev_camera.position, 1.0f / prev_tan_y);
     write_float4(scene_constants->previous_camera_right_aspect, prev_camera.right, 1.0f / prev_tan_x);
     write_float4(scene_constants->previous_camera_up_cut, prev_camera.up, snapshot.discontinuity ? 1.0f : 0.0f);
-    write_float4(scene_constants->previous_camera_forward_unused, prev_camera.forward, 0.0f);
+    write_float4(scene_constants->previous_camera_forward_unused, prev_camera.forward, static_cast<float>(snapshot.scene_time_seconds));
     write_float4(scene_constants->ball_center_stress, snapshot.ball_center, static_cast<float>(stress_level));
-    write_float4(scene_constants->previous_ball_center_unused, prev_ball_center, 0.0f);
+    write_float4(scene_constants->previous_ball_center_unused, prev_ball_center, static_cast<float>(shader_flags & 0xFFU));
     simd::store_uint4(
         scene_constants->tile_params,
         tiles_x,
