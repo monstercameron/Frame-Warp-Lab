@@ -139,6 +139,21 @@ Implemented full Filament/Frostbite/OpenPBR-grade PBR (`shaders/pbr_materials.hl
 - **Proven**: On real textured metallic/clearcoat PBR materials, `PAR-3 15%` beats Hardware VRS Tier 2 by **`+7.73 dB`**, `+0.147` SSIM, and `-52.7%` temporal flicker; analytical `SampleGrad` + Toksvig + Specular AA lifts `PAR-3 15%` by **`+2.75 dB`** and cuts flicker `-26.5%` for `+12 µs`.
 - **Exposed visibility bottleneck (`stress=0` at `4K`)**: Pure PBR `GT=2,859 µs` vs `PAR-3 15%=2,675 µs` (`1.07×`) because 88-step SDF raymarching runs on 100% of pixels during visibility classification (`~2.2 ms` at 4K). Replacing SDF raymarching with hardware triangle visibility-buffer rasterization is the clear next step to realize `PAR-3`'s full 4–6× speedup on standard PBR workloads.
 
+## 10-Priority Shading, Caching & Control Validation Matrix (`v0.31.0`–`v0.35.0`)
+
+| Priority | Problem | Solution Implemented / Planned | Verification Script | Key Observed Result (NVIDIA RTX Spark N1X) |
+| :-: | :--- | :--- | :--- | :--- |
+| **1** | Expensive ray-marched visibility | Hardware Triangle VisBuffer + Deferred `PAR-3` (`v0.31.0`) | `scripts/run_visbuffer_par_experiment.ps1` | `1080p: 2,616 → 618 µs (4.23×)`, `1440p: 4,541 → 1,157 µs (3.92×)`, `4K: 8,598 → 3,471 µs (2.48×, 0 missed)`. |
+| **2** | Animated materials invalidate cached shading | Material revision IDs & reactive masks (`v0.32.0`) | `scripts/run_invalidation_experiment.ps1` | Range emissive **`+7.83 dB`** (`tRMSE 25.27 → 6.64`, `P99 104.9 → 24.3`); Corridor emissive **`+1.72 dB`**. |
+| **3** | Moving shadows affect stationary surfaces | Shadow-delta invalidation (`v0.32.0`) | `scripts/run_invalidation_experiment.ps1` | Range hard shadow **`+1.05 dB`** at `6.34×` GT speedup (`234 µs`); Corridor hard shadows **`+1.59 dB`**. |
+| **4** | Transparency cannot use opaque depth alone | Dedicated `opaque_cache_target` + Independent Forward Transparency (`v0.33.0`) | `scripts/run_transparency_experiment.ps1` | Range ballistic glass **`+8.72 dB`** (`19.91 → 28.63 dB`, `382 µs`); Corridor glass **`+2.17 dB`** (`30.78 → 32.96 dB`). |
+| **5** | Specular lighting depends on viewpoint | Separate diffuse (`PAR-3 15%`) & full-res specular/albedo composite (`v0.34.0`) | `scripts/run_split_surface_cache_experiment.ps1` | `SSIM 0.8759 → 0.9594` (`corridor_sway`) & `0.8608 → 0.9587` (`occlusion_sweep`), `tRMSE` cut **>2×**. |
+| **6** | Screen-space caching introduces resampling loss | Persistent 262K-cell GPU surface-space hash cache (`v0.34.0`) | `scripts/run_split_surface_cache_experiment.ps1` | `+27–30 µs` lifts Unified SSIM **`+0.058`**; P5+P6 achieves **`SSIM 0.9650` / `tRMSE 3.59`** (`2.62×` lower shimmer). |
+| **7** | Independent adaptive controllers may conflict | Single 7-tier Pareto `UnifiedQualityController` (`v0.35.0`) | `scripts/run_unified_controller_experiment.ps1` | 4-stage `1080p↔4K` shock: **`14 → 0` missed deadlines**, **`55 → 6` transitions**, **`0` oscillations**, **`p95 -37.4%`**. |
+| **8** | Unverified neural generated-frame quality | Foreground DLSS-G experiments | Interactive `WinSta0\Default` + PresentMon | Next phase: validate foreground `numFramesActuallyPresented >= 2` + generated-frame quality. |
+| **9** | Cognitive integration remains unproven | Blinded human perception studies | Controlled 2AFC protocol | Next phase: static gaze + smooth pursuit human perception thresholds. |
+| **10** | Limited workload complexity | Larger imported glTF 2.0 environments & materials | Multi-asset scene loader | Next phase: scale `gltf_loader` + ECS to full multi-room architectural scenes. |
+
 ## Experiment progression and CLI
 
 1. Build agent-accessible, structured logging and CLI inspection/control alongside the baseline. Expose supported and unavailable capabilities, display target, configuration, run lifecycle, per-frame correlation and bounded trace capture. See `AGENTS.md` for the full interface requirements.

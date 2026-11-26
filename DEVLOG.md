@@ -1,5 +1,21 @@
 # Development log
 
+## v0.35.0 — Priority 7: Unified Cost & Quality Controller + 10-Priority Architecture & Research Update
+
+- Replaced conflicting independent adaptive controllers (`AdaptiveScheduler` VRS/cadence + `AutoTileBudgetController` + `AutoDrsController`) with a single authoritative, closed-loop **Unified Cost & Quality Controller (`UnifiedQualityController`)** and documented all 10 architecture priorities (`src/adaptive_scheduler.h`, `src/runtime_state.h`, `src/renderer.h`, `src/renderer.cpp`, `src/main.cpp`, `src/cli.cpp`, `CMakeLists.txt`, `scripts/run_unified_controller_experiment.ps1`, `research.md`, `experiment-plan.md`):
+  - **Single 7-Tier Empirically Calibrated Pareto Ladder (`src/adaptive_scheduler.h`)**:
+    - Owns `PAR-3` tile budget, `Split Diffuse/Specular`, `Persistent Surface-Space Cache`, `DRS` render scale, `VRS`, and cadence divider jointly from `T0` (`Split+SurfCache 25% / 100% native`) → `T1` (`Split+SurfCache 15%`) → `T2` (`Unified+SurfCache 22% / 100% native`) → `T3` (`Unified+SurfCache 15%`) → `T4–T5` (`DRS 85% / 72%`) → `T6` (`Emergency Div-2`), locking out independent controllers when active.
+    - Uses asymmetric deadband hysteresis (`util > 0.88` degrade with `3`-frame cooldown vs `util < 0.56` recovery after `48`-frame hold + `24`-frame streak) to guarantee zero ping-pong oscillation.
+  - **Flush-Free Mode Switching (`slot.used_split_diff_spec` in `src/renderer.h/.cpp`)**:
+    - Replaced blocking GPU `flush()` calls on `split_diff_spec` tier transitions with per-slot compatibility tracking (`prev.used_split_diff_spec == split_diff_spec_enabled`), enabling seamless zero-stall 1-frame bootstrap transitions between `Split+SurfCache` and `Unified+SurfCache`.
+  - **Runtime & CLI Observability (`RuntimeState` v33)**:
+    - Added `set <pid> unified_controller on|off` and `status.unified_controller` (`enabled`, `tier`, `target_scene_budget_us`, `utilization`, `transitions`, `oscillations`).
+  - **Research & Experiment Plan Documentation (`research.md`, `experiment-plan.md`)**:
+    - Logged the full 10-priority architecture matrix (Priorities 1–7 implemented & verified on NVIDIA RTX Spark N1X; Priorities 8–10 logged as the next phase: foreground DLSS-G, blinded human perception studies, larger imported environments).
+- Verified zero code comments, ARM64 Release + Debug builds, Debug D3D12 Debug Layer (`unified=True`, `tier=0`, `ok=True`, `0` errors), and `scripts/run_unified_controller_experiment.ps1` 4-stage resolution load shock (`1080p → 4K → 1440p → 4K @ 120 Hz` paced, 14-light PBR Gun Range) on **NVIDIA RTX Spark N1X**:
+  - **Conflicting Independent Controllers**: `avg_med=4,058 µs` · `avg_p95=5,748 µs` (`7,431 µs` peak) · **`14` missed deadlines** · **`55` actuator changes** · `1` oscillation (slashed 1440p to `5%` tiles / `80%` DRS / `VRS foveated` and still missed 3 deadlines!).
+  - **Priority 7 Unified Controller**: **`avg_med=2,855 µs (-29.6%)`** · **`avg_p95=3,596 µs (-37.4%)`** · **`0` missed deadlines!!** · **`6` clean surgical transitions (`9.17×` fewer!)** · **`0` oscillations!!** (held **100% native resolution** and `VRS=off` across every stage: `1080p T0 Split+Surf 1,616 µs` → `4K T2 Unif+Surf 3,584 µs` → `1440p T0 Split+Surf 2,800 µs` → `4K T2 Unif+Surf 3,421 µs`).
+
 ## v0.34.0 — Priorities 5 & 6: Separate Diffuse & Specular Cache Frequencies + Persistent 262K-Cell GPU Surface-Space Shading Cache
 
 - Eliminated view-dependent specular parallax lag (Priority 5) and screen-space resampling blur / disocclusion flashes (Priority 6) on the 14-light PBR Gun Range (`shaders/range_lighting.hlsl`, `shaders/range_vis_par.hlsl`, `src/renderer.h`, `src/renderer.cpp`, `src/runtime_state.h`, `src/main.cpp`, `src/cli.cpp`, `CMakeLists.txt`, `scripts/run_split_surface_cache_experiment.ps1`):

@@ -10,7 +10,7 @@
 namespace frame_warp_lab {
 
 inline constexpr wchar_t window_class_name[] = L"FrameWarpLabWindow";
-inline constexpr std::uint32_t runtime_state_version = 32;
+inline constexpr std::uint32_t runtime_state_version = 33;
 inline constexpr std::size_t runtime_event_capacity = 64;
 inline constexpr std::size_t runtime_frame_trace_capacity = 256;
 inline constexpr std::size_t hud_graph_sample_count = 128;
@@ -72,6 +72,7 @@ enum class ControlCommand : WPARAM {
     set_forward_transparency = 48,
     set_split_diff_spec = 49,
     set_surface_cache = 50,
+    set_unified_controller = 51,
 };
 
 enum class SceneKind : std::int32_t {
@@ -227,6 +228,7 @@ enum class ConfigKey : std::int32_t {
     forward_transparency = 38,
     split_diff_spec = 39,
     surface_cache = 40,
+    unified_controller = 41,
 };
 
 enum class RuntimeEventType : std::int32_t {
@@ -425,6 +427,12 @@ struct RuntimeState {
     std::int32_t forward_transparency_enabled;
     std::int32_t split_diff_spec_enabled;
     std::int32_t surface_cache_enabled;
+    std::int32_t unified_controller_enabled;
+    std::int32_t unified_controller_tier;
+    std::int32_t unified_controller_util_permille;
+    std::int64_t unified_controller_budget_us;
+    std::int64_t unified_controller_transitions;
+    std::int64_t unified_controller_oscillations;
     std::int32_t par_bypass_active;
     std::int32_t smoothed_damage_pct;
     std::int32_t render_scale_pct;
@@ -543,6 +551,7 @@ inline const char* config_key_name(std::int32_t key) {
         case ConfigKey::forward_transparency: return "forward_transparency";
         case ConfigKey::split_diff_spec: return "split_diff_spec";
         case ConfigKey::surface_cache: return "surface_cache";
+        case ConfigKey::unified_controller: return "unified_controller";
         default: return "unknown";
     }
 }

@@ -343,6 +343,12 @@ int print_status(const WindowInstance& instance) {
     const std::int32_t forward_transparency_enabled = std::atomic_ref<std::int32_t>(state->forward_transparency_enabled).load(std::memory_order_acquire);
     const std::int32_t split_diff_spec_enabled = std::atomic_ref<std::int32_t>(state->split_diff_spec_enabled).load(std::memory_order_acquire);
     const std::int32_t surface_cache_enabled = std::atomic_ref<std::int32_t>(state->surface_cache_enabled).load(std::memory_order_acquire);
+    const std::int32_t unified_controller_enabled = std::atomic_ref<std::int32_t>(state->unified_controller_enabled).load(std::memory_order_acquire);
+    const std::int32_t unified_controller_tier = std::atomic_ref<std::int32_t>(state->unified_controller_tier).load(std::memory_order_acquire);
+    const std::int32_t unified_controller_util_permille = std::atomic_ref<std::int32_t>(state->unified_controller_util_permille).load(std::memory_order_acquire);
+    const std::int64_t unified_controller_budget_us = std::atomic_ref<std::int64_t>(state->unified_controller_budget_us).load(std::memory_order_acquire);
+    const std::int64_t unified_controller_transitions = std::atomic_ref<std::int64_t>(state->unified_controller_transitions).load(std::memory_order_acquire);
+    const std::int64_t unified_controller_oscillations = std::atomic_ref<std::int64_t>(state->unified_controller_oscillations).load(std::memory_order_acquire);
     const std::int32_t par_bypass_active = std::atomic_ref<std::int32_t>(state->par_bypass_active).load(std::memory_order_acquire);
     const std::int32_t smoothed_damage_pct = std::atomic_ref<std::int32_t>(state->smoothed_damage_pct).load(std::memory_order_acquire);
     const std::int32_t render_scale_pct = std::atomic_ref<std::int32_t>(state->render_scale_pct).load(std::memory_order_acquire);
@@ -489,6 +495,12 @@ int print_status(const WindowInstance& instance) {
               << "\",\"reserved_headroom_us\":" << adaptive_reserved_headroom_us
               << ",\"gpu_budget_utilization\":" << std::fixed << std::setprecision(3) << (static_cast<double>(adaptive_utilization_permille) / 1000.0)
               << ",\"decision_count\":" << adaptive_decision_count << "}"
+              << ",\"unified_controller\":{\"enabled\":" << (unified_controller_enabled ? "true" : "false")
+              << ",\"tier\":" << unified_controller_tier
+              << ",\"target_scene_budget_us\":" << unified_controller_budget_us
+              << ",\"utilization\":" << std::fixed << std::setprecision(3) << (static_cast<double>(unified_controller_util_permille) / 1000.0)
+              << ",\"transitions\":" << unified_controller_transitions
+              << ",\"oscillations\":" << unified_controller_oscillations << "}"
               << ",\"dlss_g\":{\"streamline_initialized\":" << (streamline_initialized ? "true" : "false")
               << ",\"supported\":" << (dlssg_supported ? "true" : "false")
               << ",\"dlss_sr_supported\":" << (dlss_sr_supported ? "true" : "false")
@@ -951,6 +963,11 @@ int apply_setting(const WindowInstance& instance, const std::wstring& key, const
         if (value == L"on" || value == L"1" || value == L"true") parameter = 1;
         else if (value == L"off" || value == L"0" || value == L"false") parameter = 0;
         else return fail("invalid_value", "Expected surface_cache in {on, off}");
+    } else if (key == L"unified_controller") {
+        command = frame_warp_lab::ControlCommand::set_unified_controller;
+        if (value == L"on" || value == L"1" || value == L"true") parameter = 1;
+        else if (value == L"off" || value == L"0" || value == L"false") parameter = 0;
+        else return fail("invalid_value", "Expected unified_controller in {on, off}");
     } else if (key == L"shader_feature") {
         command = frame_warp_lab::ControlCommand::set_shader_flags;
         unsigned long parsed = 0;

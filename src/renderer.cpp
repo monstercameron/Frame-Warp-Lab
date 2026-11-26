@@ -650,6 +650,7 @@ bool Renderer::submit_scene_async(
         && prev_slot_index != slot_index
         && source_slots_[static_cast<std::size_t>(prev_slot_index)].valid
         && source_slots_[static_cast<std::size_t>(prev_slot_index)].used_selective_tiles
+        && (source_slots_[static_cast<std::size_t>(prev_slot_index)].used_split_diff_spec == split_diff_spec_enabled)
         && !snapshot.discontinuity;
     const CameraBasis& prev_camera = can_use_prev_cache
         ? source_slots_[static_cast<std::size_t>(prev_slot_index)].snapshot.camera
@@ -1038,6 +1039,7 @@ bool Renderer::submit_scene_async(
                 }
             }
             slot.used_selective_tiles = true;
+            slot.used_split_diff_spec = run_split_composite;
         } else {
             const std::array<D3D12_RESOURCE_BARRIER, targets_per_source_slot> to_rtv = {
                 transition_barrier(slot.color_target.Get(), source_slot_readable_state, D3D12_RESOURCE_STATE_RENDER_TARGET),

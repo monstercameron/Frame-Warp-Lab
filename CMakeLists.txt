@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(FrameWarpLab VERSION 0.34.0 LANGUAGES C CXX)
+project(FrameWarpLab VERSION 0.35.0 LANGUAGES C CXX)
 
 if(NOT WIN32)
     message(FATAL_ERROR "Frame Warp Lab currently requires Windows and Direct3D 12.")

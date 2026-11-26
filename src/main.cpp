@@ -211,6 +211,15 @@ public:
         std::atomic_ref<std::int64_t>(state_->adaptive_decision_count).store(telemetry.decision_count, std::memory_order_release);
     }
 
+    void update_unified_controller(const frame_warp_lab::UnifiedControllerTelemetry& telemetry) {
+        std::atomic_ref<std::int32_t>(state_->unified_controller_enabled).store(telemetry.enabled ? 1 : 0, std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->unified_controller_tier).store(telemetry.tier, std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->unified_controller_util_permille).store(telemetry.utilization_permille, std::memory_order_release);
+        std::atomic_ref<std::int64_t>(state_->unified_controller_budget_us).store(telemetry.target_budget_us, std::memory_order_release);
+        std::atomic_ref<std::int64_t>(state_->unified_controller_transitions).store(telemetry.transitions, std::memory_order_release);
+        std::atomic_ref<std::int64_t>(state_->unified_controller_oscillations).store(telemetry.oscillations, std::memory_order_release);
+    }
+
     void update_selective_tiles(
         bool enabled,
         std::int32_t budget_pct,
@@ -803,6 +812,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         std::uint32_t pending_capture_tag = 0;
         frame_warp_lab::AutoTileBudgetController auto_tile_budget;
         frame_warp_lab::AutoDrsController auto_drs;
+        frame_warp_lab::UnifiedQualityController unified_controller;
         wchar_t exe_path_buf[32768]{};
         GetModuleFileNameW(nullptr, exe_path_buf, static_cast<DWORD>(std::size(exe_path_buf)));
         const std::filesystem::path capture_dir = std::filesystem::path(exe_path_buf).parent_path() / L"captures";
@@ -881,6 +891,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 overlay_enabled,
                 flash_indicator_enabled);
             runtime_state.update_adaptive(adaptive_scheduler.enabled(), adaptive_scheduler.telemetry());
+            runtime_state.update_unified_controller(unified_controller.telemetry());
             runtime_state.update_selective_tiles(
                 selective_tiles_enabled,
                 tile_budget_pct,
@@ -1077,6 +1088,28 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 surface_cache_enabled = message_lparam != 0;
                 renderer.invalidate_source_history();
                 runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, surface_cache_enabled ? 1 : 0, frame_warp_lab::ConfigKey::surface_cache);
+            } else if (command == frame_warp_lab::ControlCommand::set_unified_controller) {
+                const bool en = message_lparam != 0;
+                unified_controller.set_enabled(en);
+                if (en) {
+                    adaptive_scheduler.set_enabled(false);
+                    auto_tile_budget_enabled = false;
+                    drs_mode = frame_warp_lab::DrsMode::off;
+                    auto_tile_budget.reset();
+                    auto_drs.reset();
+                    const auto p0 = frame_warp_lab::UnifiedQualityController::profile_for_tier(unified_controller.tier());
+                    selective_tiles_enabled = p0.selective_tiles;
+                    split_diff_spec_enabled = p0.split_diff_spec;
+                    surface_cache_enabled = p0.surface_cache;
+                    subtile_interleave_enabled = p0.subtile_interleave;
+                    cache_sharpen_enabled = p0.cache_sharpen;
+                    tile_budget_pct = p0.tile_budget_pct;
+                    render_scale_pct = p0.render_scale_pct;
+                    vrs_mode = p0.vrs;
+                    presentation_mode = p0.mode;
+                    source_divider = p0.divider;
+                }
+                runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, en ? 1 : 0, frame_warp_lab::ConfigKey::unified_controller);
             } else if (command == frame_warp_lab::ControlCommand::set_shader_flags) {
                 shader_flags = static_cast<std::uint32_t>(message_lparam) & 0xFFU;
                 renderer.invalidate_source_history();
@@ -1796,36 +1829,76 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
             if (gpu_metrics.completed_present_gpu_us >= 0) last_present_gpu_us = gpu_metrics.completed_present_gpu_us;
 
             const bool window_focused = GetForegroundWindow() == window;
-            const bool use_dlssg_adaptive_policy = adaptive_dlssg_enabled && renderer.streamline_capabilities().dlssg_supported && window_focused;
-            frame_warp_lab::AdaptivePolicyTarget adapted_policy{};
-            if (adaptive_scheduler.update(
-                    pacer.target_period_us(),
-                    last_scene_gpu_us,
-                    last_present_gpu_us,
-                    gpu_metrics.missed_deadline,
-                    scene_overran_cadence,
-                    renderer.vrs_tier(),
-                    active_vrs_mode,
-                    presentation_mode,
-                    effective_divider,
-                    dlssg_multiplier,
-                    use_dlssg_adaptive_policy,
-                    adapted_policy)) {
-                presentation_mode = adapted_policy.mode;
-                source_divider = adapted_policy.divider;
-                vrs_mode = adapted_policy.vrs;
-                async_gpu_enabled = adapted_policy.async_gpu;
-                if (adapted_policy.mode == frame_warp_lab::PresentationMode::dlss_g
-                    || adapted_policy.mode == frame_warp_lab::PresentationMode::dlss_g_warp) {
-                    dlssg_multiplier = adapted_policy.dlssg_multiplier;
+            if (unified_controller.enabled() && active_source.valid && !frozen_deterministic_pause) {
+                frame_warp_lab::UnifiedQualityProfile uprof{};
+                if (unified_controller.update(
+                        pacer.target_period_us(),
+                        active_source.snapshot.source_frame_id,
+                        active_source.scene_gpu_us,
+                        last_present_gpu_us,
+                        gpu_metrics.missed_deadline,
+                        uprof)) {
+                    const bool split_changed = (split_diff_spec_enabled != uprof.split_diff_spec);
+                    selective_tiles_enabled = uprof.selective_tiles;
+                    split_diff_spec_enabled = uprof.split_diff_spec;
+                    surface_cache_enabled = uprof.surface_cache;
+                    subtile_interleave_enabled = uprof.subtile_interleave;
+                    cache_sharpen_enabled = uprof.cache_sharpen;
+                    tile_budget_pct = uprof.tile_budget_pct;
+                    vrs_mode = uprof.vrs;
+                    presentation_mode = uprof.mode;
+                    source_divider = uprof.divider;
+                    if (render_scale_pct != uprof.render_scale_pct) {
+                        render_scale_pct = uprof.render_scale_pct;
+                        if (render_override_width > 0U && render_override_height > 0U) {
+                            const UINT scaled_w = std::clamp<UINT>(static_cast<UINT>(std::lround(static_cast<double>(render_override_width) * static_cast<double>(render_scale_pct) / 100.0)) & ~1U, 160U, 7680U);
+                            const UINT scaled_h = std::clamp<UINT>(static_cast<UINT>(std::lround(static_cast<double>(render_override_height) * static_cast<double>(render_scale_pct) / 100.0)) & ~1U, 120U, 4320U);
+                            renderer.set_render_resolution(scaled_w, scaled_h, render_scale_pct);
+                        } else {
+                            renderer.set_render_resolution(0, 0, render_scale_pct);
+                        }
+                    }
+                    (void)split_changed;
+                    runtime_state.record_event(
+                        frame_warp_lab::RuntimeEventType::scheduler_decision,
+                        100 + unified_controller.tier());
+                    publish_config();
+                } else {
+                    runtime_state.update_unified_controller(unified_controller.telemetry());
                 }
-                cadence_counter = 0;
-                runtime_state.record_event(
-                    frame_warp_lab::RuntimeEventType::scheduler_decision,
-                    adaptive_scheduler.tier() * 10 + static_cast<std::int32_t>(adaptive_scheduler.reason()));
-                publish_config();
             } else {
-                runtime_state.update_adaptive(adaptive_scheduler.enabled(), adaptive_scheduler.telemetry());
+                const bool use_dlssg_adaptive_policy = adaptive_dlssg_enabled && renderer.streamline_capabilities().dlssg_supported && window_focused;
+                frame_warp_lab::AdaptivePolicyTarget adapted_policy{};
+                if (adaptive_scheduler.update(
+                        pacer.target_period_us(),
+                        last_scene_gpu_us,
+                        last_present_gpu_us,
+                        gpu_metrics.missed_deadline,
+                        scene_overran_cadence,
+                        renderer.vrs_tier(),
+                        active_vrs_mode,
+                        presentation_mode,
+                        effective_divider,
+                        dlssg_multiplier,
+                        use_dlssg_adaptive_policy,
+                        adapted_policy)) {
+                    presentation_mode = adapted_policy.mode;
+                    source_divider = adapted_policy.divider;
+                    vrs_mode = adapted_policy.vrs;
+                    async_gpu_enabled = adapted_policy.async_gpu;
+                    if (adapted_policy.mode == frame_warp_lab::PresentationMode::dlss_g
+                        || adapted_policy.mode == frame_warp_lab::PresentationMode::dlss_g_warp) {
+                        dlssg_multiplier = adapted_policy.dlssg_multiplier;
+                    }
+                    cadence_counter = 0;
+                    runtime_state.record_event(
+                        frame_warp_lab::RuntimeEventType::scheduler_decision,
+                        adaptive_scheduler.tier() * 10 + static_cast<std::int32_t>(adaptive_scheduler.reason()));
+                    publish_config();
+                } else {
+                    runtime_state.update_adaptive(adaptive_scheduler.enabled(), adaptive_scheduler.telemetry());
+                    runtime_state.update_unified_controller(unified_controller.telemetry());
+                }
             }
             if (gpu_metrics.completed_slot_warped) {
                 last_invalid_pixels = gpu_metrics.completed_invalid_pixel_count;
@@ -1871,7 +1944,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                     : (pacer.mode() == frame_warp_lab::PacerMode::vsync_only
                         ? frame_warp_lab::PacingOwner::dxgi_vsync
                         : frame_warp_lab::PacingOwner::unlocked));
-            if (auto_tile_budget_enabled && selective_tiles_enabled && active_source.valid && !frozen_deterministic_pause) {
+            if (!unified_controller.enabled() && auto_tile_budget_enabled && selective_tiles_enabled && active_source.valid && !frozen_deterministic_pause) {
                 if (auto_tile_budget.update(
                         pacer.target_period_us(),
                         effective_divider,
@@ -1888,7 +1961,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                     hud_text_dirty = true;
                 }
             }
-            if (drs_mode != frame_warp_lab::DrsMode::off && !frozen_deterministic_pause) {
+            if (!unified_controller.enabled() && drs_mode != frame_warp_lab::DrsMode::off && !frozen_deterministic_pause) {
                 bool drs_changed = false;
                 if (drs_mode == frame_warp_lab::DrsMode::sweep) {
                     drs_changed = auto_drs.update_sweep(drs_min_pct, drs_max_pct, render_scale_pct);

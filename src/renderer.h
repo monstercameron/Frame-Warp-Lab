@@ -221,6 +221,7 @@ private:
         UINT active_width = 0;
         UINT active_height = 0;
         bool used_selective_tiles = false;
+        bool used_split_diff_spec = false;
         bool in_flight = false;
         bool valid = false;
     };

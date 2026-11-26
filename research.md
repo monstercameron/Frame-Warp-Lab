@@ -414,6 +414,23 @@ On 26 November 2026, `nvidia-smi` and the D3D12 capability query reported an `NV
 - [Stable Specular Highlights & Geometric Specular Anti-Aliasing (Kaplanyan & Hill, 2016; Tokuyoshi & Kaplanyan, JCGT 2021)](https://jcgt.org/published/0010/02/02/) and [Mipmapping Normal Maps (Toksvig, 2005)](https://developer.nvidia.com/gpugems/gpugems3/part-iv-image-effects): normal-variance roughness expansion for flicker-free PBR speculars under mipmapping and progressive rasterization.
 - [The Visibility Buffer & Analytical Compute Derivatives (`SampleGrad`) (Burns & Hunt, JCGT 2013; Turanszkij, Wicked Engine)](https://jcgt.org/published/0002/02/04/): analytical screen-space UV gradients enabling hardware `16×` anisotropic filtering and mip selection inside compute shading passes.
 
+## 10-Priority Shading, Caching & Control Architecture (`v0.31.0`–`v0.35.0`)
+
+Following the 8-shader theory stress audit (`v0.26.0`), PBR/anisotropic texturing upgrade (`v0.27.0`), and 14-light Indoor PBR Gun Range with ECS + Lua 5.4.7 + Jolt Physics (`v0.28.0`–`v0.30.0`), the following 10-priority roadmap addresses every structural limitation uncovered in early geometry-only `PAR-3`:
+
+| Priority | Problem | Proposed Solution | Status (`v0.35.0`) | Verified Result on NVIDIA RTX Spark N1X |
+| :-: | :--- | :--- | :--- | :--- |
+| **1** | Expensive ray-marched visibility | Hardware triangle visibility buffer + deferred `PAR-3` | **Implemented (`v0.31.0`)** | 14-light PBR Gun Range: **4.23×** faster at 1080p (`2,616 → 618 µs`), **3.92×** at 1440p (`4,541 → 1,157 µs`), **2.48×** at 4K (`8,598 → 3,471 µs`, `0` missed deadlines vs `3` missed Forward). |
+| **2** | Animated materials invalidate cached shading | Material revision IDs and reactive masks | **Implemented (`v0.32.0`)** | Range animated emissive: **`+7.83 dB`** (`22.58 → 30.41 dB`), `tRMSE` cut **3.8×** (`25.27 → 6.64`), `P99` cut **4.3×** (`104.9 → 24.3`); Corridor emissive **`+1.72 dB`**. |
+| **3** | Moving shadows affect stationary surfaces | Shadow-delta invalidation | **Implemented (`v0.32.0`)** | Range moving hard shadow: **`+1.05 dB`** at `234 µs` vs `1,483 µs` GT (**6.34×** faster, `20.7%` tiles); Corridor hard shadows **`+1.59 dB`** (`SSIM +0.028`). |
+| **4** | Transparency cannot use opaque depth alone | Independent forward transparency pass | **Implemented (`v0.33.0`)** | Dedicated `opaque_cache_target` + post-`PAR-3` hardware alpha-blended pass: Range ballistic glass **`+8.72 dB`** (`19.91 → 28.63 dB`, `382 µs` vs `847 µs` GT); Corridor glass **`+2.17 dB`** (`30.78 → 32.96 dB`). |
+| **5** | Specular lighting depends on viewpoint | Separate diffuse and specular cache frequencies | **Implemented (`v0.34.0`)** | `PAR-3` 15% view-independent diffuse irradiance + full-res 1×1 specular/albedo composite: SSIM `0.8759 → 0.9594` (`corridor_sway`) and `0.8608 → 0.9587` (`occlusion_sweep`), cutting temporal shimmer (`tRMSE`) **2.0–2.2×**. |
+| **6** | Screen-space caching introduces resampling loss | Persistent surface-space shading cache | **Implemented (`v0.34.0`)** | 262,144-cell (`4 MiB`) 2-way object-space GPU hash cache: `+27–30 µs` overhead lifts Unified `15% PAR-3` SSIM **`+0.058`** (`0.8608 → 0.9185`); combined P5+P6 reaches **`SSIM 0.9650` / `tRMSE 3.59`** (`2.62×` lower shimmer than Unified, beating VRS Tier 2 on PSNR/SSIM/`tRMSE`). |
+| **7** | Independent adaptive controllers may conflict | Unified cost and quality controller | **Implemented (`v0.35.0`)** | 4-stage `1080p → 4K → 1440p → 4K` shock @ 120 Hz: Independent controllers had **`14` missed deadlines**, `55` actuator changes, `p95 = 5,748 µs`; Unified 7-tier controller achieved **`0` missed deadlines**, **`0` oscillations**, **`6` transitions (`9.17×` fewer)**, **`p95 = 3,596 µs (-37.4%)`**, holding **100% native resolution**. |
+| **8** | Unverified neural generated-frame quality | Foreground DLSS-G experiments | **Next Phase** | Streamline ARM64 `6×` MFG + Clean-Feed PAR verified (`0` API errors); requires interactive foreground `WinSta0\Default` capture + PresentMon validation. |
+| **9** | Cognitive integration remains unproven | Blinded human perception studies | **Next Phase** | Requires controlled 2AFC / blinded human observer study across static gaze and smooth pursuit against native high-Hz reference. |
+| **10** | Limited workload complexity | Larger imported environments and material diversity | **Next Phase** | Scale glTF 2.0 scene pipeline (proven with Poly Haven CC0 *Service Pistol*) to full multi-room imported environments (e.g., Bistro / Sponza) with diverse material graphs. |
+
 ## Questions to resolve
 
 - Which resolution and monitor should the first experiment target, and what is that configuration's verified upper refresh bound?

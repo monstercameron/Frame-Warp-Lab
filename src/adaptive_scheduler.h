@@ -487,4 +487,226 @@ private:
     std::int32_t sweep_direction_ = -1;
 };
 
+struct UnifiedQualityProfile {
+    bool selective_tiles;
+    bool split_diff_spec;
+    bool surface_cache;
+    bool subtile_interleave;
+    bool cache_sharpen;
+    std::int32_t tile_budget_pct;
+    std::int32_t render_scale_pct;
+    VrsMode vrs;
+    PresentationMode mode;
+    std::int32_t divider;
+};
+
+struct UnifiedControllerTelemetry {
+    bool enabled = false;
+    std::int32_t tier = 0;
+    std::int32_t utilization_permille = 0;
+    std::int64_t target_budget_us = 0;
+    std::int64_t transitions = 0;
+    std::int64_t oscillations = 0;
+};
+
+class UnifiedQualityController {
+public:
+    static constexpr std::int32_t max_tier = 6;
+
+    void set_enabled(bool enabled) {
+        if (enabled_ == enabled) return;
+        enabled_ = enabled;
+        reset_dynamics();
+        if (enabled_) {
+            tier_ = 0;
+            force_apply_ = true;
+        }
+    }
+
+    bool enabled() const { return enabled_; }
+    std::int32_t tier() const { return tier_; }
+
+    void reset() {
+        tier_ = 0;
+        transitions_ = 0;
+        oscillations_ = 0;
+        reset_dynamics();
+        if (enabled_) {
+            force_apply_ = true;
+        }
+    }
+
+    static UnifiedQualityProfile profile_for_tier(std::int32_t tier) {
+        switch (std::clamp(tier, 0, max_tier)) {
+            case 0:
+                return UnifiedQualityProfile{true, true, true, true, true, 25, 100, VrsMode::off, PresentationMode::full_render, 1};
+            case 1:
+                return UnifiedQualityProfile{true, true, true, true, true, 15, 100, VrsMode::off, PresentationMode::full_render, 1};
+            case 2:
+                return UnifiedQualityProfile{true, false, true, true, true, 22, 100, VrsMode::off, PresentationMode::full_render, 1};
+            case 3:
+                return UnifiedQualityProfile{true, false, true, true, true, 15, 100, VrsMode::off, PresentationMode::full_render, 1};
+            case 4:
+                return UnifiedQualityProfile{true, false, true, true, true, 12, 85, VrsMode::off, PresentationMode::full_render, 1};
+            case 5:
+                return UnifiedQualityProfile{true, false, true, true, true, 10, 72, VrsMode::off, PresentationMode::full_render, 1};
+            default:
+                return UnifiedQualityProfile{true, false, true, true, true, 10, 62, VrsMode::off, PresentationMode::combined, 2};
+        }
+    }
+
+    static const char* profile_name(std::int32_t tier) {
+        switch (std::clamp(tier, 0, max_tier)) {
+            case 0: return "T0_SplitSurf_25p_100s";
+            case 1: return "T1_SplitSurf_15p_100s";
+            case 2: return "T2_UnifSurf_22p_100s";
+            case 3: return "T3_UnifSurf_15p_100s";
+            case 4: return "T4_UnifSurf_12p_85s";
+            case 5: return "T5_UnifSurf_10p_72s";
+            default: return "T6_Emergency_10p_62s_Div2";
+        }
+    }
+
+    UnifiedControllerTelemetry telemetry() const {
+        return UnifiedControllerTelemetry{
+            enabled_,
+            tier_,
+            utilization_permille_,
+            target_budget_us_,
+            transitions_,
+            oscillations_,
+        };
+    }
+
+    bool update(
+        std::int64_t target_period_us,
+        std::int64_t source_frame_id,
+        std::int64_t scene_gpu_us,
+        std::int64_t present_gpu_us,
+        bool missed_deadline,
+        UnifiedQualityProfile& out_profile) {
+        if (!enabled_) return false;
+
+        const double period_us = static_cast<double>(std::max<std::int64_t>(target_period_us, 1000LL));
+        if (present_gpu_us >= 0) {
+            smoothed_present_us_ = smoothed_present_us_ * 0.85 + static_cast<double>(present_gpu_us) * 0.15;
+        }
+        const double cadence = static_cast<double>(profile_for_tier(tier_).divider);
+        const double headroom_us = std::max(period_us * 0.20, smoothed_present_us_ * 2.2 + 450.0);
+        const double budget_us = std::max(500.0, period_us * cadence - smoothed_present_us_ - headroom_us);
+        target_budget_us_ = static_cast<std::int64_t>(budget_us);
+
+        if (force_apply_) {
+            force_apply_ = false;
+            out_profile = profile_for_tier(tier_);
+            cooldown_frames_ = 8;
+            return true;
+        }
+
+        if (scene_gpu_us < 0 || source_frame_id == last_source_frame_id_) {
+            return false;
+        }
+        last_source_frame_id_ = source_frame_id;
+        ++frame_counter_;
+
+        if (!has_sample_) {
+            smoothed_scene_us_ = static_cast<double>(scene_gpu_us);
+            has_sample_ = true;
+        } else {
+            smoothed_scene_us_ = smoothed_scene_us_ * 0.65 + static_cast<double>(scene_gpu_us) * 0.35;
+        }
+
+        const double util = smoothed_scene_us_ / std::max(budget_us, 1.0);
+        utilization_permille_ = std::clamp(static_cast<std::int32_t>(std::lround(util * 1000.0)), 0, 9999);
+
+        if (cooldown_frames_ > 0) {
+            --cooldown_frames_;
+            return false;
+        }
+
+        const bool over_budget = (util > 0.88) || (missed_deadline && util > 0.68);
+        const bool severe_over = (util > 1.12) || (missed_deadline && util > 0.90);
+        if (over_budget && tier_ < max_tier) {
+            ++high_streak_;
+            low_streak_ = 0;
+            if (severe_over || high_streak_ >= 2) {
+                const std::int32_t step = (util > 1.35 && tier_ + 2 <= max_tier) ? 2 : 1;
+                record_transition(+1);
+                tier_ = std::min(max_tier, tier_ + step);
+                high_streak_ = 0;
+                cooldown_frames_ = 3;
+                recover_hold_frames_ = 48;
+                out_profile = profile_for_tier(tier_);
+                return true;
+            }
+            return false;
+        }
+        high_streak_ = 0;
+
+        if (recover_hold_frames_ > 0) {
+            --recover_hold_frames_;
+            low_streak_ = 0;
+            return false;
+        }
+
+        if (util < 0.56 && tier_ > 0) {
+            ++low_streak_;
+            if (low_streak_ >= 24) {
+                record_transition(-1);
+                tier_ = std::max(0, tier_ - 1);
+                low_streak_ = 0;
+                cooldown_frames_ = 12;
+                out_profile = profile_for_tier(tier_);
+                return true;
+            }
+        } else {
+            low_streak_ = 0;
+        }
+        return false;
+    }
+
+private:
+    void reset_dynamics() {
+        smoothed_scene_us_ = 0.0;
+        smoothed_present_us_ = 80.0;
+        has_sample_ = false;
+        last_source_frame_id_ = -1;
+        high_streak_ = 0;
+        low_streak_ = 0;
+        cooldown_frames_ = 0;
+        recover_hold_frames_ = 0;
+        last_dir_ = 0;
+        last_transition_frame_ = -1000;
+        frame_counter_ = 0;
+    }
+
+    void record_transition(std::int32_t dir) {
+        ++transitions_;
+        if (last_dir_ != 0 && dir != last_dir_ && (frame_counter_ - last_transition_frame_) <= 45) {
+            ++oscillations_;
+        }
+        last_dir_ = dir;
+        last_transition_frame_ = frame_counter_;
+    }
+
+    bool enabled_ = false;
+    bool force_apply_ = false;
+    std::int32_t tier_ = 0;
+    double smoothed_scene_us_ = 0.0;
+    double smoothed_present_us_ = 80.0;
+    bool has_sample_ = false;
+    std::int64_t last_source_frame_id_ = -1;
+    std::int64_t target_budget_us_ = 0;
+    std::int32_t utilization_permille_ = 0;
+    std::int64_t transitions_ = 0;
+    std::int64_t oscillations_ = 0;
+    std::int32_t high_streak_ = 0;
+    std::int32_t low_streak_ = 0;
+    std::int32_t cooldown_frames_ = 0;
+    std::int32_t recover_hold_frames_ = 0;
+    std::int32_t last_dir_ = 0;
+    std::int64_t last_transition_frame_ = -1000;
+    std::int64_t frame_counter_ = 0;
+};
+
 }
