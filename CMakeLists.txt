@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(FrameWarpLab VERSION 0.26.1 LANGUAGES CXX)
+project(FrameWarpLab VERSION 0.27.0 LANGUAGES CXX)
 
 if(NOT WIN32)
     message(FATAL_ERROR "Frame Warp Lab currently requires Windows and Direct3D 12.")
@@ -37,6 +37,7 @@ endif()
 add_executable(frame_warp_lab WIN32
     src/main.cpp
     src/renderer.cpp
+    src/pbr_assets.cpp
     src/latency_monitor.cpp
     src/streamline_backend.cpp
 )
@@ -76,8 +77,8 @@ function(add_dxc_shader OUT_VAR SOURCE_FILE ENTRY_POINT PROFILE OUTPUT_NAME)
     set(OUTPUT_PATH "${SHADER_OUTPUT_DIR}/${OUTPUT_NAME}")
     add_custom_command(
         OUTPUT "${OUTPUT_PATH}"
-        COMMAND "${DXC_EXECUTABLE}" -nologo -T ${PROFILE} -E ${ENTRY_POINT} -O3 -WX ${EXTRA_DEFINES} -Fo "${OUTPUT_PATH}" "${SOURCE_FILE}"
-        DEPENDS "${SOURCE_FILE}"
+        COMMAND "${DXC_EXECUTABLE}" -nologo -T ${PROFILE} -E ${ENTRY_POINT} -I "${CMAKE_CURRENT_SOURCE_DIR}/shaders" -O3 -WX ${EXTRA_DEFINES} -Fo "${OUTPUT_PATH}" "${SOURCE_FILE}"
+        DEPENDS "${SOURCE_FILE}" "${CMAKE_CURRENT_SOURCE_DIR}/shaders/pbr_materials.hlsl"
         COMMENT "Compiling ${OUTPUT_NAME} (${PROFILE})"
         VERBATIM
     )

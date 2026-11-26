@@ -270,6 +270,8 @@ int print_status(const WindowInstance& instance) {
     const std::int32_t camera_path = std::atomic_ref<std::int32_t>(state->camera_path).load(std::memory_order_acquire);
     const std::int32_t stress_level = std::atomic_ref<std::int32_t>(state->stress_level).load(std::memory_order_acquire);
     const std::uint32_t shader_flags = std::atomic_ref<std::uint32_t>(state->shader_flags).load(std::memory_order_acquire);
+    const std::int32_t pbr_enabled = std::atomic_ref<std::int32_t>(state->pbr_enabled).load(std::memory_order_acquire);
+    const std::int32_t aniso_mip_enabled = std::atomic_ref<std::int32_t>(state->aniso_mip_enabled).load(std::memory_order_acquire);
     const std::int32_t overlay_enabled = std::atomic_ref<std::int32_t>(state->overlay_enabled).load(std::memory_order_acquire);
     const std::int32_t flash_indicator_enabled = std::atomic_ref<std::int32_t>(state->flash_indicator_enabled).load(std::memory_order_acquire);
     const std::int32_t raw_input_enabled = std::atomic_ref<std::int32_t>(state->raw_input_enabled).load(std::memory_order_acquire);
@@ -332,7 +334,7 @@ int print_status(const WindowInstance& instance) {
 
     RECT client_rectangle{};
     const bool has_client_size = GetClientRect(instance.window, &client_rectangle) != 0;
-    std::cout << "{\"ok\":true,\"schema_version\":20,\"process_id\":" << instance.process_id
+    std::cout << "{\"ok\":true,\"schema_version\":21,\"process_id\":" << instance.process_id
               << ",\"running\":" << (running ? "true" : "false")
               << ",\"present_calls_completed\":" << present_count
               << ",\"display_frame_id\":" << display_frame_id
@@ -404,6 +406,8 @@ int print_status(const WindowInstance& instance) {
               << "},\"diagnostic_view\":\"" << frame_warp_lab::diagnostic_view_name(diagnostic_view)
               << "\",\"stress_level\":" << stress_level
               << ",\"shader_flags\":" << shader_flags
+              << ",\"pbr_enabled\":" << (pbr_enabled ? "true" : "false")
+              << ",\"aniso_mip_enabled\":" << (aniso_mip_enabled ? "true" : "false")
               << ",\"overlay_enabled\":" << (overlay_enabled ? "true" : "false")
               << "},\"vrs\":{\"tier\":" << vrs_tier
               << ",\"tile_size_px\":" << vrs_tile_size_px
@@ -474,7 +478,7 @@ int print_status(const WindowInstance& instance) {
               << ",\"target_scene_budget_us\":" << drs_target_scene_budget_us << "}"
               << ",\"features\":{\"scene\":\"cpu_camera_gbuffer\",\"offscreen_upscaling\":\"zero_alloc_per_frame_drs_subrect_bilinear_catmull_cas_nearest\",\"selective_tiles\":\"par3_subtile_interleave_damage_aware_bypass_trm_coarse\",\"hud\":\"2d_frametime_graph_and_readout\",\"async_gpu\":\"dual_queue_3slot_ring\",\"reprojection\":\"depth_camera_warp\",\"nvidia_pcl_markers\":\"etw_and_streamline_pcl\",\"frame_generation\":\"mv_extrapolation_temporal_and_dlss_g\",\"dlss_g_inputs\":\"3slot_aligned_hudless_clipdepth_motion\",\"vrs\":\""
               << (vrs_tier >= 2 ? "tier1_and_tier2_foveated_image" : vrs_tier == 1 ? "tier1_per_draw" : "unsupported")
-              << "\",\"adaptive_scheduler\":\"unified_vrs_dlss_warp_ladder\",\"ipc\":\"seqlock_v25\",\"shaders\":\"dxc_sm6_0_wave_specialized_8feature_stress\"}}\n";
+              << "\",\"adaptive_scheduler\":\"unified_vrs_dlss_warp_ladder\",\"ipc\":\"seqlock_v26\",\"shaders\":\"dxc_sm6_0_pbr_ggx_multiscatter_clearcoat_ibl_16x_aniso_samplegrad\"}}\n";
     return 0;
 }
 
@@ -487,7 +491,7 @@ int print_events(const WindowInstance& instance) {
     const std::int32_t event_count = std::atomic_ref<std::int32_t>(state->event_count).load(std::memory_order_acquire);
     const std::int32_t first_sequence = event_count > static_cast<std::int32_t>(frame_warp_lab::runtime_event_capacity)
         ? event_count - static_cast<std::int32_t>(frame_warp_lab::runtime_event_capacity) + 1 : 1;
-    std::cout << "{\"ok\":true,\"schema_version\":20,\"process_id\":" << instance.process_id
+    std::cout << "{\"ok\":true,\"schema_version\":21,\"process_id\":" << instance.process_id
               << ",\"capacity\":" << frame_warp_lab::runtime_event_capacity << ",\"total_events\":" << event_count << ",\"events\":[";
     bool first_event = true;
     for (std::int32_t sequence = first_sequence; sequence <= event_count; ++sequence) {
@@ -590,7 +594,7 @@ int print_trace(const WindowInstance& instance, std::size_t max_samples, bool in
         if (copy.missed_deadline) ++missed_deadline_count;
     }
 
-    std::cout << "{\"ok\":true,\"schema_version\":20,\"process_id\":" << instance.process_id
+    std::cout << "{\"ok\":true,\"schema_version\":21,\"process_id\":" << instance.process_id
               << ",\"capacity\":" << frame_warp_lab::runtime_frame_trace_capacity
               << ",\"total_frames_recorded\":" << total_samples
               << ",\"sample_count\":" << captured.size()
@@ -864,6 +868,16 @@ int apply_setting(const WindowInstance& instance, const std::wstring& key, const
         else if (value == L"all") parameter = 255;
         else if (parse_unsigned_long(value.c_str(), parsed) && parsed <= 255UL) parameter = static_cast<LPARAM>(parsed);
         else return fail("invalid_value", "Expected shader_feature in {none, hf_checker, anim_uv, specular, moving_light, emissive, hard_shadows, normal_map, transparent, all, 0..255}");
+    } else if (key == L"pbr") {
+        command = frame_warp_lab::ControlCommand::set_pbr_enabled;
+        if (value == L"on" || value == L"1" || value == L"true") parameter = 1;
+        else if (value == L"off" || value == L"0" || value == L"false") parameter = 0;
+        else return fail("invalid_value", "Expected pbr in {on, off}");
+    } else if (key == L"aniso_mip") {
+        command = frame_warp_lab::ControlCommand::set_aniso_mip_enabled;
+        if (value == L"on" || value == L"1" || value == L"true") parameter = 1;
+        else if (value == L"off" || value == L"0" || value == L"false") parameter = 0;
+        else return fail("invalid_value", "Expected aniso_mip in {on, off}");
     } else if (key == L"render_scale") {
         unsigned long parsed = 0;
         if (!parse_unsigned_long(value.c_str(), parsed) || parsed < 25UL || parsed > 200UL) {

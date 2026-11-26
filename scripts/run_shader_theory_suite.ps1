@@ -190,6 +190,7 @@ try {
     & $cli set $fpid async_gpu off | Out-Null
     & $cli set $fpid pacer unlocked | Out-Null
     & $cli set $fpid fixed_dt_us 4167 | Out-Null
+    & $cli set $fpid pbr off | Out-Null
     & $cli set $fpid stress 16 | Out-Null
     & $cli set $fpid path occlusion_sweep | Out-Null
     & $cli set $fpid mode full_render | Out-Null

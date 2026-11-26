@@ -339,7 +339,7 @@ Renderer::Renderer(HWND window)
 
     D3D12_DESCRIPTOR_HEAP_DESC compute_heap_description{};
     compute_heap_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    compute_heap_description.NumDescriptors = source_slot_count * compute_descriptors_per_source_slot + 2U;
+    compute_heap_description.NumDescriptors = source_slot_count * compute_descriptors_per_source_slot + 2U + pbr_srv_descriptor_count;
     compute_heap_description.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     check(device_->CreateDescriptorHeap(&compute_heap_description, IID_PPV_ARGS(&scene_compute_heap_)), "Create scene compute heap");
 
@@ -371,6 +371,7 @@ Renderer::Renderer(HWND window)
     create_timestamp_resources();
     create_reprojection_stats_resources();
     create_selective_tile_resources();
+    create_pbr_assets();
     create_vrs_resources();
     create_pipelines();
 }
@@ -552,6 +553,8 @@ bool Renderer::submit_scene_async(
     std::chrono::steady_clock::time_point capture_time,
     std::int32_t stress_level,
     std::uint32_t shader_flags,
+    bool pbr_enabled,
+    bool aniso_mip_enabled,
     VrsMode vrs_mode,
     bool selective_tiles_enabled,
     std::int32_t tile_budget_pct,
@@ -620,7 +623,10 @@ bool Renderer::submit_scene_async(
     write_float4(scene_constants->previous_camera_up_cut, prev_camera.up, snapshot.discontinuity ? 1.0f : 0.0f);
     write_float4(scene_constants->previous_camera_forward_unused, prev_camera.forward, static_cast<float>(snapshot.scene_time_seconds));
     write_float4(scene_constants->ball_center_stress, snapshot.ball_center, static_cast<float>(stress_level));
-    write_float4(scene_constants->previous_ball_center_unused, prev_ball_center, static_cast<float>(shader_flags & 0xFFU));
+    const std::uint32_t packed_shader_flags = (shader_flags & 0xFFU)
+        | (pbr_enabled ? 256U : 0U)
+        | (aniso_mip_enabled ? 512U : 0U);
+    write_float4(scene_constants->previous_ball_center_unused, prev_ball_center, static_cast<float>(packed_shader_flags));
     simd::store_uint4(
         scene_constants->tile_params,
         tiles_x,
@@ -699,11 +705,14 @@ bool Renderer::submit_scene_async(
             heap_gpu_start.ptr + (static_cast<UINT64>(slot_index) * compute_descriptors_per_source_slot + 3ULL) * shader_resource_descriptor_stride_};
         D3D12_GPU_DESCRIPTOR_HANDLE shared_uav_gpu{
             heap_gpu_start.ptr + static_cast<UINT64>(source_slot_count * compute_descriptors_per_source_slot) * shader_resource_descriptor_stride_};
+        D3D12_GPU_DESCRIPTOR_HANDLE pbr_srv_gpu{
+            heap_gpu_start.ptr + static_cast<UINT64>(source_slot_count * compute_descriptors_per_source_slot + 2U) * shader_resource_descriptor_stride_};
 
         scene_command_list_->SetComputeRootDescriptorTable(1, prev_srv_gpu);
         scene_command_list_->SetComputeRootDescriptorTable(2, curr_uav_gpu);
         scene_command_list_->SetComputeRootDescriptorTable(3, shared_uav_gpu);
         scene_command_list_->SetComputeRootUnorderedAccessView(4, tile_indirect_args_uav_->GetGPUVirtualAddress());
+        scene_command_list_->SetComputeRootDescriptorTable(5, pbr_srv_gpu);
         scene_command_list_->Dispatch(tiles_x, tiles_y, 1);
 
         const std::array<D3D12_RESOURCE_BARRIER, 3> admit_barriers = {
@@ -774,10 +783,16 @@ bool Renderer::submit_scene_async(
             swap_chain_buffer_count
             + dlss_input_slot_count * rtv_targets_per_dlss_slot
             + static_cast<UINT>(slot_index) * targets_per_source_slot) * render_target_descriptor_stride_;
+        ID3D12DescriptorHeap* scene_heaps[] = {scene_compute_heap_.Get()};
+        scene_command_list_->SetDescriptorHeaps(1, scene_heaps);
         scene_command_list_->OMSetRenderTargets(targets_per_source_slot, &offscreen_rtv, TRUE, nullptr);
         scene_command_list_->SetGraphicsRootSignature(scene_root_signature_.Get());
         scene_command_list_->SetPipelineState(scene_pipeline_.Get());
         scene_command_list_->SetGraphicsRootConstantBufferView(0, scene_constant_buffer_->GetGPUVirtualAddress() + constant_offset);
+        D3D12_GPU_DESCRIPTOR_HANDLE scene_pbr_srv_gpu{
+            scene_compute_heap_->GetGPUDescriptorHandleForHeapStart().ptr
+            + static_cast<UINT64>(source_slot_count * compute_descriptors_per_source_slot + 2U) * shader_resource_descriptor_stride_};
+        scene_command_list_->SetGraphicsRootDescriptorTable(1, scene_pbr_srv_gpu);
         if (scene_command_list5_ && vrs_tier_ > 0) {
             const VrsMode effective_vrs = resolve_effective_vrs_mode(vrs_mode);
             const bool full_backing_active = (render_width_ == alloc_render_width_ && render_height_ == alloc_render_height_);
@@ -1494,14 +1509,46 @@ void Renderer::create_pipelines() {
     const auto tile_admit_cs = load_shader_bytecode(shaders / L"tile_admit_cs.cso");
     const auto tile_shade_indirect_cs = load_shader_bytecode(shaders / L"tile_shade_indirect_cs.cso");
 
-    D3D12_ROOT_PARAMETER scene_parameter{};
-    scene_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
-    scene_parameter.Descriptor.ShaderRegister = 0;
-    scene_parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    D3D12_DESCRIPTOR_RANGE scene_pbr_srv_range{};
+    scene_pbr_srv_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    scene_pbr_srv_range.NumDescriptors = pbr_srv_descriptor_count;
+    scene_pbr_srv_range.BaseShaderRegister = 3;
+    scene_pbr_srv_range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+    std::array<D3D12_ROOT_PARAMETER, 2> scene_parameters{};
+    scene_parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    scene_parameters[0].Descriptor.ShaderRegister = 0;
+    scene_parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    scene_parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    scene_parameters[1].DescriptorTable.NumDescriptorRanges = 1;
+    scene_parameters[1].DescriptorTable.pDescriptorRanges = &scene_pbr_srv_range;
+    scene_parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    std::array<D3D12_STATIC_SAMPLER_DESC, 2> scene_samplers{};
+    scene_samplers[0].Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    scene_samplers[0].AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    scene_samplers[0].AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    scene_samplers[0].AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    scene_samplers[0].ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
+    scene_samplers[0].MaxLOD = D3D12_FLOAT32_MAX;
+    scene_samplers[0].ShaderRegister = 0;
+    scene_samplers[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    scene_samplers[1].Filter = D3D12_FILTER_ANISOTROPIC;
+    scene_samplers[1].AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    scene_samplers[1].AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    scene_samplers[1].AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    scene_samplers[1].MaxAnisotropy = 16;
+    scene_samplers[1].ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
+    scene_samplers[1].MaxLOD = D3D12_FLOAT32_MAX;
+    scene_samplers[1].ShaderRegister = 2;
+    scene_samplers[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
     D3D12_ROOT_SIGNATURE_DESC scene_root_description{};
-    scene_root_description.NumParameters = 1;
-    scene_root_description.pParameters = &scene_parameter;
+    scene_root_description.NumParameters = static_cast<UINT>(scene_parameters.size());
+    scene_root_description.pParameters = scene_parameters.data();
+    scene_root_description.NumStaticSamplers = static_cast<UINT>(scene_samplers.size());
+    scene_root_description.pStaticSamplers = scene_samplers.data();
     scene_root_description.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
 
     ComPtr<ID3DBlob> serialized_root;
@@ -1643,7 +1690,13 @@ void Renderer::create_pipelines() {
     compute_dirty_list_uav_range.BaseShaderRegister = 5;
     compute_dirty_list_uav_range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
 
-    std::array<D3D12_ROOT_PARAMETER, 5> tile_compute_parameters{};
+    D3D12_DESCRIPTOR_RANGE compute_pbr_srv_range{};
+    compute_pbr_srv_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    compute_pbr_srv_range.NumDescriptors = pbr_srv_descriptor_count;
+    compute_pbr_srv_range.BaseShaderRegister = 3;
+    compute_pbr_srv_range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+    std::array<D3D12_ROOT_PARAMETER, 6> tile_compute_parameters{};
     tile_compute_parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
     tile_compute_parameters[0].Descriptor.ShaderRegister = 0;
     tile_compute_parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
@@ -1662,10 +1715,18 @@ void Renderer::create_pipelines() {
     tile_compute_parameters[4].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
     tile_compute_parameters[4].Descriptor.ShaderRegister = 7;
     tile_compute_parameters[4].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    tile_compute_parameters[5].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    tile_compute_parameters[5].DescriptorTable.NumDescriptorRanges = 1;
+    tile_compute_parameters[5].DescriptorTable.pDescriptorRanges = &compute_pbr_srv_range;
+    tile_compute_parameters[5].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
-    std::array<D3D12_STATIC_SAMPLER_DESC, 2> compute_samplers = samplers;
+    std::array<D3D12_STATIC_SAMPLER_DESC, 3> compute_samplers{};
+    compute_samplers[0] = samplers[0];
     compute_samplers[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    compute_samplers[1] = samplers[1];
     compute_samplers[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    compute_samplers[2] = scene_samplers[1];
+    compute_samplers[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
     D3D12_ROOT_SIGNATURE_DESC tile_compute_root_desc{};
     tile_compute_root_desc.NumParameters = static_cast<UINT>(tile_compute_parameters.size());
@@ -1844,6 +1905,21 @@ void Renderer::create_selective_tile_resources() {
     cmd_sig_desc.NumArgumentDescs = 1;
     cmd_sig_desc.pArgumentDescs = &indirect_arg;
     check(device_->CreateCommandSignature(&cmd_sig_desc, nullptr, IID_PPV_ARGS(&dispatch_command_signature_)), "Create dispatch command signature");
+}
+
+void Renderer::create_pbr_assets() {
+    auto pbr_srv_cpu = scene_compute_heap_->GetCPUDescriptorHandleForHeapStart();
+    pbr_srv_cpu.ptr += static_cast<SIZE_T>(source_slot_count * compute_descriptors_per_source_slot + 2U) * shader_resource_descriptor_stride_;
+    pbr_assets_ = create_and_upload_pbr_assets(
+        device_.Get(),
+        scene_queue_.Get(),
+        source_slots_[0].command_allocator.Get(),
+        scene_command_list_.Get(),
+        scene_fence_.Get(),
+        scene_fence_event_.get(),
+        next_scene_fence_value_,
+        pbr_srv_cpu,
+        shader_resource_descriptor_stride_);
 }
 
 void Renderer::create_vrs_resources() {

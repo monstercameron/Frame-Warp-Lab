@@ -2,6 +2,7 @@
 
 #include "frame_pacer.h"
 #include "latency_monitor.h"
+#include "pbr_assets.h"
 #include "runtime_state.h"
 #include "simulation.h"
 #include "streamline_backend.h"
@@ -126,6 +127,8 @@ public:
         std::chrono::steady_clock::time_point capture_time,
         std::int32_t stress_level,
         std::uint32_t shader_flags,
+        bool pbr_enabled,
+        bool aniso_mip_enabled,
         VrsMode vrs_mode,
         bool selective_tiles_enabled,
         std::int32_t tile_budget_pct,
@@ -166,6 +169,7 @@ private:
     static constexpr UINT source_slot_count = 3;
     static constexpr UINT targets_per_source_slot = 3;
     static constexpr UINT compute_descriptors_per_source_slot = 8;
+    static constexpr UINT pbr_srv_descriptor_count = 5;
     static constexpr UINT max_dirty_tile_capacity = 131072;
     static constexpr UINT tile_indirect_u32_count = 24;
     static constexpr UINT tile_stats_readback_u32_count = 16;
@@ -219,6 +223,7 @@ private:
     void create_timestamp_resources();
     void create_reprojection_stats_resources();
     void create_selective_tile_resources();
+    void create_pbr_assets();
     void create_vrs_resources();
     void create_swap_chain_targets();
     void create_dlss_input_targets();
@@ -265,6 +270,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Resource> tile_indirect_args_init_upload_;
     Microsoft::WRL::ComPtr<ID3D12Resource> tile_stats_readback_;
     const std::uint32_t* mapped_tile_stats_ = nullptr;
+    PbrAssetBundle pbr_assets_{};
     Microsoft::WRL::ComPtr<ID3D12RootSignature> present_root_signature_;
     std::array<Microsoft::WRL::ComPtr<ID3D12PipelineState>, 5> present_pipelines_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> present_dlss_inputs_pipeline_;

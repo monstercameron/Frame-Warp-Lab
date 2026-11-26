@@ -1,5 +1,28 @@
 # Development log
 
+## v0.27.0 — Industry-leading PBR + 16× anisotropic mipmapped texturing, split-sum IBL, Kulla-Conty multiscattering, clearcoat, Toksvig/Kaplanyan-Hill specular AA, and ACES Filmic
+
+- Researched modern real-time PBR & texturing standards (Google Filament, Frostbite, Unreal Substrate / OpenPBR, Epic Split-Sum IBL, Kulla-Conty / Turquin multiscattering, Toksvig normal-variance mip filtering, Kaplanyan-Hill geometric specular AA, and compute-shader analytical `SampleGrad` UV differentials) and implemented them end-to-end across both Graphics (`motion_lab.hlsl`) and `PAR-3` Compute (`selective_tiles.hlsl`) via a shared `shaders/pbr_materials.hlsl` module (`src/pbr_assets.h`, `src/pbr_assets.cpp`, `src/renderer.h`, `src/renderer.cpp`, `src/runtime_state.h`, `src/main.cpp`, `src/cli.cpp`, `CMakeLists.txt`, `scripts/run_pbr_benchmark.ps1`):
+  - **Real D3D12 GPU PBR Texture2DArray Atlases (`256×256 × 6` materials × `9` mip levels, hardware `16×` Anisotropic Filtering)**:
+    - `pbr_albedo_array` (`R8G8B8A8_UNORM_SRGB`, linear-space mip downsampling).
+    - `pbr_normal_array` (`R8G8B8A8_UNORM`, unit-length normal re-normalized mip downsampling).
+    - `pbr_orm_array` (`R8G8B8A8_UNORM`, AO / Roughness / Metallic / Clearcoat, with **Toksvig normal-length variance roughness filtering** baked into mips `1..8`).
+    - 6 physically calibrated materials: wet honed slate concrete tiles (floor), brushed riveted aluminum panels (walls/ceiling), ribbed slate + brushed brass inlays (end wall), clearcoated orange enamel + gunmetal steel (pillars), machined dual-tone titanium & copper geodesic panels (moving sphere), and satin brushed brass (rail).
+  - **Split-Sum IBL + Kulla-Conty Multi-Scattering + Clearcoat + ACES Filmic**:
+    - `128×128` `R16G16_FLOAT` **DFG BRDF Integration LUT** (Hammersley quasi-Monte Carlo importance sampling with Heitz `V_SmithGGXCorrelated`) + `64×64 × 6 faces × 6 mips` `R16G16B16A16_FLOAT` **GGX Pre-filtered HDR Environment Cubemap** (mips `0..4` specular, mip `5` Lambertian diffuse irradiance).
+    - Cook-Torrance GGX + Heitz visibility + Schlick Fresnel + Kulla-Conty energy compensation (`1 + F0 * (1 / (dfg.x + dfg.y) - 1)`) + Burley energy-conserving diffuse + Filament clearcoat (`IOR=1.5`, Kelemen visibility, `(1-Fc)` base attenuation) + Frostbite specular micro-occlusion + ACES Filmic RRT+ODT tone mapping & sRGB encode.
+  - **Analytical Ray-Differential `SampleGrad` + Geometric Specular AA in Compute (`PAR-3`) & Graphics**:
+    - Projects neighbor pixel rays `(ray_dx, ray_dy)` onto the local tangent plane `(T, B)` to compute exact `(dUV_dx, dUV_dy)` for hardware `16×` anisotropic `SampleGrad` inside compute shaders (where hardware `ddx`/`ddy` do not exist) plus Kaplanyan-Hill geometric curvature roughness widening.
+  - **Runtime Controls**: `RuntimeState` v26 / CLI schema v21 with `set <pid> pbr on|off` (default `on`, hotkey `N`) and `set <pid> aniso_mip on|off` (default `on`).
+- Verified zero code comments, zero-warning ARM64 Release + Debug builds (all 12 SM 6.0 DXIL shaders), Debug D3D12 Debug Layer validation (`pbr=True`, `aniso_mip=True`, `492/3397` shaded tiles, `0` errors), and `scripts/run_pbr_benchmark.ps1` on **NVIDIA RTX Spark N1X**:
+  - **PBR Quality (`1280×720`, `stress=0`, `F24..F112` @ 240 Hz, `occlusion_sweep`, `aniso_mip=on`)**:
+    - `GT 1×1 Native`: `314 µs`
+    - `VRS Tier 2 Foveated`: `132 µs` · `25.85 dB` (`min=25.76`) · `0.8149` SSIM · `tRMSE=16.02` · `P99=59.5`
+    - **`PAR-3 15%`**: `254 µs` · **`33.58 dB`** (`min=32.60`, **`+7.73 dB` over VRS Tier 2**) · **`0.9620` SSIM** · **`tRMSE=7.58` (`-52.7%` flicker vs VRS)** · `P99=24.3`
+    - **`PAR-3 25%`**: `268 µs` · **`34.27 dB`** · **`0.9665` SSIM** · `tRMSE=7.03` · `P99=22.4`
+  - **A/B Anti-Aliasing Proof (`aniso_mip on` vs `off` on `PAR-3 15%`)**: `16×` anisotropic `SampleGrad` + Toksvig + Specular AA boosted PSNR **`+2.75 dB`** (`30.83 → 33.58 dB`), lifted SSIM **`0.9266 → 0.9620`**, and cut temporal flicker **`-26.5%`** (`10.32 → 7.58 tRMSE`) for only `+12 µs` GPU time.
+  - **Pure PBR Scaling (`stress=0`, honest bottleneck finding)**: `1080p` `GT=719 µs / VRS=311 µs / PAR3=560 µs (1.28×)`; `1440p` `GT=1,183 µs / VRS=539 µs / PAR3=1,033 µs (1.15×)`; `4K` `GT=2,859 µs / VRS=1,177 µs / PAR3=2,675 µs (1.07×)`. At `stress=0`, the 88-step SDF raymarch inside `vis_classify_main` accounts for ~80% of 4K GPU time — confirming that pairing `PAR-3` with hardware triangle visibility-buffer rasterization (replacing per-pixel SDF raymarching) is the next major performance unlock.
+
 ## v0.26.1 — Buffer CLI control messages during Win32 modal loops (`WM_ENTERSIZEMOVE` / menu) so dragging or clicking the window never drops `set`/`capture` commands
 
 - Fixed a Win32 message-pump race in `src/main.cpp` where clicking, dragging, or resizing the window entered `DefWindowProcW`'s modal message loop and dispatched posted `frame_warp_lab::control_message` (`WM_APP + 1`) events directly to `window_procedure`, which previously passed them to `DefWindowProcW` and silently dropped CLI `set`/`reset`/`step`/`capture` commands (causing `capture_timeout` or stale settings when moving the window mid-benchmark).

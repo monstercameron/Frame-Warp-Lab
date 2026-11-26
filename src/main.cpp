@@ -105,6 +105,8 @@ public:
         frame_warp_lab::CameraPath path,
         std::int32_t stress_level,
         std::uint32_t shader_flags,
+        bool pbr_enabled,
+        bool aniso_mip_enabled,
         bool overlay_enabled,
         bool flash_indicator_enabled) {
         std::atomic_ref<std::int32_t>(state_->presentation_mode).store(static_cast<std::int32_t>(presentation_mode), std::memory_order_release);
@@ -121,6 +123,8 @@ public:
         std::atomic_ref<std::int32_t>(state_->camera_path).store(static_cast<std::int32_t>(path), std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->stress_level).store(stress_level, std::memory_order_release);
         std::atomic_ref<std::uint32_t>(state_->shader_flags).store(shader_flags, std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->pbr_enabled).store(pbr_enabled ? 1 : 0, std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->aniso_mip_enabled).store(aniso_mip_enabled ? 1 : 0, std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->overlay_enabled).store(overlay_enabled ? 1 : 0, std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->flash_indicator_enabled).store(flash_indicator_enabled ? 1 : 0, std::memory_order_release);
     }
@@ -736,6 +740,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         frame_warp_lab::DiagnosticView diagnostic_view = frame_warp_lab::DiagnosticView::final_color;
         std::int32_t stress_level = 0;
         std::uint32_t shader_flags = 0U;
+        bool pbr_enabled = true;
+        bool aniso_mip_enabled = true;
         bool overlay_enabled = true;
         bool flash_indicator_enabled = false;
         bool pending_pcl_ping = false;
@@ -779,6 +785,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 simulation.path(),
                 stress_level,
                 shader_flags,
+                pbr_enabled,
+                aniso_mip_enabled,
                 overlay_enabled,
                 flash_indicator_enabled);
             runtime_state.update_adaptive(adaptive_scheduler.enabled(), adaptive_scheduler.telemetry());
@@ -952,6 +960,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 shader_flags = static_cast<std::uint32_t>(message_lparam) & 0xFFU;
                 renderer.invalidate_source_history();
                 runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, static_cast<std::int32_t>(shader_flags), frame_warp_lab::ConfigKey::shader_flags);
+            } else if (command == frame_warp_lab::ControlCommand::set_pbr_enabled) {
+                pbr_enabled = message_lparam != 0;
+                renderer.invalidate_source_history();
+                runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, pbr_enabled ? 1 : 0, frame_warp_lab::ConfigKey::pbr_enabled);
+            } else if (command == frame_warp_lab::ControlCommand::set_aniso_mip_enabled) {
+                aniso_mip_enabled = message_lparam != 0;
+                renderer.invalidate_source_history();
+                runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, aniso_mip_enabled ? 1 : 0, frame_warp_lab::ConfigKey::aniso_mip_enabled);
             } else if (command == frame_warp_lab::ControlCommand::set_render_scale) {
                 drs_mode = frame_warp_lab::DrsMode::off;
                 render_scale_pct = std::clamp(static_cast<std::int32_t>(message_lparam), 25, 200);
@@ -1148,6 +1164,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                     } else if (message.wParam == 'U') {
                         selective_tiles_enabled = !selective_tiles_enabled;
                         config_changed = true;
+                    } else if (message.wParam == 'N') {
+                        pbr_enabled = !pbr_enabled;
+                        renderer.invalidate_source_history();
+                        config_changed = true;
                     } else if (message.wParam == 'T') {
                         diagnostic_view = diagnostic_view == frame_warp_lab::DiagnosticView::tile_cache
                             ? frame_warp_lab::DiagnosticView::final_color
@@ -1342,6 +1362,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                     capture_time,
                     stress_level,
                     shader_flags,
+                    pbr_enabled,
+                    aniso_mip_enabled,
                     vrs_mode,
                     effective_selective_tiles,
                     tile_budget_pct,

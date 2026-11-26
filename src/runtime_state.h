@@ -10,7 +10,7 @@
 namespace frame_warp_lab {
 
 inline constexpr wchar_t window_class_name[] = L"FrameWarpLabWindow";
-inline constexpr std::uint32_t runtime_state_version = 25;
+inline constexpr std::uint32_t runtime_state_version = 26;
 inline constexpr std::size_t runtime_event_capacity = 64;
 inline constexpr std::size_t runtime_frame_trace_capacity = 256;
 inline constexpr std::size_t hud_graph_sample_count = 128;
@@ -59,6 +59,8 @@ enum class ControlCommand : WPARAM {
     set_drs_max_pct = 35,
     set_subtile_interleave = 36,
     set_shader_flags = 37,
+    set_pbr_enabled = 38,
+    set_aniso_mip_enabled = 39,
 };
 
 enum class DrsMode : std::int32_t {
@@ -201,6 +203,8 @@ enum class ConfigKey : std::int32_t {
     drs_max_pct = 30,
     subtile_interleave = 31,
     shader_flags = 32,
+    pbr_enabled = 33,
+    aniso_mip_enabled = 34,
 };
 
 enum class RuntimeEventType : std::int32_t {
@@ -325,6 +329,8 @@ struct RuntimeState {
     std::int32_t camera_path;
     std::int32_t stress_level;
     std::uint32_t shader_flags;
+    std::int32_t pbr_enabled;
+    std::int32_t aniso_mip_enabled;
     std::int32_t overlay_enabled;
     std::int32_t flash_indicator_enabled;
     std::int32_t raw_input_enabled;
@@ -471,6 +477,8 @@ inline const char* config_key_name(std::int32_t key) {
         case ConfigKey::drs_max_pct: return "drs_max";
         case ConfigKey::subtile_interleave: return "subtile_interleave";
         case ConfigKey::shader_flags: return "shader_feature";
+        case ConfigKey::pbr_enabled: return "pbr";
+        case ConfigKey::aniso_mip_enabled: return "aniso_mip";
         default: return "unknown";
     }
 }
