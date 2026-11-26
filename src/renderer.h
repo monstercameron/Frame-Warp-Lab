@@ -38,6 +38,8 @@ struct TileCacheStats {
     std::uint32_t cached_tiles = 0;
     std::uint32_t shaded_tiles = 0;
     std::uint32_t deferred_tiles = 0;
+    std::uint32_t critical_total_tiles = 0;
+    std::uint32_t critical_deferred_tiles = 0;
     bool active = false;
 };
 
@@ -124,6 +126,7 @@ public:
         VrsMode vrs_mode,
         bool selective_tiles_enabled,
         std::int32_t tile_budget_pct,
+        TilePolicy tile_policy,
         std::uint64_t frame_id,
         LatencyMonitor& latency_monitor,
         bool wait_for_completion);
@@ -151,7 +154,8 @@ private:
     static constexpr UINT targets_per_source_slot = 3;
     static constexpr UINT compute_descriptors_per_source_slot = 8;
     static constexpr UINT max_dirty_tile_capacity = 65536;
-    static constexpr UINT tile_stats_u32_count = 8;
+    static constexpr UINT tile_indirect_u32_count = 24;
+    static constexpr UINT tile_stats_readback_u32_count = 16;
     static constexpr UINT timestamps_per_pass = 2;
     static constexpr std::size_t scene_constant_buffer_stride = 256;
     static constexpr std::size_t present_constant_buffer_stride = 512;
@@ -236,9 +240,11 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> scene_pipeline_;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> tile_compute_root_signature_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> tile_vis_classify_pipeline_;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> tile_admit_pipeline_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> tile_shade_indirect_pipeline_;
     Microsoft::WRL::ComPtr<ID3D12CommandSignature> dispatch_command_signature_;
     Microsoft::WRL::ComPtr<ID3D12Resource> dirty_tile_list_uav_;
+    Microsoft::WRL::ComPtr<ID3D12Resource> tile_candidate_meta_uav_;
     Microsoft::WRL::ComPtr<ID3D12Resource> tile_indirect_args_uav_;
     Microsoft::WRL::ComPtr<ID3D12Resource> tile_indirect_args_init_upload_;
     Microsoft::WRL::ComPtr<ID3D12Resource> tile_stats_readback_;

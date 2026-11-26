@@ -10,7 +10,7 @@
 namespace frame_warp_lab {
 
 inline constexpr wchar_t window_class_name[] = L"FrameWarpLabWindow";
-inline constexpr std::uint32_t runtime_state_version = 18;
+inline constexpr std::uint32_t runtime_state_version = 19;
 inline constexpr std::size_t runtime_event_capacity = 64;
 inline constexpr std::size_t runtime_frame_trace_capacity = 256;
 inline constexpr std::size_t hud_graph_sample_count = 128;
@@ -43,6 +43,12 @@ enum class ControlCommand : WPARAM {
     set_adaptive_dlssg = 19,
     set_selective_tiles = 20,
     set_tile_budget_pct = 21,
+    set_tile_policy = 22,
+};
+
+enum class TilePolicy : std::int32_t {
+    fifo = 0,
+    priority_stbn = 1,
 };
 
 enum class PacingOwner : std::int32_t {
@@ -95,6 +101,7 @@ enum class DiagnosticView : std::int32_t {
     reprojection_holes = 3,
     vrs_mask = 4,
     tile_cache = 5,
+    tile_priority = 6,
 };
 
 enum class CameraPath : std::int32_t {
@@ -153,6 +160,7 @@ enum class ConfigKey : std::int32_t {
     adaptive_dlssg = 17,
     selective_tiles = 18,
     tile_budget_pct = 19,
+    tile_policy = 20,
 };
 
 enum class RuntimeEventType : std::int32_t {
@@ -213,6 +221,8 @@ struct RuntimeFrameSample {
     std::uint32_t tile_total_count;
     std::uint32_t tile_shaded_count;
     std::uint32_t tile_deferred_count;
+    std::uint32_t tile_critical_total;
+    std::uint32_t tile_critical_deferred;
 };
 
 struct RuntimeState {
@@ -304,10 +314,13 @@ struct RuntimeState {
     std::int32_t window_focused;
     std::int32_t selective_tiles_enabled;
     std::int32_t tile_budget_pct;
+    std::int32_t tile_policy;
     std::uint32_t last_tile_total_count;
     std::uint32_t last_tile_cached_count;
     std::uint32_t last_tile_shaded_count;
     std::uint32_t last_tile_deferred_count;
+    std::uint32_t last_tile_critical_total;
+    std::uint32_t last_tile_critical_deferred;
     std::int64_t trace_count;
     RuntimeEvent events[runtime_event_capacity];
     RuntimeFrameSample trace[runtime_frame_trace_capacity];
@@ -379,6 +392,15 @@ inline const char* config_key_name(std::int32_t key) {
         case ConfigKey::adaptive_dlssg: return "adaptive_dlssg";
         case ConfigKey::selective_tiles: return "selective_tiles";
         case ConfigKey::tile_budget_pct: return "tile_budget";
+        case ConfigKey::tile_policy: return "tile_policy";
+        default: return "unknown";
+    }
+}
+
+inline const char* tile_policy_name(std::int32_t policy) {
+    switch (static_cast<TilePolicy>(policy)) {
+        case TilePolicy::fifo: return "fifo";
+        case TilePolicy::priority_stbn: return "priority_stbn";
         default: return "unknown";
     }
 }
@@ -482,6 +504,7 @@ inline const char* diagnostic_view_name(std::int32_t view) {
         case DiagnosticView::reprojection_holes: return "holes";
         case DiagnosticView::vrs_mask: return "vrs";
         case DiagnosticView::tile_cache: return "tiles";
+        case DiagnosticView::tile_priority: return "priority";
         default: return "unknown";
     }
 }

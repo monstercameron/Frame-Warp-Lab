@@ -838,7 +838,7 @@ float4 pixel_main(VertexOutput input) : SV_Target {
         }
         if (diagnostic_view == 5) {
             uint2 tile_coord = (uint2)floor(input.position.xy / 16.0);
-            uint tile_state = scene_tile_map_texture.Load(int3(tile_coord, 0));
+            uint tile_state = scene_tile_map_texture.Load(int3(tile_coord, 0)) & 3u;
             float3 tile_tint = float3(0.16, 0.84, 0.42);
             if (tile_state == 1u) {
                 tile_tint = float3(0.98, 0.34, 0.18);
@@ -851,6 +851,21 @@ float4 pixel_main(VertexOutput input) : SV_Target {
             float2 in_tile = fmod(input.position.xy, 16.0);
             if (in_tile.x < 1.0 || in_tile.y < 1.0) {
                 output_color = lerp(output_color, float3(0.05, 0.07, 0.09), 0.55);
+            }
+        }
+        if (diagnostic_view == 6) {
+            uint2 tile_coord = (uint2)floor(input.position.xy / 16.0);
+            uint packed_word = scene_tile_map_texture.Load(int3(tile_coord, 0));
+            float prio = float((packed_word >> 2u) & 63u) * (1.0 / 63.0);
+            float3 heat = prio < 0.33
+                ? lerp(float3(0.06, 0.14, 0.38), float3(0.10, 0.78, 0.88), prio * 3.0)
+                : (prio < 0.66
+                    ? lerp(float3(0.10, 0.78, 0.88), float3(0.98, 0.88, 0.16), (prio - 0.33) * 3.0)
+                    : lerp(float3(0.98, 0.88, 0.16), float3(1.0, 0.14, 0.12), (prio - 0.66) * 3.0));
+            output_color = lerp(output_color, heat, 0.56);
+            float2 in_tile = fmod(input.position.xy, 16.0);
+            if (in_tile.x < 1.0 || in_tile.y < 1.0) {
+                output_color = lerp(output_color, float3(0.05, 0.07, 0.09), 0.50);
             }
         }
     }

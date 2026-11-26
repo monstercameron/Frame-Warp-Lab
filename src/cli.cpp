@@ -299,15 +299,18 @@ int print_status(const WindowInstance& instance) {
     const std::int32_t window_focused = std::atomic_ref<std::int32_t>(state->window_focused).load(std::memory_order_acquire);
     const std::int32_t selective_tiles_enabled = std::atomic_ref<std::int32_t>(state->selective_tiles_enabled).load(std::memory_order_acquire);
     const std::int32_t tile_budget_pct = std::atomic_ref<std::int32_t>(state->tile_budget_pct).load(std::memory_order_acquire);
+    const std::int32_t tile_policy = std::atomic_ref<std::int32_t>(state->tile_policy).load(std::memory_order_acquire);
     const std::uint32_t tile_total = std::atomic_ref<std::uint32_t>(state->last_tile_total_count).load(std::memory_order_acquire);
     const std::uint32_t tile_cached = std::atomic_ref<std::uint32_t>(state->last_tile_cached_count).load(std::memory_order_acquire);
     const std::uint32_t tile_shaded = std::atomic_ref<std::uint32_t>(state->last_tile_shaded_count).load(std::memory_order_acquire);
     const std::uint32_t tile_deferred = std::atomic_ref<std::uint32_t>(state->last_tile_deferred_count).load(std::memory_order_acquire);
+    const std::uint32_t tile_crit_total = std::atomic_ref<std::uint32_t>(state->last_tile_critical_total).load(std::memory_order_acquire);
+    const std::uint32_t tile_crit_deferred = std::atomic_ref<std::uint32_t>(state->last_tile_critical_deferred).load(std::memory_order_acquire);
     const double smoothed_fps = smoothed_interval_us > 0 ? 1000000.0 / static_cast<double>(smoothed_interval_us) : 0.0;
 
     RECT client_rectangle{};
     const bool has_client_size = GetClientRect(instance.window, &client_rectangle) != 0;
-    std::cout << "{\"ok\":true,\"schema_version\":13,\"process_id\":" << instance.process_id
+    std::cout << "{\"ok\":true,\"schema_version\":14,\"process_id\":" << instance.process_id
               << ",\"running\":" << (running ? "true" : "false")
               << ",\"present_calls_completed\":" << present_count
               << ",\"display_frame_id\":" << display_frame_id
@@ -411,6 +414,7 @@ int print_status(const WindowInstance& instance) {
               << ",\"total_frames_presented\":" << dlssg_total_frames_presented
               << ",\"total_generated_frames\":" << dlssg_total_generated_frames << "}"
               << ",\"selective_tiles\":{\"enabled\":" << (selective_tiles_enabled ? "true" : "false")
+              << ",\"policy\":\"" << frame_warp_lab::tile_policy_name(tile_policy) << "\""
               << ",\"tile_size_px\":16"
               << ",\"budget_pct\":" << tile_budget_pct
               << ",\"total_tiles\":" << tile_total
@@ -419,10 +423,14 @@ int print_status(const WindowInstance& instance) {
               << ",\"deferred_tiles\":" << tile_deferred
               << ",\"shaded_tile_ratio\":";
     print_ratio(tile_shaded, tile_total);
+    std::cout << ",\"critical_total_tiles\":" << tile_crit_total
+              << ",\"critical_deferred_tiles\":" << tile_crit_deferred
+              << ",\"critical_coverage_ratio\":";
+    print_ratio(tile_crit_total >= tile_crit_deferred ? tile_crit_total - tile_crit_deferred : 0U, tile_crit_total);
     std::cout << "}"
-              << ",\"features\":{\"scene\":\"cpu_camera_gbuffer\",\"selective_tiles\":\"vis_buffer_execute_indirect_16x16\",\"hud\":\"2d_frametime_graph_and_readout\",\"async_gpu\":\"dual_queue_3slot_ring\",\"reprojection\":\"depth_camera_warp\",\"nvidia_pcl_markers\":\"etw_and_streamline_pcl\",\"frame_generation\":\"mv_extrapolation_temporal_and_dlss_g\",\"dlss_g_inputs\":\"3slot_aligned_hudless_clipdepth_motion\",\"vrs\":\""
+              << ",\"features\":{\"scene\":\"cpu_camera_gbuffer\",\"selective_tiles\":\"par_priority_stbn_execute_indirect_16x16\",\"hud\":\"2d_frametime_graph_and_readout\",\"async_gpu\":\"dual_queue_3slot_ring\",\"reprojection\":\"depth_camera_warp\",\"nvidia_pcl_markers\":\"etw_and_streamline_pcl\",\"frame_generation\":\"mv_extrapolation_temporal_and_dlss_g\",\"dlss_g_inputs\":\"3slot_aligned_hudless_clipdepth_motion\",\"vrs\":\""
               << (vrs_tier >= 2 ? "tier1_and_tier2_foveated_image" : vrs_tier == 1 ? "tier1_per_draw" : "unsupported")
-              << "\",\"adaptive_scheduler\":\"unified_vrs_dlss_warp_ladder\",\"ipc\":\"seqlock_v18\",\"shaders\":\"dxc_sm6_0_wave_specialized\"}}\n";
+              << "\",\"adaptive_scheduler\":\"unified_vrs_dlss_warp_ladder\",\"ipc\":\"seqlock_v19\",\"shaders\":\"dxc_sm6_0_wave_specialized\"}}\n";
     return 0;
 }
 
@@ -435,7 +443,7 @@ int print_events(const WindowInstance& instance) {
     const std::int32_t event_count = std::atomic_ref<std::int32_t>(state->event_count).load(std::memory_order_acquire);
     const std::int32_t first_sequence = event_count > static_cast<std::int32_t>(frame_warp_lab::runtime_event_capacity)
         ? event_count - static_cast<std::int32_t>(frame_warp_lab::runtime_event_capacity) + 1 : 1;
-    std::cout << "{\"ok\":true,\"schema_version\":13,\"process_id\":" << instance.process_id
+    std::cout << "{\"ok\":true,\"schema_version\":14,\"process_id\":" << instance.process_id
               << ",\"capacity\":" << frame_warp_lab::runtime_event_capacity << ",\"total_events\":" << event_count << ",\"events\":[";
     bool first_event = true;
     for (std::int32_t sequence = first_sequence; sequence <= event_count; ++sequence) {
@@ -483,6 +491,8 @@ int print_trace(const WindowInstance& instance, std::size_t max_samples, bool in
     std::vector<double> temporal_recovered_ratios;
     std::vector<double> shaded_tile_ratios;
     std::int64_t total_deferred_tiles = 0;
+    std::int64_t total_critical_tiles = 0;
+    std::int64_t total_critical_deferred_tiles = 0;
     std::int64_t rendered_count = 0;
     std::int64_t repeated_count = 0;
     std::int64_t warped_count = 0;
@@ -516,6 +526,8 @@ int print_trace(const WindowInstance& instance, std::size_t max_samples, bool in
         if (copy.tile_total_count > 0) {
             shaded_tile_ratios.push_back(static_cast<double>(copy.tile_shaded_count) / static_cast<double>(copy.tile_total_count));
             total_deferred_tiles += static_cast<std::int64_t>(copy.tile_deferred_count);
+            total_critical_tiles += static_cast<std::int64_t>(copy.tile_critical_total);
+            total_critical_deferred_tiles += static_cast<std::int64_t>(copy.tile_critical_deferred);
         }
         switch (static_cast<frame_warp_lab::FrameKind>(copy.frame_kind)) {
             case frame_warp_lab::FrameKind::rendered: ++rendered_count; break;
@@ -532,7 +544,7 @@ int print_trace(const WindowInstance& instance, std::size_t max_samples, bool in
         if (copy.missed_deadline) ++missed_deadline_count;
     }
 
-    std::cout << "{\"ok\":true,\"schema_version\":13,\"process_id\":" << instance.process_id
+    std::cout << "{\"ok\":true,\"schema_version\":14,\"process_id\":" << instance.process_id
               << ",\"capacity\":" << frame_warp_lab::runtime_frame_trace_capacity
               << ",\"total_frames_recorded\":" << total_samples
               << ",\"sample_count\":" << captured.size()
@@ -571,7 +583,17 @@ int print_trace(const WindowInstance& instance, std::size_t max_samples, bool in
     print_double_summary(temporal_recovered_ratios);
     std::cout << ",\"shaded_tile_ratio\":";
     print_double_summary(shaded_tile_ratios);
-    std::cout << ",\"total_deferred_tiles\":" << total_deferred_tiles;
+    std::cout << ",\"total_deferred_tiles\":" << total_deferred_tiles
+              << ",\"total_critical_tiles\":" << total_critical_tiles
+              << ",\"total_critical_deferred_tiles\":" << total_critical_deferred_tiles
+              << ",\"critical_coverage_ratio\":";
+    if (total_critical_tiles <= 0) {
+        std::cout << "null";
+    } else {
+        const double cov = static_cast<double>(std::max<std::int64_t>(0, total_critical_tiles - total_critical_deferred_tiles))
+            / static_cast<double>(total_critical_tiles);
+        std::cout << std::fixed << std::setprecision(6) << cov;
+    }
     std::cout << "}";
 
     if (include_samples) {
@@ -617,6 +639,8 @@ int print_trace(const WindowInstance& instance, std::size_t max_samples, bool in
                       << ",\"tile_total_count\":" << sample.tile_total_count
                       << ",\"tile_shaded_count\":" << sample.tile_shaded_count
                       << ",\"tile_deferred_count\":" << sample.tile_deferred_count
+                      << ",\"tile_critical_total\":" << sample.tile_critical_total
+                      << ",\"tile_critical_deferred\":" << sample.tile_critical_deferred
                       << ",\"shaded_tile_ratio\":";
             print_ratio(sample.tile_shaded_count, sample.tile_total_count);
             std::cout << ",\"discontinuity\":" << (sample.discontinuity ? "true" : "false") << "}";
@@ -671,7 +695,8 @@ int apply_setting(const WindowInstance& instance, const std::wstring& key, const
         else if (value == L"holes") parameter = static_cast<LPARAM>(frame_warp_lab::DiagnosticView::reprojection_holes);
         else if (value == L"vrs") parameter = static_cast<LPARAM>(frame_warp_lab::DiagnosticView::vrs_mask);
         else if (value == L"tiles") parameter = static_cast<LPARAM>(frame_warp_lab::DiagnosticView::tile_cache);
-        else return fail("invalid_value", "Expected view in {final, depth, motion, holes, vrs, tiles}");
+        else if (value == L"priority") parameter = static_cast<LPARAM>(frame_warp_lab::DiagnosticView::tile_priority);
+        else return fail("invalid_value", "Expected view in {final, depth, motion, holes, vrs, tiles, priority}");
     } else if (key == L"path") {
         command = frame_warp_lab::ControlCommand::set_camera_path;
         if (value == L"corridor_sway") parameter = static_cast<LPARAM>(frame_warp_lab::CameraPath::corridor_sway);
@@ -745,13 +770,18 @@ int apply_setting(const WindowInstance& instance, const std::wstring& key, const
         else return fail("invalid_value", "Expected selective_tiles in {on, off}");
     } else if (key == L"tile_budget") {
         unsigned long parsed = 0;
-        if (!parse_unsigned_long(value.c_str(), parsed) || parsed < 10 || parsed > 100) {
-            return fail("invalid_value", "Expected tile_budget integer in [10, 100]");
+        if (!parse_unsigned_long(value.c_str(), parsed) || parsed < 5 || parsed > 100) {
+            return fail("invalid_value", "Expected tile_budget integer in [5, 100]");
         }
         command = frame_warp_lab::ControlCommand::set_tile_budget_pct;
         parameter = static_cast<LPARAM>(parsed);
+    } else if (key == L"tile_policy") {
+        command = frame_warp_lab::ControlCommand::set_tile_policy;
+        if (value == L"fifo") parameter = static_cast<LPARAM>(frame_warp_lab::TilePolicy::fifo);
+        else if (value == L"priority_stbn") parameter = static_cast<LPARAM>(frame_warp_lab::TilePolicy::priority_stbn);
+        else return fail("invalid_value", "Expected tile_policy in {fifo, priority_stbn}");
     } else {
-        return fail("unknown_setting", "Supported settings are: mode, dlssg_mult, pacer, target_fps, async_gpu, vrs, selective_tiles, tile_budget, adaptive, adaptive_dlssg, instrumentation, divider, vsync, view, path, stress, overlay, flash");
+        return fail("unknown_setting", "Supported settings are: mode, dlssg_mult, pacer, target_fps, async_gpu, vrs, selective_tiles, tile_budget, tile_policy, adaptive, adaptive_dlssg, instrumentation, divider, vsync, view, path, stress, overlay, flash");
     }
 
     if (!PostMessageW(instance.window, frame_warp_lab::control_message, static_cast<WPARAM>(command), parameter)) {
@@ -879,14 +909,14 @@ int print_capabilities() {
 
 int wmain(int argument_count, wchar_t** arguments) {
     if (argument_count == 2 && std::wstring(arguments[1]) == L"help") {
-        std::cout << "{\"ok\":true,\"schema_version\":13,\"commands\":[\"help\",\"start\",\"instances\",\"status <pid>\",\"events <pid>\",\"trace <pid> [limit] [summary]\",\"set <pid> <key> <value>\",\"pause <pid>\",\"resume <pid>\",\"reset <pid>\",\"stop <pid>\",\"capabilities\"],\"settings\":{\"mode\":[\"full_render\",\"repeat\",\"reproject\",\"frame_gen\",\"combined\",\"dlss_g\",\"dlss_g_warp\"],\"dlssg_mult\":[\"2\",\"3\",\"4\",\"5\",\"6\",\"dynamic\"],\"pacer\":[\"deadline\",\"vsync_only\",\"unlocked\"],\"target_fps\":\"0 or 30..500\",\"async_gpu\":[\"on\",\"off\"],\"vrs\":[\"off\",\"uniform_2x2\",\"foveated\"],\"selective_tiles\":[\"on\",\"off\"],\"tile_budget\":\"10..100\",\"adaptive\":[\"on\",\"off\"],\"adaptive_dlssg\":[\"on\",\"off\"],\"instrumentation\":[\"minimal\",\"standard\",\"diagnostic\"],\"divider\":\"1..8\",\"vsync\":[\"on\",\"off\"],\"view\":[\"final\",\"depth\",\"motion\",\"holes\",\"vrs\",\"tiles\"],\"path\":[\"corridor_sway\",\"fast_pan\",\"occlusion_sweep\",\"camera_cut\",\"manual\",\"pure_rotation\"],\"stress\":\"0..64\",\"overlay\":[\"on\",\"off\"],\"flash\":[\"on\",\"off\"]}}\n";
+        std::cout << "{\"ok\":true,\"schema_version\":14,\"commands\":[\"help\",\"start\",\"instances\",\"status <pid>\",\"events <pid>\",\"trace <pid> [limit] [summary]\",\"set <pid> <key> <value>\",\"pause <pid>\",\"resume <pid>\",\"reset <pid>\",\"stop <pid>\",\"capabilities\"],\"settings\":{\"mode\":[\"full_render\",\"repeat\",\"reproject\",\"frame_gen\",\"combined\",\"dlss_g\",\"dlss_g_warp\"],\"dlssg_mult\":[\"2\",\"3\",\"4\",\"5\",\"6\",\"dynamic\"],\"pacer\":[\"deadline\",\"vsync_only\",\"unlocked\"],\"target_fps\":\"0 or 30..500\",\"async_gpu\":[\"on\",\"off\"],\"vrs\":[\"off\",\"uniform_2x2\",\"foveated\"],\"selective_tiles\":[\"on\",\"off\"],\"tile_budget\":\"5..100\",\"tile_policy\":[\"fifo\",\"priority_stbn\"],\"adaptive\":[\"on\",\"off\"],\"adaptive_dlssg\":[\"on\",\"off\"],\"instrumentation\":[\"minimal\",\"standard\",\"diagnostic\"],\"divider\":\"1..8\",\"vsync\":[\"on\",\"off\"],\"view\":[\"final\",\"depth\",\"motion\",\"holes\",\"vrs\",\"tiles\",\"priority\"],\"path\":[\"corridor_sway\",\"fast_pan\",\"occlusion_sweep\",\"camera_cut\",\"manual\",\"pure_rotation\"],\"stress\":\"0..64\",\"overlay\":[\"on\",\"off\"],\"flash\":[\"on\",\"off\"]}}\n";
         return 0;
     }
     if (argument_count == 2 && std::wstring(arguments[1]) == L"capabilities") return print_capabilities();
     if (argument_count == 2 && std::wstring(arguments[1]) == L"start") return start_instance();
     const auto instances = find_instances();
     if (argument_count == 2 && std::wstring(arguments[1]) == L"instances") {
-        std::cout << "{\"ok\":true,\"schema_version\":13,\"instances\":[";
+        std::cout << "{\"ok\":true,\"schema_version\":14,\"instances\":[";
         for (std::size_t index = 0; index < instances.size(); ++index) {
             if (index) std::cout << ',';
             std::cout << "{\"process_id\":" << instances[index].process_id << "}";

@@ -11,6 +11,7 @@ cbuffer TileSceneConstants : register(b0) {
     float4 previous_ball_center_unused;
     uint4 tile_params;
     uint4 cache_params;
+    uint4 policy_params;
 };
 
 Texture2D<float4> prev_color_texture : register(t0);
@@ -23,13 +24,38 @@ RWTexture2D<float2> out_motion_uav : register(u2);
 RWTexture2D<uint> out_vis_uav : register(u3);
 RWTexture2D<uint> out_tile_map_uav : register(u4);
 RWStructuredBuffer<uint> dirty_tile_list_uav : register(u5);
-RWByteAddressBuffer tile_indirect_args_uav : register(u6);
+RWStructuredBuffer<uint> tile_candidate_meta_uav : register(u6);
+RWByteAddressBuffer tile_indirect_args_uav : register(u7);
 
 SamplerState linear_clamp_sampler : register(s0);
 SamplerState point_clamp_sampler : register(s1);
 
+static const uint k_stbn_phase_packed[32] = {
+    0xb0e5cb91u, 0xbe72a4b1u, 0x5ad8f73eu, 0x63a3d839u,
+    0xe62164a2u, 0xc9f16cf2u, 0x7c3b90d5u, 0x804b7084u,
+    0xa0f8ec7fu, 0xb6d9ea2du, 0x69515241u, 0x3e2145f1u,
+    0xbd3ca8d9u, 0x7a8d7c69u, 0x847f60e5u, 0xc045f032u,
+    0xe0b1b4a2u, 0x7eb19bc5u, 0xda5938d3u, 0xa36e37f8u,
+    0x26e2fc61u, 0xf9c2a461u, 0x3c74807bu, 0x4085d09bu,
+    0xf0ad2ae9u, 0xd6bf7ce8u, 0x5961f541u, 0x2e314251u,
+    0x3db96c7du, 0x8a79d8acu, 0x748230f5u, 0x40c5e06fu,
+};
+
+groupshared float g_tile_depth[16][16];
+groupshared uint g_tile_mat[16][16];
 groupshared uint g_dirty_pixel_count;
+groupshared uint g_disoccluded_count;
+groupshared uint g_moving_count;
+groupshared uint g_edge_count;
+groupshared uint g_non_sky_count;
 groupshared uint g_max_age_in_tile;
+
+uint lookup_stbn_phase(uint tx, uint ty) {
+    uint row = ty & 15u;
+    uint col = tx & 15u;
+    uint word = k_stbn_phase_packed[(row << 1u) | (col >> 3u)];
+    return (word >> ((col & 7u) * 4u)) & 15u;
+}
 
 float box_distance(float3 world_position, float3 half_size) {
     float3 offset = abs(world_position) - half_size;
@@ -147,6 +173,10 @@ void vis_classify_main(
     uint3 dispatch_thread_id : SV_DispatchThreadID) {
     if (group_thread_id.x == 0u && group_thread_id.y == 0u) {
         g_dirty_pixel_count = 0u;
+        g_disoccluded_count = 0u;
+        g_moving_count = 0u;
+        g_edge_count = 0u;
+        g_non_sky_count = 0u;
         g_max_age_in_tile = 0u;
     }
     GroupMemoryBarrierWithGroupSync();
@@ -156,7 +186,12 @@ void vis_classify_main(
     bool in_bounds = dispatch_thread_id.x < viewport_width && dispatch_thread_id.y < viewport_height;
 
     bool pixel_dirty = false;
+    bool pixel_disoccluded = false;
+    bool pixel_moving = false;
+    bool pixel_non_sky = false;
     uint pixel_age = 0u;
+    float linear_view_depth = 1000.0;
+    uint mat_id = 0u;
 
     if (in_bounds) {
         float2 current_uv = (float2(dispatch_thread_id.xy) + 0.5) * float2(camera_up_rcp_width.w, camera_forward_rcp_height.w);
@@ -186,20 +221,21 @@ void vis_classify_main(
             if (distance_travelled > 36.0) break;
         }
 
-        float linear_view_depth = 1000.0;
         float2 motion_vector = float2(0.0, 0.0);
-        uint mat_id = (uint)(material + 0.5);
+        mat_id = (uint)(material + 0.5);
         uint surf_hash = 0u;
         float3 cached_color = float3(0.035, 0.055, 0.07);
         bool cache_hit = false;
         bool has_prev_cache = (cache_params.x != 0u) && (previous_camera_up_cut.w < 0.5);
 
         if (material > 0.0) {
+            pixel_non_sky = true;
             linear_view_depth = max(dot(world_position - camera_position, camera_forward), 0.01);
             surf_hash = compute_surface_hash(world_position, material);
 
             float3 previous_world_position = world_position;
-            if (material > 4.5 && material < 5.5) {
+            if (mat_id == 5u) {
+                pixel_moving = true;
                 previous_world_position = world_position - (ball_center - previous_ball_center_unused.xyz);
             }
             float2 previous_uv;
@@ -222,13 +258,17 @@ void vis_classify_main(
                 float rel_z_err = abs(prev_z - expected_prev_z) / max(expected_prev_z, 0.25);
                 bool depth_match = rel_z_err < 0.035;
                 bool mat_match = (prev_mat == mat_id);
-                bool moving_ball = (mat_id == 5u);
-                if (depth_match && mat_match && !moving_ball && prev_age < cache_params.y) {
+                if (depth_match && mat_match && !pixel_moving && prev_age < cache_params.y) {
                     pixel_age = prev_age + 1u;
                     cache_hit = true;
                 } else {
                     pixel_age = min(prev_age + 1u, 255u);
+                    if (!pixel_moving && (!depth_match || !mat_match)) {
+                        pixel_disoccluded = true;
+                    }
                 }
+            } else if (!pixel_moving) {
+                pixel_disoccluded = true;
             }
             if (!cache_hit) {
                 pixel_dirty = true;
@@ -244,17 +284,34 @@ void vis_classify_main(
         out_color_uav[dispatch_thread_id.xy] = float4(cached_color, 1.0);
     }
 
+    g_tile_depth[group_thread_id.y][group_thread_id.x] = linear_view_depth;
+    g_tile_mat[group_thread_id.y][group_thread_id.x] = mat_id;
+    GroupMemoryBarrierWithGroupSync();
+
+    bool pixel_edge = false;
+    if (in_bounds && group_thread_id.x < 15u && group_thread_id.y < 15u) {
+        float dz_x = abs(linear_view_depth - g_tile_depth[group_thread_id.y][group_thread_id.x + 1u]);
+        float dz_y = abs(linear_view_depth - g_tile_depth[group_thread_id.y + 1u][group_thread_id.x]);
+        uint mat_x = g_tile_mat[group_thread_id.y][group_thread_id.x + 1u];
+        uint mat_y = g_tile_mat[group_thread_id.y + 1u][group_thread_id.x];
+        float rel_edge = max(dz_x, dz_y) / max(linear_view_depth, 0.5);
+        pixel_edge = (rel_edge > 0.08) || (mat_x != mat_id) || (mat_y != mat_id);
+    }
+
     uint wave_dirty = WaveActiveCountBits(pixel_dirty);
+    uint wave_disoccl = WaveActiveCountBits(pixel_disoccluded);
+    uint wave_moving = WaveActiveCountBits(pixel_moving);
+    uint wave_edge = WaveActiveCountBits(pixel_edge);
+    uint wave_non_sky = WaveActiveCountBits(pixel_non_sky);
     uint wave_max_age = WaveActiveMax(pixel_age);
     if (WaveIsFirstLane()) {
-        if (wave_dirty > 0u) {
-            uint unused_prev;
-            InterlockedAdd(g_dirty_pixel_count, wave_dirty, unused_prev);
-        }
-        if (wave_max_age > 0u) {
-            uint unused_age;
-            InterlockedMax(g_max_age_in_tile, wave_max_age, unused_age);
-        }
+        uint unused_prev;
+        if (wave_dirty > 0u) InterlockedAdd(g_dirty_pixel_count, wave_dirty, unused_prev);
+        if (wave_disoccl > 0u) InterlockedAdd(g_disoccluded_count, wave_disoccl, unused_prev);
+        if (wave_moving > 0u) InterlockedAdd(g_moving_count, wave_moving, unused_prev);
+        if (wave_edge > 0u) InterlockedAdd(g_edge_count, wave_edge, unused_prev);
+        if (wave_non_sky > 0u) InterlockedAdd(g_non_sky_count, wave_non_sky, unused_prev);
+        if (wave_max_age > 0u) InterlockedMax(g_max_age_in_tile, wave_max_age, unused_prev);
     }
     GroupMemoryBarrierWithGroupSync();
 
@@ -262,47 +319,133 @@ void vis_classify_main(
         uint tiles_x = tile_params.x;
         uint tiles_y = tile_params.y;
         if (group_id.x < tiles_x && group_id.y < tiles_y) {
-            uint tile_budget = tile_params.z;
             uint frame_index = tile_params.w;
             uint refresh_period = max(cache_params.y, 4u);
+            bool use_priority_stbn = policy_params.x != 0u;
             bool has_dirty = g_dirty_pixel_count > 0u;
-            uint tile_phase = (group_id.x * 7u + group_id.y * 13u + frame_index) % refresh_period;
+            uint tile_phase = use_priority_stbn
+                ? ((lookup_stbn_phase(group_id.x, group_id.y) + frame_index) & 15u)
+                : ((group_id.x * 7u + group_id.y * 13u + frame_index) % refresh_period);
             bool periodic_refresh = (!has_dirty) && (tile_phase == 0u || g_max_age_in_tile >= refresh_period);
+
+            float disoccl_frac = float(g_disoccluded_count) * (1.0 / 256.0);
+            float moving_frac = float(g_moving_count) * (1.0 / 256.0);
+            float dirty_frac = float(g_dirty_pixel_count) * (1.0 / 256.0);
+            float edge_frac = float(g_edge_count) * (1.0 / 256.0);
+            float error_score = disoccl_frac * 10.0 + moving_frac * 7.5 + dirty_frac * 3.5 + edge_frac * 1.5;
+
+            float2 tile_ndc = ((float2(group_id.xy) + 0.5) / float2(tiles_x, tiles_y)) * 2.0 - 1.0;
+            float reticle_dist = length(tile_ndc);
+            float saliency = reticle_dist < 0.28
+                ? 2.0
+                : (reticle_dist < 0.72 ? lerp(2.0, 1.0, (reticle_dist - 0.28) * (1.0 / 0.44)) : 0.55);
+
+            float age_ratio = float(g_max_age_in_tile) / float(refresh_period);
+            float age_urgency = 1.0 + age_ratio * 1.6 + (g_max_age_in_tile >= refresh_period ? 1.5 : 0.0);
+            float cost = 0.5 + 0.5 * (float(g_non_sky_count) * (1.0 / 256.0));
+            float priority = (max(error_score, 0.25) * saliency * age_urgency) / cost;
+            uint prio_6bit = min(63u, (uint)(saturate(priority * (1.0 / 16.0)) * 63.0 + 0.5));
 
             uint unused_total;
             tile_indirect_args_uav.InterlockedAdd(12, 1u, unused_total);
+            uint tile_id = group_id.y * tiles_x + group_id.x;
 
             if (has_dirty || periodic_refresh) {
-                uint effective_cap = has_dirty ? tile_budget : max(1u, (tile_budget * 3u) / 4u);
-                uint current_scheduled = 0u;
-                bool allocated = false;
-                uint cur_val = tile_indirect_args_uav.Load(0);
-                [loop]
-                while (cur_val < effective_cap) {
-                    uint prev_val = 0u;
-                    tile_indirect_args_uav.InterlockedCompareExchange(0, cur_val, cur_val + 1u, prev_val);
-                    if (prev_val == cur_val) {
-                        current_scheduled = cur_val;
-                        allocated = true;
-                        break;
-                    }
-                    cur_val = prev_val;
-                }
-                if (allocated) {
-                    dirty_tile_list_uav[current_scheduled] = (group_id.x & 65535u) | ((group_id.y & 65535u) << 16u);
-                    out_tile_map_uav[group_id.xy] = has_dirty ? 1u : 2u;
-                    uint unused_dirty;
-                    tile_indirect_args_uav.InterlockedAdd(20, 1u, unused_dirty);
+                bool has_critical = (g_disoccluded_count > 0u) || (g_moving_count > 0u);
+                uint bucket = 7u;
+                if (has_critical && (priority >= 8.0 || reticle_dist < 0.40)) {
+                    bucket = 0u;
+                } else if (has_critical) {
+                    bucket = 1u;
+                } else if (has_dirty && priority >= 3.0) {
+                    bucket = 2u;
+                } else if (has_dirty) {
+                    bucket = 3u;
+                } else if (saliency >= 1.5) {
+                    bucket = 4u;
+                } else if (saliency >= 1.0) {
+                    bucket = 5u;
+                } else if (g_edge_count > 16u) {
+                    bucket = 6u;
                 } else {
-                    out_tile_map_uav[group_id.xy] = 3u;
-                    uint unused_def;
-                    tile_indirect_args_uav.InterlockedAdd(24, 1u, unused_def);
+                    bucket = 7u;
                 }
+                uint kind = has_dirty ? 1u : 2u;
+                tile_candidate_meta_uav[tile_id] = 0x80000000u | (bucket << 24u) | (prio_6bit << 16u) | kind;
+                uint unused_bucket;
+                tile_indirect_args_uav.InterlockedAdd(32u + bucket * 4u, 1u, unused_bucket);
             } else {
-                out_tile_map_uav[group_id.xy] = 0u;
+                tile_candidate_meta_uav[tile_id] = (prio_6bit << 16u);
+                out_tile_map_uav[group_id.xy] = (prio_6bit << 2u);
                 uint unused_cached;
                 tile_indirect_args_uav.InterlockedAdd(16, 1u, unused_cached);
             }
+        }
+    }
+}
+
+[numthreads(256, 1, 1)]
+void tile_admit_main(uint3 dispatch_thread_id : SV_DispatchThreadID) {
+    uint tiles_x = tile_params.x;
+    uint total_tiles = policy_params.y;
+    uint tile_budget = tile_params.z;
+    bool use_priority_stbn = policy_params.x != 0u;
+
+    if (dispatch_thread_id.x == 0u) {
+        uint total_candidates = 0u;
+        [unroll]
+        for (uint b = 0u; b < 8u; ++b) {
+            total_candidates += tile_indirect_args_uav.Load(32u + b * 4u);
+        }
+        tile_indirect_args_uav.Store(0, min(total_candidates, tile_budget));
+    }
+
+    uint tile_id = dispatch_thread_id.x;
+    if (tile_id >= total_tiles) {
+        return;
+    }
+
+    uint meta = tile_candidate_meta_uav[tile_id];
+    if ((meta & 0x80000000u) == 0u) {
+        return;
+    }
+
+    uint bucket = (meta >> 24u) & 7u;
+    uint prio_6bit = (meta >> 16u) & 63u;
+    uint state_kind = meta & 3u;
+    uint tile_y = tile_id / tiles_x;
+    uint tile_x = tile_id - tile_y * tiles_x;
+
+    uint global_slot = tile_budget;
+    if (use_priority_stbn) {
+        uint bucket_start = 0u;
+        [unroll]
+        for (uint b = 0u; b < 8u; ++b) {
+            if (b < bucket) {
+                bucket_start += tile_indirect_args_uav.Load(32u + b * 4u);
+            }
+        }
+        if (bucket_start < tile_budget) {
+            uint local_slot = 0u;
+            tile_indirect_args_uav.InterlockedAdd(64u + bucket * 4u, 1u, local_slot);
+            global_slot = bucket_start + local_slot;
+        }
+    } else {
+        tile_indirect_args_uav.InterlockedAdd(64u, 1u, global_slot);
+    }
+
+    if (global_slot < tile_budget) {
+        dirty_tile_list_uav[global_slot] = (tile_x & 65535u) | ((tile_y & 65535u) << 16u);
+        out_tile_map_uav[uint2(tile_x, tile_y)] = (state_kind & 3u) | (prio_6bit << 2u);
+        uint unused_sched;
+        tile_indirect_args_uav.InterlockedAdd(20, 1u, unused_sched);
+    } else {
+        out_tile_map_uav[uint2(tile_x, tile_y)] = 3u | (prio_6bit << 2u);
+        uint unused_def;
+        tile_indirect_args_uav.InterlockedAdd(24, 1u, unused_def);
+        if (bucket <= 1u) {
+            uint unused_crit;
+            tile_indirect_args_uav.InterlockedAdd(28, 1u, unused_crit);
         }
     }
 }

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(FrameWarpLab VERSION 0.19.2 LANGUAGES CXX)
+project(FrameWarpLab VERSION 0.20.0 LANGUAGES CXX)
 
 if(NOT WIN32)
     message(FATAL_ERROR "Frame Warp Lab currently requires Windows and Direct3D 12.")
@@ -96,6 +96,7 @@ add_dxc_shader(COMPILED_SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/present.hls
 add_dxc_shader(COMPILED_SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/present.hlsl" pixel_main ps_6_0 present_synthesis_ps.cso -DPRESENT_VARIANT=4)
 add_dxc_shader(COMPILED_SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/present.hlsl" pixel_main ps_6_0 present_dlss_inputs_ps.cso -DPRESENT_VARIANT=4 -DPRESENT_OUTPUT_DLSS_INPUTS=1)
 add_dxc_shader(COMPILED_SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/selective_tiles.hlsl" vis_classify_main cs_6_0 tile_vis_classify_cs.cso)
+add_dxc_shader(COMPILED_SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/selective_tiles.hlsl" tile_admit_main cs_6_0 tile_admit_cs.cso)
 add_dxc_shader(COMPILED_SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/selective_tiles.hlsl" tile_shade_main cs_6_0 tile_shade_indirect_cs.cso)
 
 add_custom_target(frame_warp_shaders ALL DEPENDS ${COMPILED_SHADERS})

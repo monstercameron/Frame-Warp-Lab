@@ -31,6 +31,7 @@ struct SceneConstantsData {
     float previous_ball_center_unused[4];
     std::uint32_t tile_params[4];
     std::uint32_t cache_params[4];
+    std::uint32_t policy_params[4];
 };
 
 struct PresentConstantsData {
@@ -335,7 +336,7 @@ Renderer::Renderer(HWND window)
 
     D3D12_DESCRIPTOR_HEAP_DESC compute_heap_description{};
     compute_heap_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    compute_heap_description.NumDescriptors = source_slot_count * compute_descriptors_per_source_slot + 1U;
+    compute_heap_description.NumDescriptors = source_slot_count * compute_descriptors_per_source_slot + 2U;
     compute_heap_description.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     check(device_->CreateDescriptorHeap(&compute_heap_description, IID_PPV_ARGS(&scene_compute_heap_)), "Create scene compute heap");
 
@@ -436,11 +437,13 @@ bool Renderer::poll_completed_scenes() {
             }
         }
         if (slot.used_selective_tiles && mapped_tile_stats_) {
-            const std::size_t stats_base = static_cast<std::size_t>(slot_index) * tile_stats_u32_count;
+            const std::size_t stats_base = static_cast<std::size_t>(slot_index) * tile_stats_readback_u32_count;
             slot.tile_stats.total_tiles = mapped_tile_stats_[stats_base + 3];
             slot.tile_stats.cached_tiles = mapped_tile_stats_[stats_base + 4];
             slot.tile_stats.shaded_tiles = mapped_tile_stats_[stats_base + 0];
             slot.tile_stats.deferred_tiles = mapped_tile_stats_[stats_base + 6];
+            slot.tile_stats.critical_total_tiles = mapped_tile_stats_[stats_base + 8] + mapped_tile_stats_[stats_base + 9];
+            slot.tile_stats.critical_deferred_tiles = mapped_tile_stats_[stats_base + 7];
             slot.tile_stats.active = true;
         } else {
             slot.tile_stats = TileCacheStats{};
@@ -545,6 +548,7 @@ bool Renderer::submit_scene_async(
     VrsMode vrs_mode,
     bool selective_tiles_enabled,
     std::int32_t tile_budget_pct,
+    TilePolicy tile_policy,
     std::uint64_t frame_id,
     LatencyMonitor& latency_monitor,
     bool wait_for_completion) {
@@ -583,7 +587,7 @@ bool Renderer::submit_scene_async(
     const UINT tiles_x = std::max<UINT>(1U, (viewport_width_ + 15U) / 16U);
     const UINT tiles_y = std::max<UINT>(1U, (viewport_height_ + 15U) / 16U);
     const UINT total_tiles = tiles_x * tiles_y;
-    const std::int32_t clamped_budget_pct = std::clamp(tile_budget_pct, 10, 100);
+    const std::int32_t clamped_budget_pct = std::clamp(tile_budget_pct, 5, 100);
     const UINT tile_budget = (clamped_budget_pct >= 100)
         ? total_tiles
         : std::max<UINT>(1U, (total_tiles * static_cast<UINT>(clamped_budget_pct) + 99U) / 100U);
@@ -619,6 +623,12 @@ bool Renderer::submit_scene_async(
         16U,
         viewport_width_,
         viewport_height_);
+    simd::store_uint4(
+        scene_constants->policy_params,
+        tile_policy == TilePolicy::priority_stbn ? 1U : 0U,
+        total_tiles,
+        0U,
+        0U);
 
     latency_monitor.emit_marker(LatencyMarker::render_submit_start, frame_id);
     check(slot.command_allocator->Reset(), "Reset scene command allocator");
@@ -629,7 +639,7 @@ bool Renderer::submit_scene_async(
         scene_command_list_->EndQuery(scene_timestamp_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, query_base + 0);
     }
 
-    if (selective_tiles_enabled && tile_vis_classify_pipeline_ && tile_shade_indirect_pipeline_ && dispatch_command_signature_) {
+    if (selective_tiles_enabled && tile_vis_classify_pipeline_ && tile_admit_pipeline_ && tile_shade_indirect_pipeline_ && dispatch_command_signature_) {
         const std::array<D3D12_RESOURCE_BARRIER, 6> to_uav = {
             transition_barrier(slot.color_target.Get(), source_slot_readable_state, D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
             transition_barrier(slot.depth_target.Get(), source_slot_readable_state, D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
@@ -645,7 +655,7 @@ bool Renderer::submit_scene_async(
             0,
             tile_indirect_args_init_upload_.Get(),
             0,
-            static_cast<UINT64>(tile_stats_u32_count) * sizeof(std::uint32_t));
+            static_cast<UINT64>(tile_indirect_u32_count) * sizeof(std::uint32_t));
         const auto args_to_uav = transition_barrier(tile_indirect_args_uav_.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         scene_command_list_->ResourceBarrier(1, &args_to_uav);
 
@@ -663,20 +673,31 @@ bool Renderer::submit_scene_async(
             heap_gpu_start.ptr + static_cast<UINT64>(safe_prev_slot) * compute_descriptors_per_source_slot * shader_resource_descriptor_stride_};
         D3D12_GPU_DESCRIPTOR_HANDLE curr_uav_gpu{
             heap_gpu_start.ptr + (static_cast<UINT64>(slot_index) * compute_descriptors_per_source_slot + 3ULL) * shader_resource_descriptor_stride_};
-        D3D12_GPU_DESCRIPTOR_HANDLE dirty_list_uav_gpu{
+        D3D12_GPU_DESCRIPTOR_HANDLE shared_uav_gpu{
             heap_gpu_start.ptr + static_cast<UINT64>(source_slot_count * compute_descriptors_per_source_slot) * shader_resource_descriptor_stride_};
 
         scene_command_list_->SetComputeRootDescriptorTable(1, prev_srv_gpu);
         scene_command_list_->SetComputeRootDescriptorTable(2, curr_uav_gpu);
-        scene_command_list_->SetComputeRootDescriptorTable(3, dirty_list_uav_gpu);
+        scene_command_list_->SetComputeRootDescriptorTable(3, shared_uav_gpu);
         scene_command_list_->SetComputeRootUnorderedAccessView(4, tile_indirect_args_uav_->GetGPUVirtualAddress());
         scene_command_list_->Dispatch(tiles_x, tiles_y, 1);
 
-        const std::array<D3D12_RESOURCE_BARRIER, 5> mid_barriers = {
+        const std::array<D3D12_RESOURCE_BARRIER, 3> admit_barriers = {
+            uav_barrier(tile_candidate_meta_uav_.Get()),
+            uav_barrier(tile_indirect_args_uav_.Get()),
+            uav_barrier(slot.tile_map_target.Get()),
+        };
+        scene_command_list_->ResourceBarrier(static_cast<UINT>(admit_barriers.size()), admit_barriers.data());
+
+        scene_command_list_->SetPipelineState(tile_admit_pipeline_.Get());
+        scene_command_list_->Dispatch((total_tiles + 255U) / 256U, 1, 1);
+
+        const std::array<D3D12_RESOURCE_BARRIER, 6> mid_barriers = {
             uav_barrier(dirty_tile_list_uav_.Get()),
             uav_barrier(slot.color_target.Get()),
             uav_barrier(slot.depth_target.Get()),
             uav_barrier(slot.vis_target.Get()),
+            uav_barrier(slot.tile_map_target.Get()),
             transition_barrier(tile_indirect_args_uav_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT),
         };
         scene_command_list_->ResourceBarrier(static_cast<UINT>(mid_barriers.size()), mid_barriers.data());
@@ -702,10 +723,10 @@ bool Renderer::submit_scene_async(
 
         scene_command_list_->CopyBufferRegion(
             tile_stats_readback_.Get(),
-            static_cast<UINT64>(slot_index) * tile_stats_u32_count * sizeof(std::uint32_t),
+            static_cast<UINT64>(slot_index) * tile_stats_readback_u32_count * sizeof(std::uint32_t),
             tile_indirect_args_uav_.Get(),
             0,
-            static_cast<UINT64>(tile_stats_u32_count) * sizeof(std::uint32_t));
+            static_cast<UINT64>(tile_stats_readback_u32_count) * sizeof(std::uint32_t));
         const auto args_restore_uav = transition_barrier(tile_indirect_args_uav_.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         scene_command_list_->ResourceBarrier(1, &args_restore_uav);
         slot.used_selective_tiles = true;
@@ -1260,6 +1281,7 @@ void Renderer::create_pipelines() {
     };
     const auto present_dlss_inputs_ps = load_shader_bytecode(shaders / L"present_dlss_inputs_ps.cso");
     const auto tile_vis_classify_cs = load_shader_bytecode(shaders / L"tile_vis_classify_cs.cso");
+    const auto tile_admit_cs = load_shader_bytecode(shaders / L"tile_admit_cs.cso");
     const auto tile_shade_indirect_cs = load_shader_bytecode(shaders / L"tile_shade_indirect_cs.cso");
 
     D3D12_ROOT_PARAMETER scene_parameter{};
@@ -1407,7 +1429,7 @@ void Renderer::create_pipelines() {
 
     D3D12_DESCRIPTOR_RANGE compute_dirty_list_uav_range{};
     compute_dirty_list_uav_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-    compute_dirty_list_uav_range.NumDescriptors = 1;
+    compute_dirty_list_uav_range.NumDescriptors = 2;
     compute_dirty_list_uav_range.BaseShaderRegister = 5;
     compute_dirty_list_uav_range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
 
@@ -1428,7 +1450,7 @@ void Renderer::create_pipelines() {
     tile_compute_parameters[3].DescriptorTable.pDescriptorRanges = &compute_dirty_list_uav_range;
     tile_compute_parameters[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
     tile_compute_parameters[4].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
-    tile_compute_parameters[4].Descriptor.ShaderRegister = 6;
+    tile_compute_parameters[4].Descriptor.ShaderRegister = 7;
     tile_compute_parameters[4].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
     std::array<D3D12_STATIC_SAMPLER_DESC, 2> compute_samplers = samplers;
@@ -1451,6 +1473,8 @@ void Renderer::create_pipelines() {
     compute_desc.pRootSignature = tile_compute_root_signature_.Get();
     compute_desc.CS = {tile_vis_classify_cs.data(), tile_vis_classify_cs.size()};
     check(device_->CreateComputePipelineState(&compute_desc, IID_PPV_ARGS(&tile_vis_classify_pipeline_)), "Create tile vis classify compute pipeline");
+    compute_desc.CS = {tile_admit_cs.data(), tile_admit_cs.size()};
+    check(device_->CreateComputePipelineState(&compute_desc, IID_PPV_ARGS(&tile_admit_pipeline_)), "Create tile admit compute pipeline");
     compute_desc.CS = {tile_shade_indirect_cs.data(), tile_shade_indirect_cs.size()};
     check(device_->CreateComputePipelineState(&compute_desc, IID_PPV_ARGS(&tile_shade_indirect_pipeline_)), "Create tile shade indirect compute pipeline");
 }
@@ -1553,24 +1577,31 @@ void Renderer::create_selective_tile_resources() {
         D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
         D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
         "Create dirty tile list UAV");
+    tile_candidate_meta_uav_ = create_buffer(
+        device_.Get(),
+        D3D12_HEAP_TYPE_DEFAULT,
+        static_cast<std::size_t>(max_dirty_tile_capacity) * sizeof(std::uint32_t),
+        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+        "Create tile candidate metadata UAV");
     tile_indirect_args_uav_ = create_buffer(
         device_.Get(),
         D3D12_HEAP_TYPE_DEFAULT,
-        static_cast<std::size_t>(tile_stats_u32_count) * sizeof(std::uint32_t),
+        static_cast<std::size_t>(tile_indirect_u32_count) * sizeof(std::uint32_t),
         D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
         D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
         "Create tile indirect args UAV");
     tile_indirect_args_init_upload_ = create_buffer(
         device_.Get(),
         D3D12_HEAP_TYPE_UPLOAD,
-        static_cast<std::size_t>(tile_stats_u32_count) * sizeof(std::uint32_t),
+        static_cast<std::size_t>(tile_indirect_u32_count) * sizeof(std::uint32_t),
         D3D12_RESOURCE_FLAG_NONE,
         D3D12_RESOURCE_STATE_GENERIC_READ,
         "Create tile indirect args init buffer");
     std::uint32_t* init_ptr = nullptr;
     D3D12_RANGE empty_range{0, 0};
     check(tile_indirect_args_init_upload_->Map(0, &empty_range, reinterpret_cast<void**>(&init_ptr)), "Map tile indirect args init buffer");
-    std::memset(init_ptr, 0, static_cast<std::size_t>(tile_stats_u32_count) * sizeof(std::uint32_t));
+    std::memset(init_ptr, 0, static_cast<std::size_t>(tile_indirect_u32_count) * sizeof(std::uint32_t));
     init_ptr[1] = 1U;
     init_ptr[2] = 1U;
     tile_indirect_args_init_upload_->Unmap(0, nullptr);
@@ -1578,21 +1609,23 @@ void Renderer::create_selective_tile_resources() {
     tile_stats_readback_ = create_buffer(
         device_.Get(),
         D3D12_HEAP_TYPE_READBACK,
-        static_cast<std::size_t>(source_slot_count) * tile_stats_u32_count * sizeof(std::uint32_t),
+        static_cast<std::size_t>(source_slot_count) * tile_stats_readback_u32_count * sizeof(std::uint32_t),
         D3D12_RESOURCE_FLAG_NONE,
         D3D12_RESOURCE_STATE_COPY_DEST,
         "Create tile stats readback buffer");
     check(tile_stats_readback_->Map(0, nullptr, reinterpret_cast<void**>(const_cast<std::uint32_t**>(&mapped_tile_stats_))), "Map tile stats readback buffer");
 
-    auto dirty_list_uav_cpu = scene_compute_heap_->GetCPUDescriptorHandleForHeapStart();
-    dirty_list_uav_cpu.ptr += static_cast<SIZE_T>(source_slot_count * compute_descriptors_per_source_slot) * shader_resource_descriptor_stride_;
-    D3D12_UNORDERED_ACCESS_VIEW_DESC dirty_list_desc{};
-    dirty_list_desc.Format = DXGI_FORMAT_UNKNOWN;
-    dirty_list_desc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
-    dirty_list_desc.Buffer.FirstElement = 0;
-    dirty_list_desc.Buffer.NumElements = max_dirty_tile_capacity;
-    dirty_list_desc.Buffer.StructureByteStride = sizeof(std::uint32_t);
-    device_->CreateUnorderedAccessView(dirty_tile_list_uav_.Get(), nullptr, &dirty_list_desc, dirty_list_uav_cpu);
+    auto shared_uav_cpu = scene_compute_heap_->GetCPUDescriptorHandleForHeapStart();
+    shared_uav_cpu.ptr += static_cast<SIZE_T>(source_slot_count * compute_descriptors_per_source_slot) * shader_resource_descriptor_stride_;
+    D3D12_UNORDERED_ACCESS_VIEW_DESC buf_uav_desc{};
+    buf_uav_desc.Format = DXGI_FORMAT_UNKNOWN;
+    buf_uav_desc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+    buf_uav_desc.Buffer.FirstElement = 0;
+    buf_uav_desc.Buffer.NumElements = max_dirty_tile_capacity;
+    buf_uav_desc.Buffer.StructureByteStride = sizeof(std::uint32_t);
+    device_->CreateUnorderedAccessView(dirty_tile_list_uav_.Get(), nullptr, &buf_uav_desc, shared_uav_cpu);
+    shared_uav_cpu.ptr += shader_resource_descriptor_stride_;
+    device_->CreateUnorderedAccessView(tile_candidate_meta_uav_.Get(), nullptr, &buf_uav_desc, shared_uav_cpu);
 
     D3D12_INDIRECT_ARGUMENT_DESC indirect_arg{};
     indirect_arg.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
