@@ -252,6 +252,40 @@ Operations such as late camera warp, motion extrapolation, disocclusion recovery
 | 19 | Artifact-benefit-based shader scheduling | Architectural | Planned |
 | 20 | Dynamic resolution as an emergency fallback | Resilience | Planned |
 
+## Inverse-rendering architecture and verified literature backlog
+
+In Frame Warp Lab's architectural sense, **inverse rendering** means fixing the presentation deadline first (`T_execution(S) <= T_deadline`) and treating image quality as the constrained optimization variable (`minimize E_perceptual + lambda * E_temporal`) across six decoupled layers:
+
+1. **Display clock**: fixed refresh cadence and rational presentation deadlines.
+2. **Real-time compositor**: latest input, late camera correction, and frame delivery.
+3. **Persistent visual state**: multilayer depth, geometry, motion, and surface shading caches.
+4. **Error evaluation**: confidence, disocclusion, tile staleness, and perceptual error proxies.
+5. **Adaptive painting scheduler**: prioritized shader and tile-level rendering/correction operations.
+6. **Authoritative scene renderer**: rasterization, ray tracing, materials, and lighting.
+
+### Platform feasibility tiers (Windows 11 ARM64 + D3D12 SM 6.0 + RTX Spark N1X)
+
+- **Tier 1 — Immediately feasible on the current D3D12 architecture (no scene rewrite)**:
+  - **STeFAS content-adaptive VRS**: GPU SM 6.0 compute pass dynamically updating the Tier 2 `16×16` `R8_UINT` shading-rate image from edges, motion, and reprojection holes with temporal hysteresis.
+  - **Confidence-driven redraw maps & selective tile repainting** (Time-Warped Foveated + Amulet): `16×16` tile error/age scoring, SM 6.0 wave compaction (`WavePrefixCountBits`), and `ExecuteIndirect` repainting of dirty tiles only.
+  - **Amulet-style sparse multilayer cache & predictive tile lifetimes**: 2nd-hit occluded color/depth layer (`LDI`) plus per-tile expiration lifetimes to resolve disocclusions from real geometry instead of neural hallucination.
+  - **Guard-band rendering**: +10–15% offscreen G-buffer margin with coarse border VRS to eliminate fast-pan/rotation viewport-edge holes.
+  - **Deferred Adaptive Compute Shading (DACS)**: hierarchical variance-driven SM 6.0 compute shading (`4×4 → 2×2 → 1×1`) benchmarked directly against hardware Tier 2 VRS.
+  - **Acceleration-aware extrapolation & reactive masks**: quadratic velocity+acceleration prediction using `T_n` / `T_{n-1}` motion history (with reversal clamping) plus reactive masks preventing stale reuse.
+  - **Perceptual error validation**: offline Python FovVideoVDP evaluation on matched reference vs. synthesized frames paired with a lightweight runtime contrast/velocity/eccentricity priority proxy.
+- **Tier 2 — Feasible after adding a conventional rasterized mesh scene (and optional DXR)**:
+  - **Visibility-buffer rendering**, **FastAtlas / Shading Atlas Streaming / SnakeBinning** persistent texture-space shading caches, **adaptive geometric LOD / meshlets**, **reverse reprojection / multi-rate shader memoization**, **PatchEX** parallel patch extrapolation, **FAST** filter-adapted stochastic sampling, **stochastic texture filtering**, and **Multi-Layer Reservoir Splatting / Temporally Dense Ray Tracing** (via Blackwell D3D12 Raytracing Tier 1.1).
+- **Tier 3 — Blocked on standard Windows 11 WDDM / consumer displays (reference only)**:
+  - **Scanline-aware / beam-racing rendering** and **direct FPGA/hardware render-display scanout integration (<2 ms click-to-photon)**: not achievable on user-mode Windows WDDM `DXGI_SWAP_EFFECT_FLIP_DISCARD` swap chains without custom display/OS hardware.
+
+### Priority research techniques added from literature
+
+| Priority | Techniques |
+| :--- | :--- |
+| **P0** | Deadline-constrained work admission; frameless/progressive tile rendering; predictive GPU scheduling; temporally amortized rendering; decoupled visibility & shading (visibility buffer); confidence-driven redraw maps; tile-level selective repainting; STeFAS content-adaptive VRS; rotation-only reprojection (done `v0.16.0`); guard-band rendering; layered depth images (LDI); persistent render cache; temporal interleaved sampling; Deferred Adaptive Compute Shading (DACS); texture-space shading; Amulet-style predictive tile lifetimes. |
+| **P1** | Reverse reprojection caching; automated shader memoization; multi-rate material shading; FastAtlas surface-space shading atlases & dynamic packing (SnakeBinning); hierarchical sparse shading; acceleration-aware extrapolation; classical optical flow; PatchEX patch-based parallel extrapolation; foreground/background layer separation; forward depth-aware splatting; multi-frame temporal cache; temporally dense ray tracing; FAST filter-adapted stochastic sampling; stochastic texture filtering; ReSTIR & Multi-Layer Reservoir Splatting under disocclusion; perceptual error prioritization (FovVideoVDP offline + runtime proxy); independent lighting frequencies. |
+| **P2 / P3** | Dynamic geometric LOD (`P2`); scanline-aware rendering (`P2`, WDDM-blocked); direct render-display hardware integration (`P3`, custom hardware required). |
+
 ## Machine observation
 
 On 26 November 2026, `nvidia-smi` and the D3D12 capability query reported an `NVIDIA RTX Spark N1X (6144-core Blackwell RTX GPU)` in WDDM mode (driver `621.40`, `98290 MiB` dedicated VRAM), `DXGI_FEATURE_PRESENT_ALLOW_TEARING` supported, and D3D12 Variable Rate Shading **Tier 2** (`additional_shading_rates_supported: true`, `tile_size_px: 16`). Native ARM64 NVIDIA binaries are present on this machine: `C:\Windows\System32\nvapia64.dll`, `C:\Program Files\NVIDIA Corporation\FrameViewSDK\bin\FvSDK_arm64.dll` (and `SDK\Public_Release\ARM64\FvSDK_ARM64.lib`), `PresentMon_arm64.exe`, and `nvrla.exe`; NVIDIA Streamline `v2.14.16` also publishes official `streamline-sdk-v2.14.16-aarch64.zip` and `arm64ec` releases (DLSS-G runtime plugin behavior on this GPU remains to be tested). Active Windows display mode on `\\.\DISPLAY6` enumerated as `2880x1800` at nominal `120 Hz` (enumerated max `120 Hz` at active resolution; physical monitor upper bound and displayed scanout timing remain unverified). Local Python is ARM64. Measured Release findings on `1264x681` Motion Lab (`v0.10.0`–`v0.16.0`):
@@ -273,7 +307,26 @@ On 26 November 2026, `nvidia-smi` and the D3D12 capability query reported an `NV
 - [The Visibility Buffer (2013)](https://jcgt.org/published/0002/02/04/): bandwidth-efficient deferred shading architecture.
 - [Adaptive Texture Space Shading (2014)](https://onlinelibrary.wiley.com/doi/10.1111/cgf.12303): adaptive surface-space shading.
 - [Advanced API Performance: Variable Rate Shading (2022)](https://developer.nvidia.com/blog/?p=36325): hardware VRS optimization considerations.
-- [FastAtlas (2025)](https://doi.org/10.1111/cgf.70010): real-time compact texture-space shading caches.
+- [FastAtlas: Real-Time Compact Atlases for Texture Space Shading (2025)](https://doi.org/10.1111/cgf.70010): real-time GPU-accelerated compact texture-space shading caches.
+- [Amulet: Frame Extrapolation Through Sparse Layered Scene Representation and Adaptive Shading (2026)](https://arxiv.org/abs/2608.10423): sparse tiled multilayer scene cache, predictive tile lifetimes, and non-neural high-frequency frame extrapolation.
+- [Temporally Dense Ray Tracing (NVIDIA, 2019)](https://research.nvidia.com/labs/rtr/publication/andersson2019temporally/): frameless interleaved pixel updates and temporal accumulation for 240+ FPS.
+- [STeFAS: Temporally Stable Content-Adaptive and Spatio-Temporal Shading Rate Assignment (TU Wien, 2021)](https://www.cg.tuwien.ac.at/research/publications/2021/stappen_SteFAS/): temporally stable content-driven hardware VRS assignment.
+- [Adaptive Display Algorithm (Funkhouser & Séquin, 1993)](https://gfx.cs.princeton.edu/gfx/pubs/Funkhouser_1993_ADA/index.php): constrained image-quality optimization within fixed rendering deadlines.
+- [Frameless Rendering (Bishop et al., 1994)](https://doi.org/10.1145/192161.192195): continuous pixel updates from recent input without whole-frame barriers.
+- [Interactive Rendering Using the Render Cache (Walter et al., 1999)](https://doi.org/10.2312/EGWR/EGWR99/019-030) and [Enhancing and Optimizing the Render Cache (2002)](https://doi.org/10.2312/EGWR/EGWR02/037-042): reprojected sample caches and prioritized resampling.
+- [Adaptive Frameless Rendering (Dayal et al., 2005)](https://doi.org/10.1145/1198555.1198763): closed-loop error-, edge-, and motion-driven sampling.
+- [Accelerating Real-Time Shading with Reverse Reprojection Caching (Nehab et al., 2007)](https://pixl.cs.princeton.edu/pubs/Nehab_2007_ARS/index.php) and [Automated Reprojection-Based Pixel Shader Optimization (2008)](https://researchportal.hkust.edu.hk/en/publications/automated-reprojection-based-pixel-shader-optimization/): cross-frame shader result caching.
+- [Image-Space Bidirectional Scene Reprojection (Yang et al., 2010)](https://hhoppe.com/proj/bireproj/): depth- and motion-based intermediate frame reconstruction.
+- [Coarse Pixel Shading (2014)](https://fileadmin.cs.lth.se/graphics/research/papers/2014/cps/): multi-rate shading within a single shader pipeline.
+- [Deferred Adaptive Compute Shading (Mallett & Yuksel, 2018)](https://graphics.geometrian.com/research/dacs.html): variance-driven hierarchical sparse compute shading beyond fixed VRS blocks.
+- [Shading Atlas Streaming (Mueller et al., 2018)](https://doi.org/10.1145/3272127.3275087) and [SnakeBinning (2021)](https://doi.org/10.1111/cgf.142648): object-space shading streaming and temporally coherent atlas packing.
+- [Time-Warped Foveated Rendering for Virtual Reality Headsets (2020)](https://doi.org/10.1111/cgf.14176): confidence-driven selective redraw maps and geometry culling.
+- [Post-Render Warp with Late Input Sampling (2020)](https://doi.org/10.1145/3406187): late camera correction under high latency.
+- [A Perceptual Model of Motion Quality (2020)](https://doi.org/10.1145/3386569.3392411), [FovVideoVDP (2021)](https://www.siggraph.org/wp-content/uploads/2021/08/tog-404.html), and [Perceptual Model for Adaptive Local Shading and Refresh Rate](https://www.repository.cam.ac.uk/items/8001a1ac-fbd7-4568-b7bc-e1491f9f82e9): perceptual error and motion-quality modeling.
+- [FAST: Filter-Adapted Spatio-Temporal Sampling (2024)](https://doi.org/10.1145/3651283) and [Filtering After Shading with Stochastic Texture Filtering (NVIDIA, 2024)](https://research.nvidia.com/labs/rtr/publication/pharr2024stochtex/): reconstruction-aware stochastic sampling and filtering.
+- [GFFE: G-Buffer Free Frame Extrapolation (Intel, 2024)](https://www.intel.com/content/www/us/en/developer/articles/technical/gffe-g-buffer-free-frame-extrapolation.html) and [PatchEX (2025)](https://doi.org/10.1145/3759247): motion classification, disocclusion handling, and parallel patch-based extrapolation.
+- [Multi-Layer Reservoir Splatting for Temporal Reuse under Disocclusion (NVIDIA/Utah, 2026)](https://research.nvidia.com/labs/rtr/publication/hong2026multilayer/): multi-layer ReSTIR sample recycling across disocclusions.
+- [Construction and Evaluation of an Ultra Low Latency Frameless Renderer for VR (2016)](https://pubmed.ncbi.nlm.nih.gov/26780798/) and [Rethinking the Render-Display Pipeline to Reduce Latency in Interaction (2026)](https://doi.org/10.1145/3799826.3812437): scanout-synchronized frameless rendering hardware references (WDDM-blocked on standard desktop).
 
 ## Questions to resolve
 

@@ -1,5 +1,10 @@
 # Development log
 
+## v0.16.2 — Add verified inverse-rendering literature, 6-layer architecture, and platform feasibility tiers to research.md
+
+- Verified key 2025–2026 references (`Amulet` arXiv:2608.10423, `FastAtlas` CGF 2025, `Multi-Layer Reservoir Splatting` SIGGRAPH 2026, `PatchEX` 2025, `STeFAS` TU Wien 2021, `DACS` 2018, `Time-Warped Foveated Rendering` 2020) and recorded the 6-layer deadline-constrained inverse-rendering architecture, Windows 11 ARM64/WDDM feasibility tiers, consolidated P0–P3 technique backlog, and full literature bibliography in `research.md`.
+- Documentation-only change; verified with `git diff --check` and pushed to `main`.
+
 ## v0.16.1 — Record pre-neural conventional rendering optimization taxonomy and 20-step roadmap
 
 - Added the comprehensive pre-neural rendering optimization taxonomy to `research.md`, covering spatial/temporal rendering (visibility buffer, temporal interleaving, selective regional repainting), temporally amortized decoupled subsystem frequencies, texture-space shading and persistent surface caching, deterministic artifact correction (layered depth, guard bands, reactive masks, acceleration-aware extrapolation), GPU execution and lighting optimizations, value-per-cost artifact-driven shader scheduling, the 20-step experiment sequence with live `v0.16.0` status tracking, and six foundational graphics paper references (Decoupled Sampling, Temporal Coherence, Visibility Buffer, Adaptive Texture Space Shading, NVIDIA VRS Performance, FastAtlas).
