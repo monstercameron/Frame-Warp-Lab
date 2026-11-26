@@ -39,7 +39,10 @@ public:
         bool allow_tearing_enabled,
         bool waitable_swap_chain,
         bool raw_input_enabled,
-        bool high_priority_present_queue)
+        bool high_priority_present_queue,
+        std::int32_t vrs_tier,
+        std::int32_t vrs_tile_size_px,
+        bool vrs_additional_rates_supported)
         : mapping_(CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0,
                                       sizeof(frame_warp_lab::RuntimeState),
                                       frame_warp_lab::runtime_mapping_name(GetCurrentProcessId()).c_str()),
@@ -54,6 +57,9 @@ public:
         std::atomic_ref<std::int32_t>(state_->allow_tearing_enabled).store(allow_tearing_enabled ? 1 : 0, std::memory_order_relaxed);
         std::atomic_ref<std::int32_t>(state_->waitable_swap_chain).store(waitable_swap_chain ? 1 : 0, std::memory_order_relaxed);
         std::atomic_ref<std::int32_t>(state_->high_priority_present_queue).store(high_priority_present_queue ? 1 : 0, std::memory_order_relaxed);
+        std::atomic_ref<std::int32_t>(state_->vrs_tier).store(vrs_tier, std::memory_order_relaxed);
+        std::atomic_ref<std::int32_t>(state_->vrs_tile_size_px).store(vrs_tile_size_px, std::memory_order_relaxed);
+        std::atomic_ref<std::int32_t>(state_->vrs_additional_rates_supported).store(vrs_additional_rates_supported ? 1 : 0, std::memory_order_relaxed);
         std::atomic_ref<std::int32_t>(state_->raw_input_enabled).store(raw_input_enabled ? 1 : 0, std::memory_order_relaxed);
         std::atomic_ref<std::int32_t>(state_->gpu_timing_available).store(gpu_timing_available ? 1 : 0, std::memory_order_relaxed);
         std::atomic_ref<std::int64_t>(state_->last_input_to_present_us).store(-1, std::memory_order_relaxed);
@@ -77,6 +83,8 @@ public:
         std::int32_t source_divider,
         bool vsync_enabled,
         bool async_gpu_enabled,
+        frame_warp_lab::VrsMode vrs_requested_mode,
+        frame_warp_lab::VrsMode vrs_active_mode,
         frame_warp_lab::DiagnosticView view,
         frame_warp_lab::CameraPath path,
         std::int32_t stress_level,
@@ -89,6 +97,8 @@ public:
         std::atomic_ref<std::int32_t>(state_->source_divider).store(source_divider, std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->vsync_enabled).store(vsync_enabled ? 1 : 0, std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->async_gpu_enabled).store(async_gpu_enabled ? 1 : 0, std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->vrs_requested_mode).store(static_cast<std::int32_t>(vrs_requested_mode), std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->vrs_active_mode).store(static_cast<std::int32_t>(vrs_active_mode), std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->diagnostic_view).store(static_cast<std::int32_t>(view), std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->camera_path).store(static_cast<std::int32_t>(path), std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->stress_level).store(stress_level, std::memory_order_release);
@@ -187,6 +197,7 @@ public:
         slot.diagnostic_view = sample.diagnostic_view;
         slot.camera_path = sample.camera_path;
         slot.stress_level = sample.stress_level;
+        slot.vrs_mode = sample.vrs_mode;
         slot.source_divider = sample.source_divider;
         slot.source_rendered = sample.source_rendered;
         slot.gpu_slot_warped = sample.gpu_slot_warped;
@@ -342,6 +353,15 @@ const char* short_path_label(frame_warp_lab::CameraPath path) {
     }
 }
 
+const char* short_vrs_label(frame_warp_lab::VrsMode mode) {
+    switch (mode) {
+        case frame_warp_lab::VrsMode::off: return "OFF";
+        case frame_warp_lab::VrsMode::uniform_2x2: return "2X2";
+        case frame_warp_lab::VrsMode::foveated: return "FOV";
+        default: return "UNK";
+    }
+}
+
 void format_hud_lines(
     frame_warp_lab::HudOverlayState& hud,
     double smoothed_interval_us,
@@ -355,6 +375,7 @@ void format_hud_lines(
     frame_warp_lab::PacerMode pacer_mode,
     std::int32_t source_divider,
     bool async_gpu_enabled,
+    frame_warp_lab::VrsMode active_vrs_mode,
     frame_warp_lab::CameraPath path,
     std::int32_t stress_level,
     bool mouse_look_locked) {
@@ -369,8 +390,8 @@ void format_hud_lines(
 
     std::snprintf(hud.lines[0], sizeof(hud.lines[0]), "FPS %5.1f  FT %5.2f MS  %s /%d  PACE %s", fps, frame_ms, short_mode_label(mode), source_divider, short_pacer_label(pacer_mode));
     std::snprintf(hud.lines[1], sizeof(hud.lines[1]), "GPU SCN %4.2f  WRP %4.2f  IN-PR %4.2f  MS", scene_ms, warp_ms, input_ms);
-    std::snprintf(hud.lines[2], sizeof(hud.lines[2]), "HOLE %4.2f%%  MISS %lld  ASYNC %s  STR %d", holes_pct, static_cast<long long>(missed_deadlines), async_gpu_enabled ? "ON" : "OFF", stress_level);
-    std::snprintf(hud.lines[3], sizeof(hud.lines[3]), "%s  PATH %s  1-5 MODE  G ASYNC  L PACE", mouse_look_locked ? "RMB/ESC UNLK" : "LMB/RMB LOOK", short_path_label(path));
+    std::snprintf(hud.lines[2], sizeof(hud.lines[2]), "HOLE %4.2f%%  MISS %lld  VRS %s  STR %d", holes_pct, static_cast<long long>(missed_deadlines), short_vrs_label(active_vrs_mode), stress_level);
+    std::snprintf(hud.lines[3], sizeof(hud.lines[3]), "%s  PATH %s  1-5 MODE  B VRS  G %s", mouse_look_locked ? "RMB/ESC UNLK" : "LMB/RMB LOOK", short_path_label(path), async_gpu_enabled ? "ASYN" : "SYNC");
 }
 
 LRESULT CALLBACK window_procedure(HWND window, UINT message, WPARAM message_parameter, LPARAM message_data) {
@@ -496,7 +517,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
             renderer.allow_tearing_enabled(),
             renderer.waitable_swap_chain_enabled(),
             input_state.raw_input_registered,
-            renderer.high_priority_present_queue());
+            renderer.high_priority_present_queue(),
+            renderer.vrs_tier(),
+            renderer.vrs_tile_size_px(),
+            renderer.vrs_additional_rates_supported());
         frame_warp_lab::SceneSimulation simulation;
 
         ShowWindow(window, show == SW_HIDE ? SW_SHOWNORMAL : show);
@@ -509,6 +533,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         std::int32_t source_divider = 1;
         bool vsync_enabled = !renderer.allow_tearing_enabled();
         bool async_gpu_enabled = true;
+        frame_warp_lab::VrsMode vrs_mode = frame_warp_lab::VrsMode::off;
         frame_warp_lab::DiagnosticView diagnostic_view = frame_warp_lab::DiagnosticView::final_color;
         std::int32_t stress_level = 0;
         bool overlay_enabled = true;
@@ -543,6 +568,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 source_divider,
                 vsync_enabled,
                 async_gpu_enabled,
+                vrs_mode,
+                renderer.resolve_effective_vrs_mode(vrs_mode),
                 diagnostic_view,
                 simulation.path(),
                 stress_level,
@@ -600,6 +627,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                         config_changed = true;
                     } else if (message.wParam == 'G') {
                         async_gpu_enabled = !async_gpu_enabled;
+                        config_changed = true;
+                    } else if (message.wParam == 'B') {
+                        vrs_mode = static_cast<frame_warp_lab::VrsMode>((static_cast<std::int32_t>(vrs_mode) + 1) % 3);
                         config_changed = true;
                     } else if (message.wParam == 'H') {
                         diagnostic_view = diagnostic_view == frame_warp_lab::DiagnosticView::reprojection_holes
@@ -668,7 +698,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                         runtime_state.record_event(frame_warp_lab::RuntimeEventType::scene_reset, 0);
                     } else if (command == frame_warp_lab::ControlCommand::set_diagnostic_view) {
                         const auto raw = static_cast<std::int32_t>(message.lParam);
-                        if (raw >= 0 && raw <= 3) {
+                        if (raw >= 0 && raw <= 4) {
                             diagnostic_view = static_cast<frame_warp_lab::DiagnosticView>(raw);
                             runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, raw);
                         }
@@ -722,6 +752,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                     } else if (command == frame_warp_lab::ControlCommand::set_async_gpu) {
                         async_gpu_enabled = message.lParam != 0;
                         runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, async_gpu_enabled ? 1001 : 1000);
+                    } else if (command == frame_warp_lab::ControlCommand::set_vrs_mode) {
+                        const auto raw = static_cast<std::int32_t>(message.lParam);
+                        if (raw >= 0 && raw <= 2) {
+                            vrs_mode = static_cast<frame_warp_lab::VrsMode>(raw);
+                            runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, 1100 + raw);
+                        }
                     }
                     previous_tick = std::chrono::steady_clock::now();
                     publish_config();
@@ -821,6 +857,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
             const bool cadence_requests_scene = need_initial_source || (cadence_counter % effective_divider == 0);
             ++cadence_counter;
 
+            const frame_warp_lab::VrsMode active_vrs_mode = renderer.resolve_effective_vrs_mode(vrs_mode);
             bool scene_submitted_this_frame = false;
             if (cadence_requests_scene && (!renderer.has_scene_in_flight() || !async_gpu_enabled || need_initial_source)) {
                 ++source_frame_id;
@@ -831,6 +868,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                     new_snapshot,
                     capture_time,
                     stress_level,
+                    vrs_mode,
                     frame_id_u64,
                     latency_monitor,
                     must_wait);
@@ -918,6 +956,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 pacer.mode(),
                 effective_divider,
                 async_gpu_enabled,
+                active_vrs_mode,
                 simulation.path(),
                 stress_level,
                 input_state.mouse_look_locked);
@@ -933,6 +972,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                     &hud_state,
                     diagnostic_view,
                     synthesis_mode,
+                    active_vrs_mode,
                     extrapolation_alpha,
                     has_previous_history,
                     overlay_enabled,
@@ -1021,6 +1061,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                     static_cast<std::int32_t>(diagnostic_view),
                     static_cast<std::int32_t>(simulation.path()),
                     stress_level,
+                    static_cast<std::int32_t>(active_vrs_mode),
                     effective_divider,
                     scene_submitted_this_frame ? 1 : 0,
                     gpu_metrics.completed_slot_warped ? 1 : 0,

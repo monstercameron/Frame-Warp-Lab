@@ -10,7 +10,7 @@
 namespace frame_warp_lab {
 
 inline constexpr wchar_t window_class_name[] = L"FrameWarpLabWindow";
-inline constexpr std::uint32_t runtime_state_version = 11;
+inline constexpr std::uint32_t runtime_state_version = 12;
 inline constexpr std::size_t runtime_event_capacity = 64;
 inline constexpr std::size_t runtime_frame_trace_capacity = 256;
 inline constexpr std::size_t hud_graph_sample_count = 128;
@@ -35,6 +35,13 @@ enum class ControlCommand : WPARAM {
     set_pacer_mode = 12,
     set_target_fps = 13,
     set_async_gpu = 14,
+    set_vrs_mode = 15,
+};
+
+enum class VrsMode : std::int32_t {
+    off = 0,
+    uniform_2x2 = 1,
+    foveated = 2,
 };
 
 enum class PacerMode : std::int32_t {
@@ -56,6 +63,7 @@ enum class DiagnosticView : std::int32_t {
     depth = 1,
     motion_vectors = 2,
     reprojection_holes = 3,
+    vrs_mask = 4,
 };
 
 enum class CameraPath : std::int32_t {
@@ -122,6 +130,7 @@ struct RuntimeFrameSample {
     std::int32_t diagnostic_view;
     std::int32_t camera_path;
     std::int32_t stress_level;
+    std::int32_t vrs_mode;
     std::int32_t source_divider;
     std::int32_t source_rendered;
     std::int32_t gpu_slot_warped;
@@ -172,6 +181,11 @@ struct RuntimeState {
     std::int32_t waitable_swap_chain;
     std::int32_t async_gpu_enabled;
     std::int32_t high_priority_present_queue;
+    std::int32_t vrs_tier;
+    std::int32_t vrs_tile_size_px;
+    std::int32_t vrs_additional_rates_supported;
+    std::int32_t vrs_requested_mode;
+    std::int32_t vrs_active_mode;
     std::int32_t diagnostic_view;
     std::int32_t camera_path;
     std::int32_t stress_level;
@@ -250,12 +264,22 @@ inline const char* fallback_reason_name(std::int32_t reason) {
     }
 }
 
+inline const char* vrs_mode_name(std::int32_t mode) {
+    switch (static_cast<VrsMode>(mode)) {
+        case VrsMode::off: return "off";
+        case VrsMode::uniform_2x2: return "uniform_2x2";
+        case VrsMode::foveated: return "foveated";
+        default: return "unknown";
+    }
+}
+
 inline const char* diagnostic_view_name(std::int32_t view) {
     switch (static_cast<DiagnosticView>(view)) {
         case DiagnosticView::final_color: return "final";
         case DiagnosticView::depth: return "depth";
         case DiagnosticView::motion_vectors: return "motion";
         case DiagnosticView::reprojection_holes: return "holes";
+        case DiagnosticView::vrs_mask: return "vrs";
         default: return "unknown";
     }
 }

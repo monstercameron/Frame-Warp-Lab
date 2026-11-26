@@ -47,6 +47,7 @@ struct PresentConstantsData {
     float previous_camera_right_rcp_tan_x[4];
     float previous_camera_up_rcp_tan_y[4];
     float previous_camera_forward_tan_x[4];
+    float vrs_params[4];
 };
 
 struct HudConstantsData {
@@ -221,6 +222,13 @@ Renderer::Renderer(HWND window)
 
     check(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device_)), "Create D3D12 device");
 
+    D3D12_FEATURE_DATA_D3D12_OPTIONS6 options6{};
+    if (SUCCEEDED(device_->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS6, &options6, sizeof(options6)))) {
+        vrs_tier_ = static_cast<std::int32_t>(options6.VariableShadingRateTier);
+        vrs_tile_size_px_ = static_cast<std::int32_t>(options6.ShadingRateImageTileSize);
+        vrs_additional_rates_supported_ = options6.AdditionalShadingRatesSupported != FALSE;
+    }
+
     D3D12_COMMAND_QUEUE_DESC present_queue_description{};
     present_queue_description.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
     present_queue_description.Priority = D3D12_COMMAND_QUEUE_PRIORITY_HIGH;
@@ -288,6 +296,7 @@ Renderer::Renderer(HWND window)
         check(device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&slot.command_allocator)), "Create scene command allocator");
     }
     check(device_->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, source_slots_[0].command_allocator.Get(), nullptr, IID_PPV_ARGS(&scene_command_list_)), "Create scene command list");
+    scene_command_list_.As(&scene_command_list5_);
     check(scene_command_list_->Close(), "Close initial scene command list");
 
     check(device_->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&present_fence_)), "Create present fence");
@@ -300,6 +309,7 @@ Renderer::Renderer(HWND window)
     create_constant_buffers();
     create_timestamp_resources();
     create_reprojection_stats_resources();
+    create_vrs_resources();
     create_pipelines();
 }
 
@@ -407,10 +417,24 @@ std::int32_t Renderer::find_available_source_slot() const {
     return -1;
 }
 
+VrsMode Renderer::resolve_effective_vrs_mode(VrsMode requested) const {
+    if (!scene_command_list5_ || vrs_tier_ <= 0 || requested == VrsMode::off) {
+        return VrsMode::off;
+    }
+    if (requested == VrsMode::foveated) {
+        if (vrs_tier_ >= static_cast<std::int32_t>(D3D12_VARIABLE_SHADING_RATE_TIER_2) && vrs_image_) {
+            return VrsMode::foveated;
+        }
+        return VrsMode::uniform_2x2;
+    }
+    return VrsMode::uniform_2x2;
+}
+
 bool Renderer::submit_scene_async(
     const SceneSnapshot& snapshot,
     std::chrono::steady_clock::time_point capture_time,
     std::int32_t stress_level,
+    VrsMode vrs_mode,
     std::uint64_t frame_id,
     LatencyMonitor& latency_monitor,
     bool wait_for_completion) {
@@ -476,6 +500,27 @@ bool Renderer::submit_scene_async(
     scene_command_list_->SetGraphicsRootSignature(scene_root_signature_.Get());
     scene_command_list_->SetPipelineState(scene_pipeline_.Get());
     scene_command_list_->SetGraphicsRootConstantBufferView(0, scene_constant_buffer_->GetGPUVirtualAddress() + constant_offset);
+    if (scene_command_list5_ && vrs_tier_ > 0) {
+        const VrsMode effective_vrs = resolve_effective_vrs_mode(vrs_mode);
+        if (effective_vrs == VrsMode::foveated && vrs_image_) {
+            const D3D12_SHADING_RATE_COMBINER combiners[2] = {
+                D3D12_SHADING_RATE_COMBINER_PASSTHROUGH,
+                D3D12_SHADING_RATE_COMBINER_OVERRIDE,
+            };
+            scene_command_list5_->RSSetShadingRate(D3D12_SHADING_RATE_1X1, combiners);
+            scene_command_list5_->RSSetShadingRateImage(vrs_image_.Get());
+        } else if (effective_vrs == VrsMode::uniform_2x2) {
+            scene_command_list5_->RSSetShadingRate(D3D12_SHADING_RATE_2X2, nullptr);
+            if (vrs_tier_ >= static_cast<std::int32_t>(D3D12_VARIABLE_SHADING_RATE_TIER_2)) {
+                scene_command_list5_->RSSetShadingRateImage(nullptr);
+            }
+        } else {
+            scene_command_list5_->RSSetShadingRate(D3D12_SHADING_RATE_1X1, nullptr);
+            if (vrs_tier_ >= static_cast<std::int32_t>(D3D12_VARIABLE_SHADING_RATE_TIER_2)) {
+                scene_command_list5_->RSSetShadingRateImage(nullptr);
+            }
+        }
+    }
     scene_command_list_->DrawInstanced(3, 1, 0, 0);
 
     const std::array<D3D12_RESOURCE_BARRIER, targets_per_source_slot> to_srv = {
@@ -609,6 +654,12 @@ FrameExecutionMetrics Renderer::present_from_source(const PresentRequest& reques
     write_float4(present_constants->previous_camera_right_rcp_tan_x, history_camera.right, 1.0f / prev_tan_x);
     write_float4(present_constants->previous_camera_up_rcp_tan_y, history_camera.up, 1.0f / prev_tan_y);
     write_float4(present_constants->previous_camera_forward_tan_x, history_camera.forward, prev_tan_x);
+    simd::store_float4(
+        present_constants->vrs_params,
+        static_cast<float>(static_cast<std::int32_t>(request.active_vrs_mode)),
+        static_cast<float>(vrs_tile_size_px_ > 0 ? vrs_tile_size_px_ : 16),
+        vrs_additional_rates_supported_ ? 1.0f : 0.0f,
+        0.0f);
 
     if (request.overlay_enabled && request.hud) {
         auto* hud_destination = reinterpret_cast<HudConstantsData*>(mapped_hud_constants_ + hud_offset);
@@ -755,8 +806,10 @@ void Renderer::resize(UINT width, UINT height) {
     buffer_has_data_.fill(false);
     buffer_warped_.fill(false);
     buffer_total_pixels_.fill(0);
+    vrs_image_.Reset();
     create_swap_chain_targets();
     create_source_targets();
+    create_vrs_resources();
 }
 
 void Renderer::flush() {
@@ -978,6 +1031,94 @@ void Renderer::create_reprojection_stats_resources() {
         D3D12_RESOURCE_STATE_COPY_DEST,
         "Create reprojection stats readback buffer");
     check(reprojection_stats_readback_->Map(0, nullptr, reinterpret_cast<void**>(const_cast<std::uint32_t**>(&mapped_reprojection_stats_))), "Map reprojection stats readback buffer");
+}
+
+void Renderer::create_vrs_resources() {
+    vrs_image_.Reset();
+    if (vrs_tier_ < static_cast<std::int32_t>(D3D12_VARIABLE_SHADING_RATE_TIER_2) || vrs_tile_size_px_ <= 0 || viewport_width_ == 0 || viewport_height_ == 0) {
+        return;
+    }
+    const UINT tile_size = static_cast<UINT>(vrs_tile_size_px_);
+    const UINT image_width = std::max<UINT>(1U, (viewport_width_ + tile_size - 1U) / tile_size);
+    const UINT image_height = std::max<UINT>(1U, (viewport_height_ + tile_size - 1U) / tile_size);
+
+    D3D12_HEAP_PROPERTIES default_heap{};
+    default_heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC image_desc{};
+    image_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    image_desc.Width = image_width;
+    image_desc.Height = image_height;
+    image_desc.DepthOrArraySize = 1;
+    image_desc.MipLevels = 1;
+    image_desc.Format = DXGI_FORMAT_R8_UINT;
+    image_desc.SampleDesc.Count = 1;
+    image_desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+    check(device_->CreateCommittedResource(&default_heap, D3D12_HEAP_FLAG_NONE, &image_desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&vrs_image_)), "Create VRS image");
+
+    const UINT row_pitch = (image_width + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1U) & ~(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1U);
+    const std::size_t upload_bytes = static_cast<std::size_t>(row_pitch) * static_cast<std::size_t>(image_height);
+    ComPtr<ID3D12Resource> upload_buffer = create_buffer(
+        device_.Get(),
+        D3D12_HEAP_TYPE_UPLOAD,
+        upload_bytes,
+        D3D12_RESOURCE_FLAG_NONE,
+        D3D12_RESOURCE_STATE_GENERIC_READ,
+        "Create VRS upload buffer");
+
+    std::uint8_t* mapped = nullptr;
+    D3D12_RANGE empty_range{0, 0};
+    check(upload_buffer->Map(0, &empty_range, reinterpret_cast<void**>(&mapped)), "Map VRS upload buffer");
+    for (UINT y = 0; y < image_height; ++y) {
+        std::uint8_t* row = mapped + static_cast<std::size_t>(y) * row_pitch;
+        const float ny = ((static_cast<float>(y) + 0.5f) / static_cast<float>(image_height) - 0.5f) * 2.0f;
+        for (UINT x = 0; x < image_width; ++x) {
+            const float nx = ((static_cast<float>(x) + 0.5f) / static_cast<float>(image_width) - 0.5f) * 2.0f;
+            const float r2 = nx * nx + ny * ny;
+            std::uint8_t rate = static_cast<std::uint8_t>(D3D12_SHADING_RATE_1X1);
+            if (r2 < 0.36f * 0.36f) {
+                rate = static_cast<std::uint8_t>(D3D12_SHADING_RATE_1X1);
+            } else if (r2 < 0.65f * 0.65f) {
+                rate = (nx * nx >= ny * ny)
+                    ? static_cast<std::uint8_t>(D3D12_SHADING_RATE_2X1)
+                    : static_cast<std::uint8_t>(D3D12_SHADING_RATE_1X2);
+            } else if (r2 < 0.90f * 0.90f || !vrs_additional_rates_supported_) {
+                rate = static_cast<std::uint8_t>(D3D12_SHADING_RATE_2X2);
+            } else {
+                rate = static_cast<std::uint8_t>(D3D12_SHADING_RATE_4X4);
+            }
+            row[x] = rate;
+        }
+    }
+    upload_buffer->Unmap(0, nullptr);
+
+    check(source_slots_[0].command_allocator->Reset(), "Reset VRS upload allocator");
+    check(scene_command_list_->Reset(source_slots_[0].command_allocator.Get(), nullptr), "Reset VRS upload command list");
+
+    D3D12_TEXTURE_COPY_LOCATION destination{};
+    destination.pResource = vrs_image_.Get();
+    destination.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    destination.SubresourceIndex = 0;
+
+    D3D12_TEXTURE_COPY_LOCATION source{};
+    source.pResource = upload_buffer.Get();
+    source.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    source.PlacedFootprint.Offset = 0;
+    source.PlacedFootprint.Footprint.Format = DXGI_FORMAT_R8_UINT;
+    source.PlacedFootprint.Footprint.Width = image_width;
+    source.PlacedFootprint.Footprint.Height = image_height;
+    source.PlacedFootprint.Footprint.Depth = 1;
+    source.PlacedFootprint.Footprint.RowPitch = row_pitch;
+
+    scene_command_list_->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+    const auto to_vrs_state = transition_barrier(vrs_image_.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_SHADING_RATE_SOURCE);
+    scene_command_list_->ResourceBarrier(1, &to_vrs_state);
+    check(scene_command_list_->Close(), "Close VRS upload command list");
+
+    ID3D12CommandList* lists[] = {scene_command_list_.Get()};
+    scene_queue_->ExecuteCommandLists(1, lists);
+    const auto fence_value = next_scene_fence_value_++;
+    check(scene_queue_->Signal(scene_fence_.Get(), fence_value), "Signal VRS upload fence");
+    wait_for_fence(scene_fence_.Get(), scene_fence_event_.get(), fence_value);
 }
 
 void Renderer::create_swap_chain_targets() {

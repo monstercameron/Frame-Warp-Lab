@@ -73,6 +73,7 @@ struct PresentRequest {
     const HudOverlayState* hud;
     DiagnosticView diagnostic_view;
     SynthesisMode synthesis_mode;
+    VrsMode active_vrs_mode;
     float extrapolation_alpha;
     bool has_previous_history;
     bool overlay_enabled;
@@ -100,6 +101,7 @@ public:
         const SceneSnapshot& snapshot,
         std::chrono::steady_clock::time_point capture_time,
         std::int32_t stress_level,
+        VrsMode vrs_mode,
         std::uint64_t frame_id,
         LatencyMonitor& latency_monitor,
         bool wait_for_completion);
@@ -111,6 +113,10 @@ public:
     bool allow_tearing_enabled() const { return allow_tearing_supported_; }
     bool waitable_swap_chain_enabled() const { return frame_latency_waitable_object_ != nullptr; }
     bool high_priority_present_queue() const { return high_priority_present_queue_; }
+    std::int32_t vrs_tier() const { return vrs_tier_; }
+    std::int32_t vrs_tile_size_px() const { return vrs_tile_size_px_; }
+    bool vrs_additional_rates_supported() const { return vrs_additional_rates_supported_; }
+    VrsMode resolve_effective_vrs_mode(VrsMode requested) const;
 
 private:
     static constexpr UINT swap_chain_buffer_count = 2;
@@ -150,6 +156,7 @@ private:
     void create_constant_buffers();
     void create_timestamp_resources();
     void create_reprojection_stats_resources();
+    void create_vrs_resources();
     void create_swap_chain_targets();
     void create_source_targets();
     std::int32_t find_available_source_slot() const;
@@ -169,6 +176,8 @@ private:
     std::array<Microsoft::WRL::ComPtr<ID3D12CommandAllocator>, swap_chain_buffer_count> present_command_allocators_;
     Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> present_command_list_;
     Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> scene_command_list_;
+    Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList5> scene_command_list5_;
+    Microsoft::WRL::ComPtr<ID3D12Resource> vrs_image_;
     std::array<SourceSlot, source_slot_count> source_slots_;
     Microsoft::WRL::ComPtr<ID3D12Fence> present_fence_;
     Microsoft::WRL::ComPtr<ID3D12Fence> scene_fence_;
@@ -208,6 +217,9 @@ private:
     UINT swap_chain_flags_ = 0;
     bool allow_tearing_supported_ = false;
     bool high_priority_present_queue_ = false;
+    std::int32_t vrs_tier_ = 0;
+    std::int32_t vrs_tile_size_px_ = 0;
+    bool vrs_additional_rates_supported_ = false;
     UINT render_target_descriptor_stride_ = 0;
     UINT shader_resource_descriptor_stride_ = 0;
     UINT viewport_width_ = 0;

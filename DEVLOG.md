@@ -1,5 +1,20 @@
 # Development log
 
+## v0.13.0 — Direct3D 12 Variable Rate Shading (Tier 1 per-draw and Tier 2 foveated image)
+
+- Added hardware Variable Rate Shading support in `src/renderer.h`, `src/renderer.cpp`, `shaders/present.hlsl`, `src/runtime_state.h` (`runtime_state_version = 12`), `src/main.cpp`, and `src/cli.cpp` (`schema_version: 8`):
+  - Queries `D3D12_FEATURE_D3D12_OPTIONS6` (`vrs_tier`, `vrs_tile_size_px`, `vrs_additional_rates_supported`) and `ID3D12GraphicsCommandList5` at device initialization.
+  - Supports three runtime modes (`VrsMode`: `off`, `uniform_2x2` Tier 1 per-draw `D3D12_SHADING_RATE_2X2`, and `foveated` Tier 2 `DXGI_FORMAT_R8_UINT` screen-space shading-rate image in `D3D12_RESOURCE_STATE_SHADING_RATE_SOURCE` with `1x1` center fovea, anisotropic `2x1`/`1x2` mid-ring, `2x2` outer ring, and `4x4` far corners, rebuilt cleanly on swap-chain resize; automatic fallback to Tier 1 or `off` when unsupported).
+  - Applies VRS strictly to the offscreen G-buffer scene pass (`scene_command_list5_`) while keeping late synthesis, reticle, and 2D HUD compositing on `present_command_list_` at full `1x1` resolution.
+  - Added hotkey `B` to cycle VRS modes, CLI `set <pid> vrs off|uniform_2x2|foveated`, diagnostic overlay `set <pid> view vrs` showing the tile rate map, and `vrs` telemetry in `status` and `trace`.
+- Verified zero-warning ARM64 Release and Debug builds (including live Debug D3D12 Debug Layer verification switching `off`, `foveated`, and `uniform_2x2`) and controlled 100-frame Release measurements on `NVIDIA RTX Spark N1X` (`1264x681`, `120 Hz` DWM deadline lock, `occlusion_sweep`, Tier 2 `tile_size_px: 16`, `additional_rates_supported: true`):
+  - `combined /2`, `stress=64` (heavy shader load):
+    - `vrs=off`: `scene_gpu_us` median **14,605 µs**, `cpu_source_age_us` median **34,431 µs**, `invalid_pixel_ratio` mean **0.630%**, 3 missed deadlines.
+    - `vrs=foveated` (Tier 2): `scene_gpu_us` median **5,116 µs** (**2.85x GPU speedup**), **0 missed deadlines**, `cpu_present_interval_us` median **8,333 µs**, `cpu_source_age_us` halved to **17,495 µs**, and `invalid_pixel_ratio` halved to **0.299%** because scenes finish within their `/2` budget instead of slipping extra display intervals.
+    - `vrs=uniform_2x2` (Tier 1): `scene_gpu_us` median **3,762 µs** (**3.88x GPU speedup**), `cpu_source_age_us` median **17,368 µs**, `invalid_pixel_ratio` mean **0.411%**.
+  - `full_render`, `stress=48`: `vrs=off` **3,465 µs** → `vrs=foveated` **1,227 µs** (**2.82x speedup**, 0 missed deadlines).
+- Honest limitations: `Motion Lab` is pixel-shader bound (raymarching + stress loop), so VRS produces near-theoretical pixel shading savings here; geometry- or bandwidth-bound workloads will see smaller gains, and coarse periphery rates (`2x2`/`4x4`) coarsen peripheral depth/motion edges (which `foveated` mitigates at screen center by keeping a `1x1` fovea).
+
 ## v0.12.0 — Motion-vector frame generation, temporal history recovery, and combined generation + late warp
 
 - Added two new synthesis presentation modes in `src/runtime_state.h` (`runtime_state_version = 11`), `src/renderer.h`, `src/renderer.cpp`, `shaders/present.hlsl`, `src/main.cpp`, and `src/cli.cpp` (`schema_version: 7`):

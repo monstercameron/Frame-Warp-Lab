@@ -14,6 +14,7 @@ cbuffer PresentConstants : register(b0) {
     float4 previous_camera_right_rcp_tan_x;
     float4 previous_camera_up_rcp_tan_y;
     float4 previous_camera_forward_tan_x;
+    float4 vrs_params;
 };
 
 cbuffer HudConstants : register(b1) {
@@ -613,6 +614,35 @@ float4 pixel_main(VertexOutput input) : SV_Target {
             } else {
                 float3 fallback_color = pow(saturate(scene_color_texture.SampleLevel(linear_clamp_sampler, uv, 0).rgb), 1.0 / 2.2);
                 output_color = lerp(output_color, fallback_color, 0.65);
+            }
+        }
+        if (diagnostic_view == 4) {
+            int active_vrs = (int)(vrs_params.x + 0.5);
+            float tile_size = max(vrs_params.y, 8.0);
+            bool extra_rates = vrs_params.z > 0.5;
+            float3 vrs_tint = float3(0.18, 0.86, 0.42);
+            if (active_vrs == 1) {
+                vrs_tint = float3(0.95, 0.64, 0.14);
+            } else if (active_vrs == 2) {
+                float2 tile_index = floor(input.position.xy / tile_size);
+                float2 tile_count = max(ceil(viewport_size / tile_size), float2(1.0, 1.0));
+                float2 tile_uv = (tile_index + 0.5) / tile_count;
+                float2 centered = (tile_uv - 0.5) * 2.0;
+                float radial = length(centered);
+                if (radial < 0.36) {
+                    vrs_tint = float3(0.18, 0.86, 0.42);
+                } else if (radial < 0.65) {
+                    vrs_tint = float3(0.20, 0.68, 0.96);
+                } else if (radial < 0.90 || !extra_rates) {
+                    vrs_tint = float3(0.95, 0.64, 0.14);
+                } else {
+                    vrs_tint = float3(0.96, 0.24, 0.24);
+                }
+            }
+            output_color = lerp(output_color, vrs_tint, 0.48);
+            float2 in_tile = fmod(input.position.xy, tile_size);
+            if (in_tile.x < 1.0 || in_tile.y < 1.0) {
+                output_color = lerp(output_color, float3(0.06, 0.08, 0.10), 0.55);
             }
         }
     }
