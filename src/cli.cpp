@@ -213,6 +213,7 @@ int print_status(const WindowInstance& instance) {
     const std::int64_t warped_frames = std::atomic_ref<std::int64_t>(state->warped_frame_count).load(std::memory_order_acquire);
     const std::int64_t fallback_frames = std::atomic_ref<std::int64_t>(state->fallback_frame_count).load(std::memory_order_acquire);
     const std::int64_t present_interval_us = std::atomic_ref<std::int64_t>(state->last_present_interval_us).load(std::memory_order_acquire);
+    const std::int64_t smoothed_interval_us = std::atomic_ref<std::int64_t>(state->smoothed_present_interval_us).load(std::memory_order_acquire);
     const std::int64_t source_age_us = std::atomic_ref<std::int64_t>(state->last_source_age_us).load(std::memory_order_acquire);
     const std::int64_t scene_gpu_us = std::atomic_ref<std::int64_t>(state->last_scene_gpu_us).load(std::memory_order_acquire);
     const std::int64_t present_gpu_us = std::atomic_ref<std::int64_t>(state->last_present_gpu_us).load(std::memory_order_acquire);
@@ -227,11 +228,15 @@ int print_status(const WindowInstance& instance) {
     const std::int32_t camera_path = std::atomic_ref<std::int32_t>(state->camera_path).load(std::memory_order_acquire);
     const std::int32_t stress_level = std::atomic_ref<std::int32_t>(state->stress_level).load(std::memory_order_acquire);
     const std::int32_t overlay_enabled = std::atomic_ref<std::int32_t>(state->overlay_enabled).load(std::memory_order_acquire);
+    const std::int32_t mouse_look_active = std::atomic_ref<std::int32_t>(state->mouse_look_active).load(std::memory_order_acquire);
+    const std::int32_t camera_yaw_millideg = std::atomic_ref<std::int32_t>(state->camera_yaw_millideg).load(std::memory_order_acquire);
+    const std::int32_t camera_pitch_millideg = std::atomic_ref<std::int32_t>(state->camera_pitch_millideg).load(std::memory_order_acquire);
     const std::int32_t gpu_timing_available = std::atomic_ref<std::int32_t>(state->gpu_timing_available).load(std::memory_order_acquire);
+    const double smoothed_fps = smoothed_interval_us > 0 ? 1000000.0 / static_cast<double>(smoothed_interval_us) : 0.0;
 
     RECT client_rectangle{};
     const bool has_client_size = GetClientRect(instance.window, &client_rectangle) != 0;
-    std::cout << "{\"ok\":true,\"schema_version\":3,\"process_id\":" << instance.process_id
+    std::cout << "{\"ok\":true,\"schema_version\":4,\"process_id\":" << instance.process_id
               << ",\"running\":" << (running ? "true" : "false")
               << ",\"present_calls_completed\":" << present_count
               << ",\"display_frame_id\":" << display_frame_id
@@ -252,6 +257,8 @@ int print_status(const WindowInstance& instance) {
               << ",\"waitable_swap_chain\":" << (waitable_swap_chain ? "true" : "false")
               << ",\"max_frame_latency\":1,\"displayed_frame_timing\":null}"
               << ",\"timing\":{\"cpu_present_interval_us\":" << present_interval_us
+              << ",\"smoothed_present_interval_us\":" << smoothed_interval_us
+              << ",\"smoothed_present_fps\":" << std::fixed << std::setprecision(2) << smoothed_fps
               << ",\"cpu_source_age_us\":" << source_age_us
               << ",\"gpu_timing_available\":" << (gpu_timing_available ? "true" : "false")
               << ",\"scene_gpu_us\":";
@@ -261,14 +268,17 @@ int print_status(const WindowInstance& instance) {
     std::cout << ",\"invalid_pixel_count\":" << invalid_pixels
               << ",\"invalid_pixel_ratio\":";
     print_ratio(invalid_pixels, total_pixels);
-    std::cout << ",\"note\":\"cpu_present_interval_us measures Present return cadence, not physical display scanout\"}"
+    std::cout << ",\"note\":\"cpu_present_interval_us and smoothed_present_fps reflect Present return cadence, not physical display scanout\"}"
               << ",\"scene\":{\"name\":\"motion_lab\",\"time_ms\":" << scene_time_ms
               << ",\"paused\":" << (scene_paused ? "true" : "false")
               << ",\"camera_path\":\"" << frame_warp_lab::camera_path_name(camera_path)
-              << "\",\"diagnostic_view\":\"" << frame_warp_lab::diagnostic_view_name(diagnostic_view)
+              << "\",\"camera\":{\"yaw_deg\":" << std::fixed << std::setprecision(2) << (static_cast<double>(camera_yaw_millideg) / 1000.0)
+              << ",\"pitch_deg\":" << (static_cast<double>(camera_pitch_millideg) / 1000.0)
+              << ",\"mouse_look_active\":" << (mouse_look_active ? "true" : "false")
+              << "},\"diagnostic_view\":\"" << frame_warp_lab::diagnostic_view_name(diagnostic_view)
               << "\",\"stress_level\":" << stress_level
               << ",\"overlay_enabled\":" << (overlay_enabled ? "true" : "false") << "}"
-              << ",\"features\":{\"scene\":\"cpu_camera_gbuffer\",\"reprojection\":\"depth_camera_warp\",\"frame_generation\":\"not_implemented\",\"vrs\":\"not_implemented\"}}\n";
+              << ",\"features\":{\"scene\":\"cpu_camera_gbuffer\",\"hud\":\"2d_frametime_graph_and_readout\",\"reprojection\":\"depth_camera_warp\",\"frame_generation\":\"not_implemented\",\"vrs\":\"not_implemented\"}}\n";
     return 0;
 }
 
@@ -281,7 +291,7 @@ int print_events(const WindowInstance& instance) {
     const std::int32_t event_count = std::atomic_ref<std::int32_t>(state->event_count).load(std::memory_order_acquire);
     const std::int32_t first_sequence = event_count > static_cast<std::int32_t>(frame_warp_lab::runtime_event_capacity)
         ? event_count - static_cast<std::int32_t>(frame_warp_lab::runtime_event_capacity) + 1 : 1;
-    std::cout << "{\"ok\":true,\"schema_version\":3,\"process_id\":" << instance.process_id
+    std::cout << "{\"ok\":true,\"schema_version\":4,\"process_id\":" << instance.process_id
               << ",\"capacity\":" << frame_warp_lab::runtime_event_capacity << ",\"total_events\":" << event_count << ",\"events\":[";
     bool first_event = true;
     for (std::int32_t sequence = first_sequence; sequence <= event_count; ++sequence) {
@@ -355,7 +365,7 @@ int print_trace(const WindowInstance& instance, std::size_t max_samples, bool in
         }
     }
 
-    std::cout << "{\"ok\":true,\"schema_version\":3,\"process_id\":" << instance.process_id
+    std::cout << "{\"ok\":true,\"schema_version\":4,\"process_id\":" << instance.process_id
               << ",\"capacity\":" << frame_warp_lab::runtime_frame_trace_capacity
               << ",\"total_frames_recorded\":" << total_samples
               << ",\"sample_count\":" << captured.size()
@@ -482,6 +492,8 @@ int start_instance() {
     application_path = application_path.substr(0, separator + 1) + L"frame_warp_lab.exe";
     STARTUPINFOW startup{};
     startup.cb = sizeof(startup);
+    startup.dwFlags = STARTF_USESHOWWINDOW;
+    startup.wShowWindow = SW_SHOWNORMAL;
     PROCESS_INFORMATION process{};
     if (!CreateProcessW(application_path.c_str(), nullptr, nullptr, nullptr, FALSE, 0, nullptr, nullptr, &startup, &process))
         return fail("start_failed", "Could not launch frame_warp_lab.exe next to the CLI");
@@ -531,7 +543,7 @@ int print_capabilities() {
     }
     D3D12_FEATURE_DATA_D3D12_OPTIONS6 options{};
     result = device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS6, &options, sizeof(options));
-    std::cout << "{\"ok\":true,\"schema_version\":3,\"scope\":\"new_default_d3d12_device_not_runtime_instance\",\"adapter\":";
+    std::cout << "{\"ok\":true,\"schema_version\":4,\"scope\":\"new_default_d3d12_device_not_runtime_instance\",\"adapter\":";
     print_adapter(device.Get(), factory.Get());
     std::cout << ",\"presentation\":{\"allow_tearing_query_available\":" << (tearing_query_available ? "true" : "false")
               << ",\"allow_tearing_supported\":" << (allow_tearing ? "true" : "false") << "},\"vrs\":";
@@ -547,14 +559,14 @@ int print_capabilities() {
 
 int wmain(int argument_count, wchar_t** arguments) {
     if (argument_count == 2 && std::wstring(arguments[1]) == L"help") {
-        std::cout << "{\"ok\":true,\"schema_version\":3,\"commands\":[\"help\",\"start\",\"instances\",\"status <pid>\",\"events <pid>\",\"trace <pid> [limit] [summary]\",\"set <pid> <key> <value>\",\"pause <pid>\",\"resume <pid>\",\"reset <pid>\",\"stop <pid>\",\"capabilities\"],\"settings\":{\"mode\":[\"full_render\",\"repeat\",\"reproject\"],\"divider\":\"1..8\",\"vsync\":[\"on\",\"off\"],\"view\":[\"final\",\"depth\",\"motion\",\"holes\"],\"path\":[\"corridor_sway\",\"fast_pan\",\"occlusion_sweep\",\"camera_cut\",\"manual\"],\"stress\":\"0..64\",\"overlay\":[\"on\",\"off\"]}}\n";
+        std::cout << "{\"ok\":true,\"schema_version\":4,\"commands\":[\"help\",\"start\",\"instances\",\"status <pid>\",\"events <pid>\",\"trace <pid> [limit] [summary]\",\"set <pid> <key> <value>\",\"pause <pid>\",\"resume <pid>\",\"reset <pid>\",\"stop <pid>\",\"capabilities\"],\"settings\":{\"mode\":[\"full_render\",\"repeat\",\"reproject\"],\"divider\":\"1..8\",\"vsync\":[\"on\",\"off\"],\"view\":[\"final\",\"depth\",\"motion\",\"holes\"],\"path\":[\"corridor_sway\",\"fast_pan\",\"occlusion_sweep\",\"camera_cut\",\"manual\"],\"stress\":\"0..64\",\"overlay\":[\"on\",\"off\"]}}\n";
         return 0;
     }
     if (argument_count == 2 && std::wstring(arguments[1]) == L"capabilities") return print_capabilities();
     if (argument_count == 2 && std::wstring(arguments[1]) == L"start") return start_instance();
     const auto instances = find_instances();
     if (argument_count == 2 && std::wstring(arguments[1]) == L"instances") {
-        std::cout << "{\"ok\":true,\"schema_version\":3,\"instances\":[";
+        std::cout << "{\"ok\":true,\"schema_version\":4,\"instances\":[";
         for (std::size_t index = 0; index < instances.size(); ++index) {
             if (index) std::cout << ',';
             std::cout << "{\"process_id\":" << instances[index].process_id << "}";

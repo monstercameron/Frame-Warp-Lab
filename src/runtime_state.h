@@ -10,9 +10,10 @@
 namespace frame_warp_lab {
 
 inline constexpr wchar_t window_class_name[] = L"FrameWarpLabWindow";
-inline constexpr std::uint32_t runtime_state_version = 6;
+inline constexpr std::uint32_t runtime_state_version = 7;
 inline constexpr std::size_t runtime_event_capacity = 64;
 inline constexpr std::size_t runtime_frame_trace_capacity = 256;
+inline constexpr std::size_t hud_graph_sample_count = 128;
 inline constexpr std::int32_t max_stress_level = 64;
 inline constexpr std::int32_t max_source_divider = 8;
 inline constexpr std::int64_t max_reprojection_source_age_us = 250000;
@@ -122,6 +123,7 @@ struct RuntimeState {
     std::int64_t warped_frame_count;
     std::int64_t fallback_frame_count;
     std::int64_t last_present_interval_us;
+    std::int64_t smoothed_present_interval_us;
     std::int64_t last_source_age_us;
     std::int64_t last_scene_gpu_us;
     std::int64_t last_present_gpu_us;
@@ -136,9 +138,11 @@ struct RuntimeState {
     std::int32_t camera_path;
     std::int32_t stress_level;
     std::int32_t overlay_enabled;
+    std::int32_t mouse_look_active;
+    std::int32_t camera_yaw_millideg;
+    std::int32_t camera_pitch_millideg;
     std::int32_t gpu_timing_available;
     std::int32_t event_count;
-    std::int32_t reserved;
     std::int64_t trace_count;
     RuntimeEvent events[runtime_event_capacity];
     RuntimeFrameSample trace[runtime_frame_trace_capacity];

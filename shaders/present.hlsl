@@ -11,6 +11,15 @@ cbuffer PresentConstants : register(b0) {
     float4 target_camera_forward_unused;
 };
 
+cbuffer HudConstants : register(b1) {
+    float4 hud_panel_rect;
+    float4 hud_graph_rect;
+    float4 hud_graph_scale;
+    uint4 hud_text_meta;
+    uint4 hud_text_packed[16];
+    float4 hud_graph_samples[128];
+};
+
 Texture2D<float4> scene_color_texture : register(t0);
 Texture2D<float> scene_depth_texture : register(t1);
 Texture2D<float2> scene_motion_texture : register(t2);
@@ -160,6 +169,183 @@ ReprojectionSample evaluate_reprojection(float2 target_uv, float2 viewport_size,
     return result;
 }
 
+uint pack_rows_0_to_3(uint r0, uint r1, uint r2, uint r3) {
+    return (r0 & 31u) | ((r1 & 31u) << 5u) | ((r2 & 31u) << 10u) | ((r3 & 31u) << 15u);
+}
+
+uint pack_rows_4_to_6(uint r4, uint r5, uint r6) {
+    return (r4 & 31u) | ((r5 & 31u) << 5u) | ((r6 & 31u) << 10u);
+}
+
+uint2 glyph_bitmap_5x7(uint ascii_code) {
+    if (ascii_code == 48u) return uint2(pack_rows_0_to_3(14, 17, 19, 21), pack_rows_4_to_6(25, 17, 14));
+    if (ascii_code == 49u) return uint2(pack_rows_0_to_3(4, 12, 4, 4), pack_rows_4_to_6(4, 4, 14));
+    if (ascii_code == 50u) return uint2(pack_rows_0_to_3(14, 17, 1, 2), pack_rows_4_to_6(4, 8, 31));
+    if (ascii_code == 51u) return uint2(pack_rows_0_to_3(30, 1, 1, 14), pack_rows_4_to_6(1, 1, 30));
+    if (ascii_code == 52u) return uint2(pack_rows_0_to_3(2, 6, 10, 18), pack_rows_4_to_6(31, 2, 2));
+    if (ascii_code == 53u) return uint2(pack_rows_0_to_3(31, 16, 30, 1), pack_rows_4_to_6(1, 17, 14));
+    if (ascii_code == 54u) return uint2(pack_rows_0_to_3(14, 16, 30, 17), pack_rows_4_to_6(17, 17, 14));
+    if (ascii_code == 55u) return uint2(pack_rows_0_to_3(31, 1, 2, 4), pack_rows_4_to_6(8, 8, 8));
+    if (ascii_code == 56u) return uint2(pack_rows_0_to_3(14, 17, 17, 14), pack_rows_4_to_6(17, 17, 14));
+    if (ascii_code == 57u) return uint2(pack_rows_0_to_3(14, 17, 17, 15), pack_rows_4_to_6(1, 2, 12));
+
+    if (ascii_code == 65u) return uint2(pack_rows_0_to_3(14, 17, 17, 31), pack_rows_4_to_6(17, 17, 17));
+    if (ascii_code == 66u) return uint2(pack_rows_0_to_3(30, 17, 17, 30), pack_rows_4_to_6(17, 17, 30));
+    if (ascii_code == 67u) return uint2(pack_rows_0_to_3(14, 17, 16, 16), pack_rows_4_to_6(16, 17, 14));
+    if (ascii_code == 68u) return uint2(pack_rows_0_to_3(30, 17, 17, 17), pack_rows_4_to_6(17, 17, 30));
+    if (ascii_code == 69u) return uint2(pack_rows_0_to_3(31, 16, 16, 30), pack_rows_4_to_6(16, 16, 31));
+    if (ascii_code == 70u) return uint2(pack_rows_0_to_3(31, 16, 16, 30), pack_rows_4_to_6(16, 16, 16));
+    if (ascii_code == 71u) return uint2(pack_rows_0_to_3(14, 17, 16, 23), pack_rows_4_to_6(17, 17, 14));
+    if (ascii_code == 72u) return uint2(pack_rows_0_to_3(17, 17, 17, 31), pack_rows_4_to_6(17, 17, 17));
+    if (ascii_code == 73u) return uint2(pack_rows_0_to_3(14, 4, 4, 4), pack_rows_4_to_6(4, 4, 14));
+    if (ascii_code == 74u) return uint2(pack_rows_0_to_3(7, 2, 2, 2), pack_rows_4_to_6(18, 18, 12));
+    if (ascii_code == 75u) return uint2(pack_rows_0_to_3(17, 18, 20, 24), pack_rows_4_to_6(20, 18, 17));
+    if (ascii_code == 76u) return uint2(pack_rows_0_to_3(16, 16, 16, 16), pack_rows_4_to_6(16, 16, 31));
+    if (ascii_code == 77u) return uint2(pack_rows_0_to_3(17, 27, 21, 21), pack_rows_4_to_6(17, 17, 17));
+    if (ascii_code == 78u) return uint2(pack_rows_0_to_3(17, 25, 21, 19), pack_rows_4_to_6(17, 17, 17));
+    if (ascii_code == 79u) return uint2(pack_rows_0_to_3(14, 17, 17, 17), pack_rows_4_to_6(17, 17, 14));
+    if (ascii_code == 80u) return uint2(pack_rows_0_to_3(30, 17, 17, 30), pack_rows_4_to_6(16, 16, 16));
+    if (ascii_code == 81u) return uint2(pack_rows_0_to_3(14, 17, 17, 17), pack_rows_4_to_6(21, 18, 13));
+    if (ascii_code == 82u) return uint2(pack_rows_0_to_3(30, 17, 17, 30), pack_rows_4_to_6(20, 18, 17));
+    if (ascii_code == 83u) return uint2(pack_rows_0_to_3(15, 16, 16, 14), pack_rows_4_to_6(1, 1, 30));
+    if (ascii_code == 84u) return uint2(pack_rows_0_to_3(31, 4, 4, 4), pack_rows_4_to_6(4, 4, 4));
+    if (ascii_code == 85u) return uint2(pack_rows_0_to_3(17, 17, 17, 17), pack_rows_4_to_6(17, 17, 14));
+    if (ascii_code == 86u) return uint2(pack_rows_0_to_3(17, 17, 17, 17), pack_rows_4_to_6(17, 10, 4));
+    if (ascii_code == 87u) return uint2(pack_rows_0_to_3(17, 17, 17, 21), pack_rows_4_to_6(21, 27, 17));
+    if (ascii_code == 88u) return uint2(pack_rows_0_to_3(17, 17, 10, 4), pack_rows_4_to_6(10, 17, 17));
+    if (ascii_code == 89u) return uint2(pack_rows_0_to_3(17, 17, 10, 4), pack_rows_4_to_6(4, 4, 4));
+    if (ascii_code == 90u) return uint2(pack_rows_0_to_3(31, 1, 2, 4), pack_rows_4_to_6(8, 16, 31));
+
+    if (ascii_code == 46u) return uint2(pack_rows_0_to_3(0, 0, 0, 0), pack_rows_4_to_6(0, 12, 12));
+    if (ascii_code == 58u) return uint2(pack_rows_0_to_3(0, 12, 12, 0), pack_rows_4_to_6(12, 12, 0));
+    if (ascii_code == 47u) return uint2(pack_rows_0_to_3(1, 1, 2, 4), pack_rows_4_to_6(8, 16, 16));
+    if (ascii_code == 37u) return uint2(pack_rows_0_to_3(25, 25, 2, 4), pack_rows_4_to_6(8, 19, 19));
+    if (ascii_code == 45u) return uint2(pack_rows_0_to_3(0, 0, 0, 31), pack_rows_4_to_6(0, 0, 0));
+    if (ascii_code == 43u) return uint2(pack_rows_0_to_3(0, 4, 4, 31), pack_rows_4_to_6(4, 4, 0));
+    if (ascii_code == 91u) return uint2(pack_rows_0_to_3(14, 8, 8, 8), pack_rows_4_to_6(8, 8, 14));
+    if (ascii_code == 93u) return uint2(pack_rows_0_to_3(14, 2, 2, 2), pack_rows_4_to_6(2, 2, 14));
+    if (ascii_code == 95u) return uint2(pack_rows_0_to_3(0, 0, 0, 0), pack_rows_4_to_6(0, 0, 31));
+    return uint2(0u, 0u);
+}
+
+bool sample_glyph_pixel(uint ascii_code, uint local_x, uint local_y) {
+    if (ascii_code <= 32u || local_x >= 5u || local_y >= 7u) return false;
+    uint2 bits = glyph_bitmap_5x7(ascii_code);
+    uint row_bits = (local_y < 4u)
+        ? ((bits.x >> (local_y * 5u)) & 31u)
+        : ((bits.y >> ((local_y - 4u) * 5u)) & 31u);
+    uint column_mask = 1u << (4u - local_x);
+    return (row_bits & column_mask) != 0u;
+}
+
+uint read_hud_char(uint line_index, uint col_index) {
+    uint char_index = line_index * 64u + col_index;
+    uint word_index = char_index >> 2u;
+    uint vec_index = word_index >> 2u;
+    uint comp_index = word_index & 3u;
+    uint byte_shift = (char_index & 3u) * 8u;
+    uint4 vector_word = hud_text_packed[vec_index];
+    uint word = (comp_index == 0u) ? vector_word.x : (comp_index == 1u) ? vector_word.y : (comp_index == 2u) ? vector_word.z : vector_word.w;
+    return (word >> byte_shift) & 255u;
+}
+
+float3 frame_kind_color(float frame_kind) {
+    if (frame_kind < 0.5) return float3(0.28, 0.84, 0.96);
+    if (frame_kind < 1.5) return float3(0.96, 0.74, 0.24);
+    if (frame_kind < 2.5) return float3(0.26, 0.92, 0.54);
+    return float3(0.98, 0.26, 0.68);
+}
+
+float3 composite_hud_layer(float2 pixel_pos, float3 base_color) {
+    float2 panel_min = hud_panel_rect.xy;
+    float2 panel_size = hud_panel_rect.zw;
+    float2 panel_max = panel_min + panel_size;
+    if (panel_size.x <= 1.0 || panel_size.y <= 1.0) return base_color;
+    if (pixel_pos.x < panel_min.x || pixel_pos.x >= panel_max.x || pixel_pos.y < panel_min.y || pixel_pos.y >= panel_max.y) {
+        return base_color;
+    }
+
+    float3 result = lerp(base_color, float3(0.05, 0.08, 0.11), 0.80);
+    bool on_panel_border = pixel_pos.x < panel_min.x + 1.5 || pixel_pos.x >= panel_max.x - 1.5
+        || pixel_pos.y < panel_min.y + 1.5 || pixel_pos.y >= panel_max.y - 1.5;
+    if (on_panel_border) {
+        result = lerp(result, float3(0.32, 0.48, 0.58), 0.75);
+    }
+
+    uint line_count = hud_text_meta.x;
+    uint chars_per_line = hud_text_meta.y;
+    uint char_scale = max(hud_text_meta.z, 1u);
+    float2 text_origin = panel_min + float2(10.0, 8.0);
+    float char_advance_x = 6.0 * (float)char_scale;
+    float line_advance_y = 9.0 * (float)char_scale;
+    float2 text_local = pixel_pos - text_origin;
+    if (text_local.x >= 0.0 && text_local.y >= 0.0) {
+        uint line_index = (uint)(text_local.y / line_advance_y);
+        uint col_index = (uint)(text_local.x / char_advance_x);
+        if (line_index < line_count && col_index < chars_per_line) {
+            uint glyph_x = (uint)((text_local.x - (float)col_index * char_advance_x) / (float)char_scale);
+            uint glyph_y = (uint)((text_local.y - (float)line_index * line_advance_y) / (float)char_scale);
+            uint ascii_code = read_hud_char(line_index, col_index);
+            if (sample_glyph_pixel(ascii_code, glyph_x, glyph_y)) {
+                float3 text_color = (line_index == 0u) ? float3(0.96, 0.99, 1.0)
+                    : (line_index == 1u) ? float3(0.76, 0.90, 0.96)
+                    : (line_index == 2u) ? float3(0.84, 0.88, 0.80)
+                    : float3(0.62, 0.72, 0.78);
+                return text_color;
+            }
+        }
+    }
+
+    float2 graph_min = hud_graph_rect.xy;
+    float2 graph_size = hud_graph_rect.zw;
+    float2 graph_max = graph_min + graph_size;
+    if (pixel_pos.x >= graph_min.x && pixel_pos.x < graph_max.x && pixel_pos.y >= graph_min.y && pixel_pos.y < graph_max.y) {
+        result = lerp(base_color, float3(0.03, 0.05, 0.07), 0.90);
+        float max_ms = max(hud_graph_scale.x, 1.0);
+        float target_ms = hud_graph_scale.y;
+        float norm_x = saturate((pixel_pos.x - graph_min.x) / graph_size.x);
+        float pixel_ms = saturate((graph_max.y - pixel_pos.y) / graph_size.y) * max_ms;
+
+        float ref_120_y = graph_max.y - saturate(target_ms / max_ms) * graph_size.y;
+        float ref_60_y = graph_max.y - saturate(16.667 / max_ms) * graph_size.y;
+        if (abs(pixel_pos.y - ref_120_y) < 0.75) {
+            result = lerp(result, float3(0.24, 0.65, 0.42), 0.70);
+        }
+        if (abs(pixel_pos.y - ref_60_y) < 0.75) {
+            result = lerp(result, float3(0.70, 0.50, 0.22), 0.60);
+        }
+
+        uint sample_slot = min((uint)(norm_x * 128.0), 127u);
+        uint write_head = (uint)(hud_graph_scale.w + 0.5);
+        uint history_index = (write_head + sample_slot) & 127u;
+        float4 sample_data = hud_graph_samples[history_index];
+        float present_ms = sample_data.x;
+        float gpu_ms = sample_data.y;
+        float3 bar_color = frame_kind_color(sample_data.z);
+
+        if (present_ms > 0.0) {
+            float sample_y = graph_max.y - saturate(present_ms / max_ms) * graph_size.y;
+            if (pixel_pos.y >= sample_y) {
+                result = lerp(result, bar_color, 0.32);
+            }
+            if (abs(pixel_pos.y - sample_y) < 1.35) {
+                result = bar_color;
+            }
+        }
+        if (gpu_ms > 0.0 && pixel_ms <= gpu_ms) {
+            result = lerp(result, float3(0.98, 0.94, 0.48), 0.75);
+        }
+
+        bool on_graph_border = pixel_pos.x < graph_min.x + 1.0 || pixel_pos.x >= graph_max.x - 1.0
+            || pixel_pos.y < graph_min.y + 1.0 || pixel_pos.y >= graph_max.y - 1.0;
+        if (on_graph_border) {
+            result = float3(0.26, 0.38, 0.46);
+        }
+    }
+
+    return result;
+}
+
 float4 pixel_main(VertexOutput input) : SV_Target {
     float2 viewport_size = viewport_and_flags.xy;
     int diagnostic_view = (int)(viewport_and_flags.z + 0.5);
@@ -210,6 +396,7 @@ float4 pixel_main(VertexOutput input) : SV_Target {
         if (horizontal_arm || vertical_arm || center_dot) {
             output_color = float3(0.95, 0.98, 1.0);
         }
+        output_color = composite_hud_layer(input.position.xy, output_color);
     }
 
     return float4(output_color, 1.0);

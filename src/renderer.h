@@ -10,8 +10,24 @@
 
 #include <array>
 #include <cstdint>
+#include <string>
 
 namespace frame_warp_lab {
+
+struct HudGraphSample {
+    float present_interval_ms;
+    float gpu_total_ms;
+    float frame_kind;
+    float source_age_ms;
+};
+
+struct HudOverlayState {
+    std::array<std::string, 4> lines;
+    std::array<HudGraphSample, hud_graph_sample_count> samples;
+    std::uint32_t write_head;
+    float max_graph_ms;
+    float target_frame_ms;
+};
 
 struct FrameExecutionMetrics {
     std::int64_t completed_scene_gpu_us;
@@ -27,6 +43,7 @@ struct FrameExecutionMetrics {
 struct FrameRenderRequest {
     SceneSnapshot source_snapshot;
     CameraBasis target_camera;
+    HudOverlayState hud;
     DiagnosticView diagnostic_view;
     std::int32_t stress_level;
     bool overlay_enabled;
@@ -55,6 +72,7 @@ private:
     static constexpr UINT offscreen_target_count = 3;
     static constexpr UINT timestamps_per_frame = 4;
     static constexpr std::size_t constant_buffer_stride = 256;
+    static constexpr std::size_t hud_constant_buffer_stride = 2560;
 
     class OsHandle {
     public:
@@ -96,8 +114,10 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> present_pipeline_;
     Microsoft::WRL::ComPtr<ID3D12Resource> scene_constant_buffer_;
     Microsoft::WRL::ComPtr<ID3D12Resource> present_constant_buffer_;
+    Microsoft::WRL::ComPtr<ID3D12Resource> hud_constant_buffer_;
     std::uint8_t* mapped_scene_constants_ = nullptr;
     std::uint8_t* mapped_present_constants_ = nullptr;
+    std::uint8_t* mapped_hud_constants_ = nullptr;
     Microsoft::WRL::ComPtr<ID3D12QueryHeap> timestamp_query_heap_;
     Microsoft::WRL::ComPtr<ID3D12Resource> timestamp_readback_buffer_;
     const std::uint64_t* mapped_timestamps_ = nullptr;

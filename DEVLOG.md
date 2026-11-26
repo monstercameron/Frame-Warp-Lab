@@ -1,5 +1,13 @@
 # Development log
 
+## v0.7.0 — 2D HUD frametime graph, live FPS/frametime readout, and mouse-move camera controls
+
+- Added a GPU-composited 2D HUD layer in `shaders/present.hlsl` (`HudConstants : register(b1)`) rendering a real-time 128-frame frametime graph (color-coded by `rendered` cyan, `repeated` amber, `warped` emerald, and `fallback` magenta, with nominal target and 16.67 ms reference lines plus GPU pass time overlay) and a 4-line 5x7 bitmap telemetry readout showing smoothed Present cadence FPS, frametime (ms), mode/divider, Scene/Warp GPU times (ms), source age (ms), invalid-hole percentage, camera path, stress, and VSync state. Toggleable cleanly with `O` or CLI `set <pid> overlay off`.
+- Added interactive mouse-move camera controls in `src/main.cpp` and `src/simulation.h`: left-button drag look, right-click or `M` cursor-locked free mouse-look (`ESC` / focus loss safely unlocks), seamless handoff from any scripted path to `manual` preserving current pose, plus `WASD`/`Q`/`E` movement and interactive hotkeys (`1-3` mode, `H` holes, `O` HUD, `V` VSync, `C` cycle paths, `P`/`Space` pause, `R` reset, `[`/`]` divider, `-`/`=` stress).
+- Extended `RuntimeState` (`runtime_state_version = 7`) and CLI (`schema_version: 4`) to report `smoothed_present_interval_us`, `smoothed_present_fps`, `camera.yaw_deg`, `camera.pitch_deg`, and `camera.mouse_look_active`, and updated `frame_warp_cli start` to request `SW_SHOWNORMAL`.
+- Verified ARM64 Debug build with zero `/W4` warnings and live tests on `NVIDIA RTX Spark N1X` (`1264x681`, `\\.\DISPLAY6` nominal 120 Hz): `present_gpu_us` median was 52 µs with `overlay=on` vs 53 µs with `overlay=off` in `full_render`, and 129 µs with `overlay=on` in `reproject /4`. Posted left-mouse drag (`+180 px`, `-60 px`) cleanly transitioned to `manual` and rotated the camera to exact `yaw_deg: 33.00`, `pitch_deg: 11.00`.
+- Limitations: HUD FPS and frametime reflect CPU Present return cadence (not physical display scanout); mouse-look and HUD rendering have been verified functionally via CLI/telemetry, not visually on the user's physical display due to the isolated command desktop.
+
 ## v0.6.0 — Repeat control, depth-based late camera reprojection, waitable tearing swap chain, and hole telemetry
 
 - Added `repeat` and `reproject` presentation modes alongside `full_render`, controllable `source_divider` (1..8 display frames per full scene render), explicit frame-kind accounting (`rendered`, `repeated`, `warped`, `fallback`), safe camera-cut and stale-source fallbacks (`reprojection_fallback` events), and manual keyboard camera movement (`path=manual` using WASD + arrow keys).

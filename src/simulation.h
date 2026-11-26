@@ -25,8 +25,11 @@ struct CameraBasis {
 struct ManualCameraInput {
     float forward_axis;
     float right_axis;
+    float vertical_axis;
     float yaw_axis;
     float pitch_axis;
+    float mouse_delta_x_px;
+    float mouse_delta_y_px;
 };
 
 struct SceneSnapshot {
@@ -114,9 +117,29 @@ public:
 
     void set_path(CameraPath path) {
         if (path_ != path) {
+            if (path == CameraPath::manual) {
+                sync_manual_pose_from_current();
+            }
             path_ = path;
             has_previous_ = false;
         }
+    }
+
+    bool take_manual_control_if_needed(const ManualCameraInput& input) {
+        const bool has_input = input.forward_axis != 0.0f
+            || input.right_axis != 0.0f
+            || input.vertical_axis != 0.0f
+            || input.yaw_axis != 0.0f
+            || input.pitch_axis != 0.0f
+            || input.mouse_delta_x_px != 0.0f
+            || input.mouse_delta_y_px != 0.0f;
+        if (!has_input || path_ == CameraPath::manual) {
+            return false;
+        }
+        sync_manual_pose_from_current();
+        path_ = CameraPath::manual;
+        has_previous_ = false;
+        return true;
     }
 
     CameraPath path() const { return path_; }
@@ -128,13 +151,18 @@ public:
             scene_time_seconds_ += delta_seconds;
         }
         if (path_ == CameraPath::manual) {
+            constexpr float mouse_sensitivity = 0.0032f;
             const float step = static_cast<float>(delta_seconds);
-            manual_yaw_ += input.yaw_axis * 1.4f * step;
-            manual_pitch_ = std::clamp(manual_pitch_ + input.pitch_axis * 1.1f * step, -0.8f, 0.8f);
+            manual_yaw_ += input.yaw_axis * 1.4f * step + input.mouse_delta_x_px * mouse_sensitivity;
+            manual_pitch_ = std::clamp(
+                manual_pitch_ + input.pitch_axis * 1.1f * step - input.mouse_delta_y_px * mouse_sensitivity,
+                -1.15f,
+                1.15f);
             const CameraBasis basis = make_camera_basis(manual_position_, manual_yaw_, manual_pitch_, 1.04719755f);
             const float move_speed = 4.2f * step;
-            manual_position_.x = std::clamp(manual_position_.x + (basis.forward.x * input.forward_axis + basis.right.x * input.right_axis) * move_speed, -3.4f, 3.4f);
-            manual_position_.z = std::clamp(manual_position_.z + (basis.forward.z * input.forward_axis + basis.right.z * input.right_axis) * move_speed, 0.4f, 24.0f);
+            manual_position_.x = std::clamp(manual_position_.x + (basis.forward.x * input.forward_axis + basis.right.x * input.right_axis) * move_speed, -3.5f, 3.5f);
+            manual_position_.y = std::clamp(manual_position_.y + input.vertical_axis * move_speed, 0.45f, 3.15f);
+            manual_position_.z = std::clamp(manual_position_.z + (basis.forward.z * input.forward_axis + basis.right.z * input.right_axis) * move_speed, 0.4f, 24.5f);
         }
     }
 
@@ -144,6 +172,14 @@ public:
             return make_camera_basis(manual_position_, manual_yaw_, manual_pitch_, 1.04719755f);
         }
         return evaluate_scripted_camera(scene_time_seconds_, path_, out_cut_segment);
+    }
+
+    void current_camera_angles_degrees(float& out_yaw_deg, float& out_pitch_deg) const {
+        constexpr float radians_to_degrees = 57.2957795f;
+        std::int64_t cut_segment = 0;
+        const CameraBasis basis = sample_latest_camera(cut_segment);
+        out_yaw_deg = std::atan2(basis.forward.x, basis.forward.z) * radians_to_degrees;
+        out_pitch_deg = std::asin(std::clamp(basis.forward.y, -1.0f, 1.0f)) * radians_to_degrees;
     }
 
     SceneSnapshot capture_source_snapshot(std::int64_t source_frame_id) {
@@ -170,6 +206,14 @@ public:
     }
 
 private:
+    void sync_manual_pose_from_current() {
+        std::int64_t cut_segment = 0;
+        const CameraBasis current = sample_latest_camera(cut_segment);
+        manual_position_ = current.position;
+        manual_yaw_ = std::atan2(current.forward.x, current.forward.z);
+        manual_pitch_ = std::asin(std::clamp(current.forward.y, -1.0f, 1.0f));
+    }
+
     CameraPath path_ = CameraPath::corridor_sway;
     double scene_time_seconds_ = 0.0;
     CameraBasis previous_camera_{};

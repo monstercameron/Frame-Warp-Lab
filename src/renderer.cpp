@@ -3,6 +3,7 @@
 #include <d3dcompiler.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <filesystem>
 #include <stdexcept>
@@ -41,8 +42,18 @@ struct PresentConstantsData {
     float target_camera_forward_unused[4];
 };
 
+struct HudConstantsData {
+    float hud_panel_rect[4];
+    float hud_graph_rect[4];
+    float hud_graph_scale[4];
+    std::uint32_t hud_text_meta[4];
+    std::uint32_t hud_text_packed[64];
+    float hud_graph_samples[hud_graph_sample_count][4];
+};
+
 static_assert(sizeof(SceneConstantsData) <= 256);
 static_assert(sizeof(PresentConstantsData) <= 256);
+static_assert(sizeof(HudConstantsData) <= 2560);
 
 void check(HRESULT result, const char* operation) {
     if (FAILED(result)) {
@@ -128,6 +139,61 @@ void write_float4(float (&destination)[4], Float3 vector, float w) {
     destination[1] = vector.y;
     destination[2] = vector.z;
     destination[3] = w;
+}
+
+HudConstantsData build_hud_constants(const HudOverlayState& hud, UINT viewport_width, UINT viewport_height) {
+    HudConstantsData data{};
+    const std::uint32_t char_scale = (viewport_width >= 1000 && viewport_height >= 520) ? 2U : 1U;
+    constexpr std::uint32_t line_count = 4U;
+    constexpr std::uint32_t chars_per_line = 48U;
+
+    const float text_width = static_cast<float>(chars_per_line * 6U * char_scale);
+    const float text_height = static_cast<float>(line_count * 9U * char_scale);
+    const float graph_height = char_scale == 2U ? 104.0f : 72.0f;
+    const float panel_width = std::min(static_cast<float>(viewport_width) - 24.0f, text_width + 20.0f);
+    const float panel_height = std::min(static_cast<float>(viewport_height) - 24.0f, text_height + graph_height + 26.0f);
+    if (panel_width > 40.0f && panel_height > 40.0f) {
+        data.hud_panel_rect[0] = 12.0f;
+        data.hud_panel_rect[1] = 12.0f;
+        data.hud_panel_rect[2] = panel_width;
+        data.hud_panel_rect[3] = panel_height;
+
+        data.hud_graph_rect[0] = 22.0f;
+        data.hud_graph_rect[1] = 12.0f + 8.0f + text_height + 8.0f;
+        data.hud_graph_rect[2] = std::max(0.0f, panel_width - 20.0f);
+        data.hud_graph_rect[3] = std::max(0.0f, panel_height - (text_height + 26.0f));
+    }
+
+    data.hud_graph_scale[0] = hud.max_graph_ms > 1.0f ? hud.max_graph_ms : 25.0f;
+    data.hud_graph_scale[1] = hud.target_frame_ms > 0.5f ? hud.target_frame_ms : 8.333f;
+    data.hud_graph_scale[2] = static_cast<float>(hud_graph_sample_count);
+    data.hud_graph_scale[3] = static_cast<float>(hud.write_head & (hud_graph_sample_count - 1));
+
+    data.hud_text_meta[0] = line_count;
+    data.hud_text_meta[1] = chars_per_line;
+    data.hud_text_meta[2] = char_scale;
+    data.hud_text_meta[3] = 0U;
+
+    for (std::size_t line_index = 0; line_index < hud.lines.size(); ++line_index) {
+        const std::string& line = hud.lines[line_index];
+        const std::size_t length = std::min<std::size_t>(line.size(), 64U);
+        for (std::size_t col = 0; col < length; ++col) {
+            const unsigned char ascii = static_cast<unsigned char>(std::toupper(static_cast<unsigned char>(line[col])));
+            const std::size_t char_index = line_index * 64U + col;
+            const std::size_t word_index = char_index >> 2U;
+            const std::size_t byte_shift = (char_index & 3U) * 8U;
+            data.hud_text_packed[word_index] |= static_cast<std::uint32_t>(ascii) << byte_shift;
+        }
+    }
+
+    for (std::size_t index = 0; index < hud_graph_sample_count; ++index) {
+        data.hud_graph_samples[index][0] = hud.samples[index].present_interval_ms;
+        data.hud_graph_samples[index][1] = hud.samples[index].gpu_total_ms;
+        data.hud_graph_samples[index][2] = hud.samples[index].frame_kind;
+        data.hud_graph_samples[index][3] = hud.samples[index].source_age_ms;
+    }
+
+    return data;
 }
 
 }
@@ -274,6 +340,7 @@ FrameExecutionMetrics Renderer::render_and_present(const FrameRenderRequest& req
 
     const float aspect_ratio = static_cast<float>(viewport_width_) / static_cast<float>(viewport_height_);
     const std::size_t constant_offset = static_cast<std::size_t>(buffer_index) * constant_buffer_stride;
+    const std::size_t hud_offset = static_cast<std::size_t>(buffer_index) * hud_constant_buffer_stride;
 
     if (request.render_scene_pass) {
         SceneConstantsData scene_constants{};
@@ -308,6 +375,11 @@ FrameExecutionMetrics Renderer::render_and_present(const FrameRenderRequest& req
     write_float4(present_constants.target_camera_up_unused, request.target_camera.up, 0.0f);
     write_float4(present_constants.target_camera_forward_unused, request.target_camera.forward, 0.0f);
     std::memcpy(mapped_present_constants_ + constant_offset, &present_constants, sizeof(present_constants));
+
+    if (request.overlay_enabled) {
+        const HudConstantsData hud_constants = build_hud_constants(request.hud, viewport_width_, viewport_height_);
+        std::memcpy(mapped_hud_constants_ + hud_offset, &hud_constants, sizeof(hud_constants));
+    }
 
     check(command_allocators_[buffer_index]->Reset(), "Reset command allocator");
     check(command_list_->Reset(command_allocators_[buffer_index].Get(), nullptr), "Reset command list");
@@ -375,6 +447,7 @@ FrameExecutionMetrics Renderer::render_and_present(const FrameRenderRequest& req
     command_list_->SetGraphicsRootConstantBufferView(0, present_constant_buffer_->GetGPUVirtualAddress() + constant_offset);
     command_list_->SetGraphicsRootDescriptorTable(1, shader_resource_heap_->GetGPUDescriptorHandleForHeapStart());
     command_list_->SetGraphicsRootUnorderedAccessView(2, reprojection_stats_uav_->GetGPUVirtualAddress());
+    command_list_->SetGraphicsRootConstantBufferView(3, hud_constant_buffer_->GetGPUVirtualAddress() + hud_offset);
     command_list_->DrawInstanced(3, 1, 0, 0);
 
     const auto back_buffer_to_present = transition_barrier(render_targets_[buffer_index].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
@@ -495,7 +568,7 @@ void Renderer::create_pipelines() {
     srv_range.BaseShaderRegister = 0;
     srv_range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
 
-    std::array<D3D12_ROOT_PARAMETER, 3> present_parameters{};
+    std::array<D3D12_ROOT_PARAMETER, 4> present_parameters{};
     present_parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
     present_parameters[0].Descriptor.ShaderRegister = 0;
     present_parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
@@ -506,6 +579,9 @@ void Renderer::create_pipelines() {
     present_parameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
     present_parameters[2].Descriptor.ShaderRegister = 1;
     present_parameters[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    present_parameters[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    present_parameters[3].Descriptor.ShaderRegister = 1;
+    present_parameters[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
     std::array<D3D12_STATIC_SAMPLER_DESC, 2> samplers{};
     samplers[0].Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
@@ -553,11 +629,14 @@ void Renderer::create_pipelines() {
 
 void Renderer::create_constant_buffers() {
     const std::size_t total_size = static_cast<std::size_t>(swap_chain_buffer_count) * constant_buffer_stride;
+    const std::size_t total_hud_size = static_cast<std::size_t>(swap_chain_buffer_count) * hud_constant_buffer_stride;
     scene_constant_buffer_ = create_buffer(device_.Get(), D3D12_HEAP_TYPE_UPLOAD, total_size, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ, "Create scene constant buffer");
     present_constant_buffer_ = create_buffer(device_.Get(), D3D12_HEAP_TYPE_UPLOAD, total_size, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ, "Create present constant buffer");
+    hud_constant_buffer_ = create_buffer(device_.Get(), D3D12_HEAP_TYPE_UPLOAD, total_hud_size, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ, "Create HUD constant buffer");
     D3D12_RANGE empty_range{0, 0};
     check(scene_constant_buffer_->Map(0, &empty_range, reinterpret_cast<void**>(&mapped_scene_constants_)), "Map scene constant buffer");
     check(present_constant_buffer_->Map(0, &empty_range, reinterpret_cast<void**>(&mapped_present_constants_)), "Map present constant buffer");
+    check(hud_constant_buffer_->Map(0, &empty_range, reinterpret_cast<void**>(&mapped_hud_constants_)), "Map HUD constant buffer");
 }
 
 void Renderer::create_timestamp_resources() {

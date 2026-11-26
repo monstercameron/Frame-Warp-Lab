@@ -3,13 +3,16 @@
 #include "simulation.h"
 
 #include <windows.h>
+#include <windowsx.h>
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <cstdint>
 #include <cstring>
 #include <stdexcept>
+#include <string>
 #include <system_error>
 
 namespace {
@@ -74,12 +77,15 @@ public:
         std::atomic_ref<std::int32_t>(state_->overlay_enabled).store(overlay_enabled ? 1 : 0, std::memory_order_release);
     }
 
-    void update_scene(double scene_time_seconds, bool paused) {
+    void update_scene(double scene_time_seconds, bool paused, bool mouse_look_active, float yaw_deg, float pitch_deg) {
         std::atomic_ref<std::int64_t>(state_->scene_time_ms).store(static_cast<std::int64_t>(scene_time_seconds * 1000.0), std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->scene_paused).store(paused ? 1 : 0, std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->mouse_look_active).store(mouse_look_active ? 1 : 0, std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->camera_yaw_millideg).store(static_cast<std::int32_t>(yaw_deg * 1000.0f), std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->camera_pitch_millideg).store(static_cast<std::int32_t>(pitch_deg * 1000.0f), std::memory_order_release);
     }
 
-    void record_frame(const frame_warp_lab::RuntimeFrameSample& sample) {
+    void record_frame(const frame_warp_lab::RuntimeFrameSample& sample, std::int64_t smoothed_present_interval_us) {
         std::atomic_ref<std::int32_t>(state_->present_count).fetch_add(1, std::memory_order_release);
         std::atomic_ref<std::int64_t>(state_->display_frame_id).store(sample.display_frame_id, std::memory_order_release);
         std::atomic_ref<std::int64_t>(state_->source_frame_id).store(sample.source_frame_id, std::memory_order_release);
@@ -100,6 +106,7 @@ public:
         }
 
         std::atomic_ref<std::int64_t>(state_->last_present_interval_us).store(sample.present_interval_us, std::memory_order_release);
+        std::atomic_ref<std::int64_t>(state_->smoothed_present_interval_us).store(smoothed_present_interval_us, std::memory_order_release);
         std::atomic_ref<std::int64_t>(state_->last_source_age_us).store(sample.source_age_us, std::memory_order_release);
         if (sample.scene_gpu_us >= 0) {
             std::atomic_ref<std::int64_t>(state_->last_scene_gpu_us).store(sample.scene_gpu_us, std::memory_order_release);
@@ -161,14 +168,73 @@ private:
     frame_warp_lab::RuntimeState* state_ = nullptr;
 };
 
-frame_warp_lab::ManualCameraInput poll_manual_camera_input(HWND window) {
+struct WindowInputState {
+    bool left_drag_active = false;
+    bool mouse_look_locked = false;
+    bool cursor_hidden = false;
+    bool ignore_next_recenter = false;
+    int last_cursor_x = 0;
+    int last_cursor_y = 0;
+    float pending_mouse_delta_x = 0.0f;
+    float pending_mouse_delta_y = 0.0f;
+};
+
+void recenter_cursor(HWND window, WindowInputState& input) {
+    RECT client{};
+    if (!GetClientRect(window, &client)) return;
+    POINT center{(client.right - client.left) / 2, (client.bottom - client.top) / 2};
+    input.last_cursor_x = center.x;
+    input.last_cursor_y = center.y;
+    ClientToScreen(window, &center);
+    input.ignore_next_recenter = true;
+    SetCursorPos(center.x, center.y);
+}
+
+void set_mouse_look_locked(HWND window, WindowInputState& input, bool locked) {
+    if (input.mouse_look_locked == locked) return;
+    input.mouse_look_locked = locked;
+    if (locked) {
+        input.left_drag_active = false;
+        SetCapture(window);
+        RECT client{};
+        if (GetClientRect(window, &client)) {
+            POINT top_left{client.left, client.top};
+            POINT bottom_right{client.right, client.bottom};
+            ClientToScreen(window, &top_left);
+            ClientToScreen(window, &bottom_right);
+            RECT screen_rect{top_left.x, top_left.y, bottom_right.x, bottom_right.y};
+            ClipCursor(&screen_rect);
+        }
+        if (!input.cursor_hidden) {
+            ShowCursor(FALSE);
+            input.cursor_hidden = true;
+        }
+        recenter_cursor(window, input);
+    } else {
+        ClipCursor(nullptr);
+        if (GetCapture() == window) ReleaseCapture();
+        if (input.cursor_hidden) {
+            ShowCursor(TRUE);
+            input.cursor_hidden = false;
+        }
+        input.ignore_next_recenter = false;
+    }
+}
+
+frame_warp_lab::ManualCameraInput poll_manual_camera_input(HWND window, WindowInputState& input_state) {
     frame_warp_lab::ManualCameraInput input{};
+    input.mouse_delta_x_px = input_state.pending_mouse_delta_x;
+    input.mouse_delta_y_px = input_state.pending_mouse_delta_y;
+    input_state.pending_mouse_delta_x = 0.0f;
+    input_state.pending_mouse_delta_y = 0.0f;
     if (GetForegroundWindow() != window) return input;
     auto key_down = [](int virtual_key) -> bool { return (GetAsyncKeyState(virtual_key) & 0x8000) != 0; };
     if (key_down('W')) input.forward_axis += 1.0f;
     if (key_down('S')) input.forward_axis -= 1.0f;
     if (key_down('D')) input.right_axis += 1.0f;
     if (key_down('A')) input.right_axis -= 1.0f;
+    if (key_down('E')) input.vertical_axis += 1.0f;
+    if (key_down('Q')) input.vertical_axis -= 1.0f;
     if (key_down(VK_RIGHT)) input.yaw_axis += 1.0f;
     if (key_down(VK_LEFT)) input.yaw_axis -= 1.0f;
     if (key_down(VK_UP)) input.pitch_axis += 1.0f;
@@ -176,9 +242,149 @@ frame_warp_lab::ManualCameraInput poll_manual_camera_input(HWND window) {
     return input;
 }
 
+float query_nominal_target_frame_ms(HWND window) {
+    MONITORINFOEXW monitor{};
+    monitor.cbSize = sizeof(monitor);
+    if (!GetMonitorInfoW(MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST), &monitor)) {
+        return 8.333f;
+    }
+    DEVMODEW active_mode{};
+    active_mode.dmSize = sizeof(active_mode);
+    if (!EnumDisplaySettingsW(monitor.szDevice, ENUM_CURRENT_SETTINGS, &active_mode) || active_mode.dmDisplayFrequency <= 1) {
+        return 8.333f;
+    }
+    return 1000.0f / static_cast<float>(active_mode.dmDisplayFrequency);
+}
+
+const char* short_mode_label(frame_warp_lab::PresentationMode mode) {
+    switch (mode) {
+        case frame_warp_lab::PresentationMode::full_render: return "FULL";
+        case frame_warp_lab::PresentationMode::repeat: return "REPEAT";
+        case frame_warp_lab::PresentationMode::reproject: return "REPROJ";
+        default: return "UNK";
+    }
+}
+
+const char* short_view_label(frame_warp_lab::DiagnosticView view) {
+    switch (view) {
+        case frame_warp_lab::DiagnosticView::final_color: return "FINAL";
+        case frame_warp_lab::DiagnosticView::depth: return "DEPTH";
+        case frame_warp_lab::DiagnosticView::motion_vectors: return "MOTION";
+        case frame_warp_lab::DiagnosticView::reprojection_holes: return "HOLES";
+        default: return "UNK";
+    }
+}
+
+const char* short_path_label(frame_warp_lab::CameraPath path) {
+    switch (path) {
+        case frame_warp_lab::CameraPath::corridor_sway: return "SWAY";
+        case frame_warp_lab::CameraPath::fast_pan: return "FASTPAN";
+        case frame_warp_lab::CameraPath::occlusion_sweep: return "OCCL";
+        case frame_warp_lab::CameraPath::camera_cut: return "CUT";
+        case frame_warp_lab::CameraPath::manual: return "MANUAL";
+        default: return "UNK";
+    }
+}
+
+void format_hud_lines(
+    frame_warp_lab::HudOverlayState& hud,
+    double smoothed_interval_us,
+    std::int64_t last_scene_gpu_us,
+    std::int64_t last_present_gpu_us,
+    std::int64_t last_source_age_us,
+    std::uint32_t last_invalid_pixels,
+    std::uint32_t last_total_pixels,
+    frame_warp_lab::PresentationMode mode,
+    std::int32_t source_divider,
+    frame_warp_lab::DiagnosticView view,
+    frame_warp_lab::CameraPath path,
+    std::int32_t stress_level,
+    bool vsync_enabled,
+    bool mouse_look_locked) {
+    const double frame_ms = smoothed_interval_us > 1.0 ? smoothed_interval_us / 1000.0 : 0.0;
+    const double fps = frame_ms > 0.01 ? 1000.0 / frame_ms : 0.0;
+    const double scene_ms = last_scene_gpu_us >= 0 ? static_cast<double>(last_scene_gpu_us) / 1000.0 : 0.0;
+    const double warp_ms = last_present_gpu_us >= 0 ? static_cast<double>(last_present_gpu_us) / 1000.0 : 0.0;
+    const double age_ms = static_cast<double>(std::max<std::int64_t>(0, last_source_age_us)) / 1000.0;
+    const double holes_pct = last_total_pixels > 0
+        ? (100.0 * static_cast<double>(last_invalid_pixels) / static_cast<double>(last_total_pixels))
+        : 0.0;
+
+    char line_buffer[80]{};
+    std::snprintf(line_buffer, sizeof(line_buffer), "FPS %5.1f  FT %5.2f MS  MODE %s /%d", fps, frame_ms, short_mode_label(mode), source_divider);
+    hud.lines[0] = line_buffer;
+
+    std::snprintf(line_buffer, sizeof(line_buffer), "GPU SCN %4.2f MS  WRP %4.2f MS  AGE %4.1f MS", scene_ms, warp_ms, age_ms);
+    hud.lines[1] = line_buffer;
+
+    std::snprintf(line_buffer, sizeof(line_buffer), "HOLE %4.2f%%  PATH %s  STR %d  VSYNC %s", holes_pct, short_path_label(path), stress_level, vsync_enabled ? "ON" : "OFF");
+    hud.lines[2] = line_buffer;
+
+    std::snprintf(line_buffer, sizeof(line_buffer), "%s  VIEW %s  1-3 MODE  H HOLE  O HUD", mouse_look_locked ? "RMB/ESC UNLOCK" : "LMB/RMB LOOK", short_view_label(view));
+    hud.lines[3] = line_buffer;
+}
+
 LRESULT CALLBACK window_procedure(HWND window, UINT message, WPARAM message_parameter, LPARAM message_data) {
+    auto* input = reinterpret_cast<WindowInputState*>(GetWindowLongPtrW(window, GWLP_USERDATA));
     if (message == WM_DESTROY) {
+        if (input) set_mouse_look_locked(window, *input, false);
         PostQuitMessage(0);
+        return 0;
+    }
+    if (!input) {
+        return DefWindowProcW(window, message, message_parameter, message_data);
+    }
+    if (message == WM_LBUTTONDOWN) {
+        if (!input->mouse_look_locked) {
+            input->left_drag_active = true;
+            input->last_cursor_x = GET_X_LPARAM(message_data);
+            input->last_cursor_y = GET_Y_LPARAM(message_data);
+            SetCapture(window);
+        }
+        return 0;
+    }
+    if (message == WM_LBUTTONUP) {
+        if (input->left_drag_active) {
+            input->left_drag_active = false;
+            if (GetCapture() == window) ReleaseCapture();
+        }
+        return 0;
+    }
+    if (message == WM_RBUTTONDOWN) {
+        set_mouse_look_locked(window, *input, !input->mouse_look_locked);
+        return 0;
+    }
+    if (message == WM_MOUSEMOVE) {
+        const int x = GET_X_LPARAM(message_data);
+        const int y = GET_Y_LPARAM(message_data);
+        if (input->mouse_look_locked) {
+            if (input->ignore_next_recenter) {
+                input->ignore_next_recenter = false;
+                input->last_cursor_x = x;
+                input->last_cursor_y = y;
+                return 0;
+            }
+            const int dx = x - input->last_cursor_x;
+            const int dy = y - input->last_cursor_y;
+            if (dx != 0 || dy != 0) {
+                input->pending_mouse_delta_x += static_cast<float>(dx);
+                input->pending_mouse_delta_y += static_cast<float>(dy);
+                recenter_cursor(window, *input);
+            }
+            return 0;
+        }
+        if (input->left_drag_active) {
+            input->pending_mouse_delta_x += static_cast<float>(x - input->last_cursor_x);
+            input->pending_mouse_delta_y += static_cast<float>(y - input->last_cursor_y);
+            input->last_cursor_x = x;
+            input->last_cursor_y = y;
+            return 0;
+        }
+        return 0;
+    }
+    if (message == WM_KILLFOCUS || (message == WM_CAPTURECHANGED && reinterpret_cast<HWND>(message_data) != window)) {
+        input->left_drag_active = false;
+        set_mouse_look_locked(window, *input, false);
         return 0;
     }
     return DefWindowProcW(window, message, message_parameter, message_data);
@@ -203,6 +409,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
             throw std::system_error(static_cast<int>(GetLastError()), std::system_category(), "Create window");
         }
 
+        WindowInputState input_state{};
+        SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(&input_state));
+
         frame_warp_lab::Renderer renderer(window);
         RuntimeStatePublisher runtime_state(
             renderer.gpu_timing_available(),
@@ -210,7 +419,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
             renderer.waitable_swap_chain_enabled());
         frame_warp_lab::SceneSimulation simulation;
 
-        ShowWindow(window, show);
+        ShowWindow(window, show == SW_HIDE ? SW_SHOWNORMAL : show);
         RECT previous_client_rectangle{};
         GetClientRect(window, &previous_client_rectangle);
 
@@ -233,6 +442,16 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         auto previous_tick = latest_source_capture_time;
         auto previous_present_tick = latest_source_capture_time;
         bool has_previous_present = false;
+        double smoothed_present_interval_us = 0.0;
+        std::int64_t last_scene_gpu_us = -1;
+        std::int64_t last_present_gpu_us = -1;
+        std::int64_t last_source_age_us = 0;
+        std::uint32_t last_invalid_pixels = 0;
+        std::uint32_t last_total_pixels = 0;
+
+        frame_warp_lab::HudOverlayState hud_state{};
+        hud_state.max_graph_ms = 25.0f;
+        hud_state.target_frame_ms = query_nominal_target_frame_ms(window);
 
         runtime_state.update_config(presentation_mode, source_divider, vsync_enabled, diagnostic_view, simulation.path(), stress_level, overlay_enabled);
 
@@ -241,6 +460,72 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 if (message.message == WM_QUIT) {
                     running = false;
                     break;
+                }
+                if (message.message == WM_KEYDOWN && (message.lParam & (1LL << 30)) == 0) {
+                    bool config_changed = false;
+                    if (message.wParam == VK_ESCAPE && input_state.mouse_look_locked) {
+                        set_mouse_look_locked(window, input_state, false);
+                    } else if (message.wParam == 'M') {
+                        set_mouse_look_locked(window, input_state, !input_state.mouse_look_locked);
+                    } else if (message.wParam == '1') {
+                        presentation_mode = frame_warp_lab::PresentationMode::full_render;
+                        cadence_counter = 0;
+                        config_changed = true;
+                    } else if (message.wParam == '2') {
+                        presentation_mode = frame_warp_lab::PresentationMode::repeat;
+                        if (source_divider < 2) source_divider = 2;
+                        cadence_counter = 0;
+                        config_changed = true;
+                    } else if (message.wParam == '3') {
+                        presentation_mode = frame_warp_lab::PresentationMode::reproject;
+                        if (source_divider < 2) source_divider = 2;
+                        cadence_counter = 0;
+                        config_changed = true;
+                    } else if (message.wParam == 'H') {
+                        diagnostic_view = diagnostic_view == frame_warp_lab::DiagnosticView::reprojection_holes
+                            ? frame_warp_lab::DiagnosticView::final_color
+                            : frame_warp_lab::DiagnosticView::reprojection_holes;
+                        config_changed = true;
+                    } else if (message.wParam == 'O') {
+                        overlay_enabled = !overlay_enabled;
+                        config_changed = true;
+                    } else if (message.wParam == 'V') {
+                        vsync_enabled = !vsync_enabled;
+                        config_changed = true;
+                    } else if (message.wParam == 'P' || message.wParam == VK_SPACE) {
+                        scene_paused = !scene_paused;
+                        runtime_state.record_event(
+                            scene_paused ? frame_warp_lab::RuntimeEventType::scene_paused : frame_warp_lab::RuntimeEventType::scene_resumed,
+                            scene_paused ? 1 : 0);
+                    } else if (message.wParam == 'R') {
+                        simulation.reset();
+                        has_completed_source = false;
+                        cadence_counter = 0;
+                        runtime_state.record_event(frame_warp_lab::RuntimeEventType::scene_reset, 0);
+                    } else if (message.wParam == 'C') {
+                        const auto next_path = static_cast<frame_warp_lab::CameraPath>((static_cast<std::int32_t>(simulation.path()) + 1) % 5);
+                        simulation.set_path(next_path);
+                        has_completed_source = false;
+                        config_changed = true;
+                    } else if (message.wParam == VK_OEM_4) {
+                        source_divider = std::max(1, source_divider - 1);
+                        cadence_counter = 0;
+                        config_changed = true;
+                    } else if (message.wParam == VK_OEM_6) {
+                        source_divider = std::min(frame_warp_lab::max_source_divider, source_divider + 1);
+                        cadence_counter = 0;
+                        config_changed = true;
+                    } else if (message.wParam == VK_OEM_MINUS) {
+                        stress_level = std::max(0, stress_level - 4);
+                        config_changed = true;
+                    } else if (message.wParam == VK_OEM_PLUS) {
+                        stress_level = std::min(frame_warp_lab::max_stress_level, stress_level + 4);
+                        config_changed = true;
+                    }
+                    if (config_changed) {
+                        runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, static_cast<std::int32_t>(message.wParam));
+                        runtime_state.update_config(presentation_mode, source_divider, vsync_enabled, diagnostic_view, simulation.path(), stress_level, overlay_enabled);
+                    }
                 }
                 if (message.message == frame_warp_lab::control_message) {
                     const auto command = static_cast<frame_warp_lab::ControlCommand>(message.wParam);
@@ -291,7 +576,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                     }
                     previous_tick = std::chrono::steady_clock::now();
                     runtime_state.update_config(presentation_mode, source_divider, vsync_enabled, diagnostic_view, simulation.path(), stress_level, overlay_enabled);
-                    runtime_state.update_scene(simulation.time_seconds(), scene_paused);
+                    float yaw_deg = 0.0f;
+                    float pitch_deg = 0.0f;
+                    simulation.current_camera_angles_degrees(yaw_deg, pitch_deg);
+                    runtime_state.update_scene(simulation.time_seconds(), scene_paused, input_state.mouse_look_locked || input_state.left_drag_active, yaw_deg, pitch_deg);
                     continue;
                 }
                 TranslateMessage(&message);
@@ -306,7 +594,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
             }
 
             const auto current_tick = std::chrono::steady_clock::now();
-            const frame_warp_lab::ManualCameraInput manual_input = poll_manual_camera_input(window);
+            const frame_warp_lab::ManualCameraInput manual_input = poll_manual_camera_input(window, input_state);
+            if (simulation.take_manual_control_if_needed(manual_input)) {
+                has_completed_source = false;
+                runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, 104);
+                runtime_state.update_config(presentation_mode, source_divider, vsync_enabled, diagnostic_view, simulation.path(), stress_level, overlay_enabled);
+            }
             simulation.advance(std::chrono::duration<double>(current_tick - previous_tick).count(), scene_paused, manual_input);
             previous_tick = current_tick;
 
@@ -328,6 +621,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 previous_client_rectangle = current_client_rectangle;
                 has_completed_source = false;
                 cadence_counter = 0;
+                hud_state.target_frame_ms = query_nominal_target_frame_ms(window);
             }
 
             ++display_frame_id;
@@ -372,9 +666,26 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 }
             }
 
+            format_hud_lines(
+                hud_state,
+                smoothed_present_interval_us,
+                last_scene_gpu_us,
+                last_present_gpu_us,
+                last_source_age_us,
+                last_invalid_pixels,
+                last_total_pixels,
+                presentation_mode,
+                effective_divider,
+                diagnostic_view,
+                simulation.path(),
+                stress_level,
+                vsync_enabled,
+                input_state.mouse_look_locked);
+
             const frame_warp_lab::FrameExecutionMetrics gpu_metrics = renderer.render_and_present(frame_warp_lab::FrameRenderRequest{
                 latest_source_snapshot,
                 target_camera,
+                hud_state,
                 diagnostic_view,
                 stress_level,
                 overlay_enabled,
@@ -390,30 +701,64 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
             previous_present_tick = present_complete_time;
             has_previous_present = true;
 
-            runtime_state.update_scene(simulation.time_seconds(), scene_paused);
-            runtime_state.record_frame(frame_warp_lab::RuntimeFrameSample{
-                0,
-                display_frame_id,
-                latest_source_snapshot.source_frame_id,
-                present_interval_us,
-                source_age_us,
-                gpu_metrics.completed_scene_gpu_us,
-                gpu_metrics.completed_present_gpu_us,
-                gpu_metrics.completed_invalid_pixel_count,
-                gpu_metrics.completed_total_pixel_count,
-                static_cast<std::int32_t>(presentation_mode),
-                static_cast<std::int32_t>(frame_kind),
-                static_cast<std::int32_t>(fallback_reason),
-                static_cast<std::int32_t>(diagnostic_view),
-                static_cast<std::int32_t>(simulation.path()),
-                stress_level,
-                effective_divider,
-                render_scene_pass ? 1 : 0,
-                gpu_metrics.completed_slot_warped ? 1 : 0,
-                frame_discontinuity ? 1 : 0,
-            });
+            if (present_interval_us > 0) {
+                if (smoothed_present_interval_us <= 1.0) {
+                    smoothed_present_interval_us = static_cast<double>(present_interval_us);
+                } else {
+                    smoothed_present_interval_us = smoothed_present_interval_us * 0.88 + static_cast<double>(present_interval_us) * 0.12;
+                }
+            }
+            if (gpu_metrics.completed_scene_gpu_us >= 0) last_scene_gpu_us = gpu_metrics.completed_scene_gpu_us;
+            if (gpu_metrics.completed_present_gpu_us >= 0) last_present_gpu_us = gpu_metrics.completed_present_gpu_us;
+            last_source_age_us = source_age_us;
+            if (gpu_metrics.completed_slot_warped) {
+                last_invalid_pixels = gpu_metrics.completed_invalid_pixel_count;
+                last_total_pixels = gpu_metrics.completed_total_pixel_count;
+            } else if (presentation_mode != frame_warp_lab::PresentationMode::reproject) {
+                last_invalid_pixels = 0;
+                last_total_pixels = gpu_metrics.completed_total_pixel_count;
+            }
+
+            const float sample_gpu_ms = ((gpu_metrics.completed_scene_gpu_us > 0 ? static_cast<float>(gpu_metrics.completed_scene_gpu_us) : 0.0f)
+                + (gpu_metrics.completed_present_gpu_us > 0 ? static_cast<float>(gpu_metrics.completed_present_gpu_us) : 0.0f)) / 1000.0f;
+            hud_state.samples[hud_state.write_head & (frame_warp_lab::hud_graph_sample_count - 1)] = frame_warp_lab::HudGraphSample{
+                static_cast<float>(present_interval_us) / 1000.0f,
+                sample_gpu_ms,
+                static_cast<float>(static_cast<std::int32_t>(frame_kind)),
+                static_cast<float>(source_age_us) / 1000.0f,
+            };
+            hud_state.write_head = (hud_state.write_head + 1U) & (frame_warp_lab::hud_graph_sample_count - 1U);
+
+            float yaw_deg = 0.0f;
+            float pitch_deg = 0.0f;
+            simulation.current_camera_angles_degrees(yaw_deg, pitch_deg);
+            runtime_state.update_scene(simulation.time_seconds(), scene_paused, input_state.mouse_look_locked || input_state.left_drag_active, yaw_deg, pitch_deg);
+            runtime_state.record_frame(
+                frame_warp_lab::RuntimeFrameSample{
+                    0,
+                    display_frame_id,
+                    latest_source_snapshot.source_frame_id,
+                    present_interval_us,
+                    source_age_us,
+                    gpu_metrics.completed_scene_gpu_us,
+                    gpu_metrics.completed_present_gpu_us,
+                    gpu_metrics.completed_invalid_pixel_count,
+                    gpu_metrics.completed_total_pixel_count,
+                    static_cast<std::int32_t>(presentation_mode),
+                    static_cast<std::int32_t>(frame_kind),
+                    static_cast<std::int32_t>(fallback_reason),
+                    static_cast<std::int32_t>(diagnostic_view),
+                    static_cast<std::int32_t>(simulation.path()),
+                    stress_level,
+                    effective_divider,
+                    render_scene_pass ? 1 : 0,
+                    gpu_metrics.completed_slot_warped ? 1 : 0,
+                    frame_discontinuity ? 1 : 0,
+                },
+                static_cast<std::int64_t>(smoothed_present_interval_us));
         }
 
+        set_mouse_look_locked(window, input_state, false);
         renderer.flush();
         return 0;
     } catch (const std::exception& error) {
