@@ -2,13 +2,13 @@ cbuffer PresentConstants : register(b0) {
     float4 viewport_and_flags;
     float4 warp_flags_and_aspect;
     float4 source_camera_position_tan_y;
-    float4 source_camera_right_unused;
-    float4 source_camera_up_unused;
-    float4 source_camera_forward_unused;
+    float4 source_camera_right_rcp_width;
+    float4 source_camera_up_rcp_height;
+    float4 source_camera_forward_tan_x;
     float4 target_camera_position_tan_y;
-    float4 target_camera_right_unused;
-    float4 target_camera_up_unused;
-    float4 target_camera_forward_unused;
+    float4 target_camera_right_rcp_tan_x;
+    float4 target_camera_up_rcp_tan_y;
+    float4 target_camera_forward_tan_x;
 };
 
 cbuffer HudConstants : register(b1) {
@@ -49,119 +49,112 @@ bool project_world_to_camera_uv(
     float3 camera_right,
     float3 camera_up,
     float3 camera_forward,
-    float tan_half_y,
-    float aspect_ratio,
+    float rcp_tan_half_x,
+    float rcp_tan_half_y,
     out float2 out_uv,
     out float out_view_z) {
     float3 relative = world_position - camera_position;
-    float view_x = dot(relative, camera_right);
-    float view_y = dot(relative, camera_up);
     float view_z = dot(relative, camera_forward);
     out_view_z = view_z;
     if (view_z <= 0.01) {
         out_uv = float2(-1.0, -1.0);
         return false;
     }
-    float tan_half_x = tan_half_y * aspect_ratio;
-    float ndc_x = view_x / (view_z * tan_half_x);
-    float ndc_y = view_y / (view_z * tan_half_y);
+    float inv_z = rcp(view_z);
+    float ndc_x = dot(relative, camera_right) * inv_z * rcp_tan_half_x;
+    float ndc_y = dot(relative, camera_up) * inv_z * rcp_tan_half_y;
     out_uv = float2(ndc_x * 0.5 + 0.5, 0.5 - ndc_y * 0.5);
     return out_uv.x >= 0.0 && out_uv.x <= 1.0 && out_uv.y >= 0.0 && out_uv.y <= 1.0;
 }
 
-float3 reconstruct_source_world_position(float2 source_uv, float linear_view_depth, float aspect_ratio) {
+float3 reconstruct_source_world_position(float2 source_uv, float linear_view_depth) {
     float2 ndc = float2(source_uv.x * 2.0 - 1.0, 1.0 - source_uv.y * 2.0);
-    float tan_half_y = source_camera_position_tan_y.w;
-    float tan_half_x = tan_half_y * aspect_ratio;
     return source_camera_position_tan_y.xyz
-        + source_camera_right_unused.xyz * (ndc.x * tan_half_x * linear_view_depth)
-        + source_camera_up_unused.xyz * (ndc.y * tan_half_y * linear_view_depth)
-        + source_camera_forward_unused.xyz * linear_view_depth;
+        + source_camera_right_rcp_width.xyz * (ndc.x * source_camera_forward_tan_x.w * linear_view_depth)
+        + source_camera_up_rcp_height.xyz * (ndc.y * source_camera_position_tan_y.w * linear_view_depth)
+        + source_camera_forward_tan_x.xyz * linear_view_depth;
 }
 
-ReprojectionSample evaluate_reprojection(float2 target_uv, float2 viewport_size, float aspect_ratio) {
+ReprojectionSample evaluate_reprojection(float2 target_uv, float2 viewport_size, float2 texel_size) {
     ReprojectionSample result;
     result.source_uv = target_uv;
     result.valid = false;
 
     float2 target_ndc = float2(target_uv.x * 2.0 - 1.0, 1.0 - target_uv.y * 2.0);
-    float target_tan_y = target_camera_position_tan_y.w;
-    float target_tan_x = target_tan_y * aspect_ratio;
     float3 target_origin = target_camera_position_tan_y.xyz;
     float3 target_ray = normalize(
-        target_camera_right_unused.xyz * (target_ndc.x * target_tan_x)
-        + target_camera_up_unused.xyz * (target_ndc.y * target_tan_y)
-        + target_camera_forward_unused.xyz);
+        target_camera_right_rcp_tan_x.xyz * (target_ndc.x * target_camera_forward_tan_x.w)
+        + target_camera_up_rcp_tan_y.xyz * (target_ndc.y * target_camera_position_tan_y.w)
+        + target_camera_forward_tan_x.xyz);
 
-    float source_ray_z = dot(target_ray, source_camera_forward_unused.xyz);
+    float source_ray_z = dot(target_ray, source_camera_forward_tan_x.xyz);
     if (source_ray_z <= 0.05) {
         return result;
     }
 
-    float source_tan_y = source_camera_position_tan_y.w;
-    float source_tan_x = source_tan_y * aspect_ratio;
+    float rcp_source_tan_x = rcp(source_camera_forward_tan_x.w);
+    float rcp_source_tan_y = rcp(source_camera_position_tan_y.w);
+    float inv_source_ray_z = rcp(source_ray_z);
     float2 initial_ndc = float2(
-        dot(target_ray, source_camera_right_unused.xyz) / (source_ray_z * source_tan_x),
-        dot(target_ray, source_camera_up_unused.xyz) / (source_ray_z * source_tan_y));
+        dot(target_ray, source_camera_right_rcp_width.xyz) * inv_source_ray_z * rcp_source_tan_x,
+        dot(target_ray, source_camera_up_rcp_height.xyz) * inv_source_ray_z * rcp_source_tan_y);
     float2 candidate_uv = float2(initial_ndc.x * 0.5 + 0.5, 0.5 - initial_ndc.y * 0.5);
     if (candidate_uv.x < 0.0 || candidate_uv.x > 1.0 || candidate_uv.y < 0.0 || candidate_uv.y > 1.0) {
         return result;
     }
 
     float sampled_depth = scene_depth_texture.SampleLevel(point_clamp_sampler, candidate_uv, 0);
-    float ray_distance = sampled_depth / max(source_ray_z, 0.1);
+    float ray_distance = sampled_depth * rcp(max(source_ray_z, 0.1));
     float2 projected_uv = candidate_uv;
     float projected_source_z = sampled_depth;
-    bool in_bounds = true;
 
     [unroll]
     for (int iteration = 0; iteration < 4; ++iteration) {
         float3 candidate_world = target_origin + target_ray * ray_distance;
-        in_bounds = project_world_to_camera_uv(
-            candidate_world,
-            source_camera_position_tan_y.xyz,
-            source_camera_right_unused.xyz,
-            source_camera_up_unused.xyz,
-            source_camera_forward_unused.xyz,
-            source_tan_y,
-            aspect_ratio,
-            projected_uv,
-            projected_source_z);
-        if (!in_bounds) {
+        if (!project_world_to_camera_uv(
+                candidate_world,
+                source_camera_position_tan_y.xyz,
+                source_camera_right_rcp_width.xyz,
+                source_camera_up_rcp_height.xyz,
+                source_camera_forward_tan_x.xyz,
+                rcp_source_tan_x,
+                rcp_source_tan_y,
+                projected_uv,
+                projected_source_z)) {
             return result;
         }
         sampled_depth = scene_depth_texture.SampleLevel(point_clamp_sampler, projected_uv, 0);
-        float3 surface_world = reconstruct_source_world_position(projected_uv, sampled_depth, aspect_ratio);
+        float3 surface_world = reconstruct_source_world_position(projected_uv, sampled_depth);
         ray_distance = max(dot(surface_world - target_origin, target_ray), 0.05);
     }
 
-    float3 matched_world = reconstruct_source_world_position(projected_uv, sampled_depth, aspect_ratio);
+    float3 matched_world = reconstruct_source_world_position(projected_uv, sampled_depth);
     float2 roundtrip_uv;
     float roundtrip_target_z;
     if (!project_world_to_camera_uv(
             matched_world,
             target_origin,
-            target_camera_right_unused.xyz,
-            target_camera_up_unused.xyz,
-            target_camera_forward_unused.xyz,
-            target_tan_y,
-            aspect_ratio,
+            target_camera_right_rcp_tan_x.xyz,
+            target_camera_up_rcp_tan_y.xyz,
+            target_camera_forward_tan_x.xyz,
+            target_camera_right_rcp_tan_x.w,
+            target_camera_up_rcp_tan_y.w,
             roundtrip_uv,
             roundtrip_target_z)) {
         return result;
     }
 
+    float inv_safe_depth = rcp(max(sampled_depth, 0.25));
     float pixel_error = length((roundtrip_uv - target_uv) * viewport_size);
-    float relative_depth_error = abs(projected_source_z - sampled_depth) / max(sampled_depth, 0.25);
+    float relative_depth_error = abs(projected_source_z - sampled_depth) * inv_safe_depth;
 
-    float2 texel = 1.0 / viewport_size;
-    float depth_left = scene_depth_texture.SampleLevel(point_clamp_sampler, projected_uv - float2(texel.x, 0.0), 0);
-    float depth_right = scene_depth_texture.SampleLevel(point_clamp_sampler, projected_uv + float2(texel.x, 0.0), 0);
-    float depth_up = scene_depth_texture.SampleLevel(point_clamp_sampler, projected_uv - float2(0.0, texel.y), 0);
-    float depth_down = scene_depth_texture.SampleLevel(point_clamp_sampler, projected_uv + float2(0.0, texel.y), 0);
+    float depth_left = scene_depth_texture.SampleLevel(point_clamp_sampler, projected_uv - float2(texel_size.x, 0.0), 0);
+    float depth_right = scene_depth_texture.SampleLevel(point_clamp_sampler, projected_uv + float2(texel_size.x, 0.0), 0);
+    float depth_up = scene_depth_texture.SampleLevel(point_clamp_sampler, projected_uv - float2(0.0, texel_size.y), 0);
+    float depth_down = scene_depth_texture.SampleLevel(point_clamp_sampler, projected_uv + float2(0.0, texel_size.y), 0);
     float max_neighbor_jump = max(
         max(abs(depth_left - sampled_depth), abs(depth_right - sampled_depth)),
-        max(abs(depth_up - sampled_depth), abs(depth_down - sampled_depth))) / max(sampled_depth, 0.25);
+        max(abs(depth_up - sampled_depth), abs(depth_down - sampled_depth))) * inv_safe_depth;
 
     bool consistent = (pixel_error <= 1.75) && (relative_depth_error <= 0.045) && !(max_neighbor_jump > 0.18 && pixel_error > 0.65);
     result.source_uv = projected_uv;
@@ -348,16 +341,16 @@ float3 composite_hud_layer(float2 pixel_pos, float3 base_color) {
 
 float4 pixel_main(VertexOutput input) : SV_Target {
     float2 viewport_size = viewport_and_flags.xy;
+    float2 texel_size = float2(source_camera_right_rcp_width.w, source_camera_up_rcp_height.w);
     int diagnostic_view = (int)(viewport_and_flags.z + 0.5);
     bool overlay_enabled = viewport_and_flags.w > 0.5;
     bool warp_active = warp_flags_and_aspect.x > 0.5;
-    float aspect_ratio = warp_flags_and_aspect.y;
-    float2 uv = input.position.xy / viewport_size;
+    float2 uv = input.position.xy * texel_size;
 
     float2 sample_uv = uv;
     bool pixel_valid = true;
     if (warp_active) {
-        ReprojectionSample reprojection = evaluate_reprojection(uv, viewport_size, aspect_ratio);
+        ReprojectionSample reprojection = evaluate_reprojection(uv, viewport_size, texel_size);
         sample_uv = saturate(reprojection.source_uv);
         pixel_valid = reprojection.valid;
         if (!pixel_valid) {

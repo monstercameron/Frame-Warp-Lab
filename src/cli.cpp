@@ -1,4 +1,5 @@
 #include "runtime_state.h"
+#include "simd_math.h"
 
 #include <windows.h>
 #include <d3d12.h>
@@ -191,14 +192,19 @@ void print_double_summary(std::vector<double> values) {
         std::cout << "null";
         return;
     }
+    double sum = 0.0;
+    double minimum = 0.0;
+    double maximum = 0.0;
+    frame_warp_lab::simd::sum_and_minmax_double(values.data(), values.size(), sum, minimum, maximum);
     std::sort(values.begin(), values.end());
     const std::size_t count = values.size();
     const std::size_t p95_index = std::min(count - 1, (count * 95) / 100);
     std::cout << "{\"count\":" << count
-              << ",\"min\":" << std::fixed << std::setprecision(6) << values.front()
+              << ",\"min\":" << std::fixed << std::setprecision(6) << minimum
+              << ",\"mean\":" << (sum / static_cast<double>(count))
               << ",\"median\":" << values[count / 2]
               << ",\"p95\":" << values[p95_index]
-              << ",\"max\":" << values.back() << "}";
+              << ",\"max\":" << maximum << "}";
 }
 
 int print_status(const WindowInstance& instance) {
@@ -628,7 +634,8 @@ int print_capabilities() {
     const bool presentmon_arm64_present = file_exists(L"C:\\Program Files\\NVIDIA Corporation\\FrameViewSDK\\bin\\PresentMon_arm64.exe");
     const bool nvrla_present = file_exists(L"C:\\Program Files\\NVIDIA Corporation\\FrameViewSDK\\bin\\nvrla.exe");
 
-    std::cout << "{\"ok\":true,\"schema_version\":5,\"scope\":\"new_default_d3d12_device_not_runtime_instance\",\"adapter\":";
+    std::cout << "{\"ok\":true,\"schema_version\":6,\"scope\":\"new_default_d3d12_device_not_runtime_instance\",\"simd_backend\":\""
+              << frame_warp_lab::simd::backend_name() << "\",\"adapter\":";
     print_adapter(device.Get(), factory.Get());
     std::cout << ",\"presentation\":{\"allow_tearing_query_available\":" << (tearing_query_available ? "true" : "false")
               << ",\"allow_tearing_supported\":" << (allow_tearing ? "true" : "false") << "},\"vrs\":";

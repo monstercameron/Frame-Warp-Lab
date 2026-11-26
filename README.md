@@ -14,11 +14,11 @@ With Visual Studio 2022 C++ Build Tools, the ARM64 compiler, Windows SDK, and CM
 
 ```powershell
 cmake -S . -B build -G 'Visual Studio 17 2022' -A ARM64
-cmake --build build --config Debug
-./build/Debug/frame_warp_lab.exe
+cmake --build build --config Release
+./build/Release/frame_warp_lab.exe
 ```
 
-Close the window to exit. Debug builds enable the D3D12 debug layer if available. NVIDIA SDK integration is not included and its ARM64 support has not been established.
+Use `--config Debug` to enable the D3D12 debug layer if available, or `--config Release` for low-overhead ARM64 NEON SIMD pacing measurements. Close the window to exit. NVIDIA Streamline/DLSS-G integration is not yet included (`v2.14.16` publishes `aarch64`/`arm64ec` releases that remain to be evaluated locally).
 
 ## CLI foundation
 

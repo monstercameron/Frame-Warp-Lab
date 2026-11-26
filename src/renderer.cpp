@@ -1,4 +1,5 @@
 #include "renderer.h"
+#include "simd_math.h"
 
 #include <d3dcompiler.h>
 
@@ -75,7 +76,7 @@ ComPtr<ID3DBlob> compile_hlsl(const std::filesystem::path& path, const char* ent
     ComPtr<ID3DBlob> shader;
     ComPtr<ID3DBlob> errors;
     const HRESULT result = D3DCompileFromFile(path.c_str(), nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE,
-                                              entry, target, D3DCOMPILE_ENABLE_STRICTNESS, 0, &shader, &errors);
+                                              entry, target, D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &shader, &errors);
     if (FAILED(result)) {
         const std::string detail = errors
             ? std::string(static_cast<const char*>(errors->GetBufferPointer()), errors->GetBufferSize())
@@ -136,14 +137,10 @@ ComPtr<ID3D12Resource> create_offscreen_texture(ID3D12Device* device, UINT width
 }
 
 void write_float4(float (&destination)[4], Float3 vector, float w) {
-    destination[0] = vector.x;
-    destination[1] = vector.y;
-    destination[2] = vector.z;
-    destination[3] = w;
+    simd::store_float4(destination, vector.x, vector.y, vector.z, w);
 }
 
-HudConstantsData build_hud_constants(const HudOverlayState& hud, UINT viewport_width, UINT viewport_height) {
-    HudConstantsData data{};
+void write_hud_constants_simd(HudConstantsData* destination, const HudOverlayState& hud, UINT viewport_width, UINT viewport_height) {
     const std::uint32_t char_scale = (viewport_width >= 1000 && viewport_height >= 520) ? 2U : 1U;
     constexpr std::uint32_t line_count = 4U;
     constexpr std::uint32_t chars_per_line = 48U;
@@ -154,47 +151,37 @@ HudConstantsData build_hud_constants(const HudOverlayState& hud, UINT viewport_w
     const float panel_width = std::min(static_cast<float>(viewport_width) - 24.0f, text_width + 20.0f);
     const float panel_height = std::min(static_cast<float>(viewport_height) - 24.0f, text_height + graph_height + 26.0f);
     if (panel_width > 40.0f && panel_height > 40.0f) {
-        data.hud_panel_rect[0] = 12.0f;
-        data.hud_panel_rect[1] = 12.0f;
-        data.hud_panel_rect[2] = panel_width;
-        data.hud_panel_rect[3] = panel_height;
-
-        data.hud_graph_rect[0] = 22.0f;
-        data.hud_graph_rect[1] = 12.0f + 8.0f + text_height + 8.0f;
-        data.hud_graph_rect[2] = std::max(0.0f, panel_width - 20.0f);
-        data.hud_graph_rect[3] = std::max(0.0f, panel_height - (text_height + 26.0f));
+        simd::store_float4(destination->hud_panel_rect, 12.0f, 12.0f, panel_width, panel_height);
+        simd::store_float4(
+            destination->hud_graph_rect,
+            22.0f,
+            12.0f + 8.0f + text_height + 8.0f,
+            std::max(0.0f, panel_width - 20.0f),
+            std::max(0.0f, panel_height - (text_height + 26.0f)));
+    } else {
+        simd::store_float4(destination->hud_panel_rect, 0.0f, 0.0f, 0.0f, 0.0f);
+        simd::store_float4(destination->hud_graph_rect, 0.0f, 0.0f, 0.0f, 0.0f);
     }
 
-    data.hud_graph_scale[0] = hud.max_graph_ms > 1.0f ? hud.max_graph_ms : 25.0f;
-    data.hud_graph_scale[1] = hud.target_frame_ms > 0.5f ? hud.target_frame_ms : 8.333f;
-    data.hud_graph_scale[2] = static_cast<float>(hud_graph_sample_count);
-    data.hud_graph_scale[3] = static_cast<float>(hud.write_head & (hud_graph_sample_count - 1));
+    simd::store_float4(
+        destination->hud_graph_scale,
+        hud.max_graph_ms > 1.0f ? hud.max_graph_ms : 25.0f,
+        hud.target_frame_ms > 0.5f ? hud.target_frame_ms : 8.333f,
+        static_cast<float>(hud_graph_sample_count),
+        static_cast<float>(hud.write_head & (hud_graph_sample_count - 1)));
+    simd::store_uint4(destination->hud_text_meta, line_count, chars_per_line, char_scale, 0U);
 
-    data.hud_text_meta[0] = line_count;
-    data.hud_text_meta[1] = chars_per_line;
-    data.hud_text_meta[2] = char_scale;
-    data.hud_text_meta[3] = 0U;
-
-    for (std::size_t line_index = 0; line_index < hud.lines.size(); ++line_index) {
-        const std::string& line = hud.lines[line_index];
-        const std::size_t length = std::min<std::size_t>(line.size(), 64U);
-        for (std::size_t col = 0; col < length; ++col) {
+    alignas(16) std::uint32_t packed_text[64]{};
+    for (std::size_t line_index = 0; line_index < 4U; ++line_index) {
+        const char* line = hud.lines[line_index];
+        for (std::size_t col = 0; col < 64U && line[col] != '\0'; ++col) {
             const unsigned char ascii = static_cast<unsigned char>(std::toupper(static_cast<unsigned char>(line[col])));
             const std::size_t char_index = line_index * 64U + col;
-            const std::size_t word_index = char_index >> 2U;
-            const std::size_t byte_shift = (char_index & 3U) * 8U;
-            data.hud_text_packed[word_index] |= static_cast<std::uint32_t>(ascii) << byte_shift;
+            packed_text[char_index >> 2U] |= static_cast<std::uint32_t>(ascii) << ((char_index & 3U) * 8U);
         }
     }
-
-    for (std::size_t index = 0; index < hud_graph_sample_count; ++index) {
-        data.hud_graph_samples[index][0] = hud.samples[index].present_interval_ms;
-        data.hud_graph_samples[index][1] = hud.samples[index].gpu_total_ms;
-        data.hud_graph_samples[index][2] = hud.samples[index].frame_kind;
-        data.hud_graph_samples[index][3] = hud.samples[index].source_age_ms;
-    }
-
-    return data;
+    simd::copy_uint4_stream(destination->hud_text_packed, packed_text, 16U);
+    simd::copy_float4_stream(&destination->hud_graph_samples[0][0], &hud.samples[0].present_interval_ms, hud_graph_sample_count);
 }
 
 }
@@ -354,46 +341,58 @@ FrameExecutionMetrics Renderer::render_and_present(const FrameRenderRequest& req
         request.display_frame_id);
 
     const float aspect_ratio = static_cast<float>(viewport_width_) / static_cast<float>(viewport_height_);
+    const float rcp_width = 1.0f / static_cast<float>(viewport_width_);
+    const float rcp_height = 1.0f / static_cast<float>(viewport_height_);
     const std::size_t constant_offset = static_cast<std::size_t>(buffer_index) * constant_buffer_stride;
     const std::size_t hud_offset = static_cast<std::size_t>(buffer_index) * hud_constant_buffer_stride;
 
     if (request.render_scene_pass) {
-        SceneConstantsData scene_constants{};
-        write_float4(scene_constants.camera_position_tan_y, request.source_snapshot.camera.position, request.source_snapshot.camera.tan_half_fov_y);
-        write_float4(scene_constants.camera_right_aspect, request.source_snapshot.camera.right, aspect_ratio);
-        write_float4(scene_constants.camera_up_width, request.source_snapshot.camera.up, static_cast<float>(viewport_width_));
-        write_float4(scene_constants.camera_forward_height, request.source_snapshot.camera.forward, static_cast<float>(viewport_height_));
-        write_float4(scene_constants.previous_camera_position_tan_y, request.source_snapshot.previous_camera.position, request.source_snapshot.previous_camera.tan_half_fov_y);
-        write_float4(scene_constants.previous_camera_right_aspect, request.source_snapshot.previous_camera.right, aspect_ratio);
-        write_float4(scene_constants.previous_camera_up_cut, request.source_snapshot.previous_camera.up, request.source_snapshot.discontinuity ? 1.0f : 0.0f);
-        write_float4(scene_constants.previous_camera_forward_unused, request.source_snapshot.previous_camera.forward, 0.0f);
-        write_float4(scene_constants.ball_center_stress, request.source_snapshot.ball_center, static_cast<float>(request.stress_level));
-        write_float4(scene_constants.previous_ball_center_unused, request.source_snapshot.previous_ball_center, 0.0f);
-        std::memcpy(mapped_scene_constants_ + constant_offset, &scene_constants, sizeof(scene_constants));
+        auto* scene_constants = reinterpret_cast<SceneConstantsData*>(mapped_scene_constants_ + constant_offset);
+        const float tan_y = request.source_snapshot.camera.tan_half_fov_y;
+        const float tan_x = tan_y * aspect_ratio;
+        const float prev_tan_y = request.source_snapshot.previous_camera.tan_half_fov_y;
+        const float prev_tan_x = prev_tan_y * aspect_ratio;
+        write_float4(scene_constants->camera_position_tan_y, request.source_snapshot.camera.position, tan_y);
+        write_float4(scene_constants->camera_right_aspect, request.source_snapshot.camera.right, tan_x);
+        write_float4(scene_constants->camera_up_width, request.source_snapshot.camera.up, rcp_width);
+        write_float4(scene_constants->camera_forward_height, request.source_snapshot.camera.forward, rcp_height);
+        write_float4(scene_constants->previous_camera_position_tan_y, request.source_snapshot.previous_camera.position, 1.0f / prev_tan_y);
+        write_float4(scene_constants->previous_camera_right_aspect, request.source_snapshot.previous_camera.right, 1.0f / prev_tan_x);
+        write_float4(scene_constants->previous_camera_up_cut, request.source_snapshot.previous_camera.up, request.source_snapshot.discontinuity ? 1.0f : 0.0f);
+        write_float4(scene_constants->previous_camera_forward_unused, request.source_snapshot.previous_camera.forward, 0.0f);
+        write_float4(scene_constants->ball_center_stress, request.source_snapshot.ball_center, static_cast<float>(request.stress_level));
+        write_float4(scene_constants->previous_ball_center_unused, request.source_snapshot.previous_ball_center, 0.0f);
     }
 
-    PresentConstantsData present_constants{};
-    present_constants.viewport_and_flags[0] = static_cast<float>(viewport_width_);
-    present_constants.viewport_and_flags[1] = static_cast<float>(viewport_height_);
-    present_constants.viewport_and_flags[2] = static_cast<float>(static_cast<std::int32_t>(request.diagnostic_view));
-    present_constants.viewport_and_flags[3] = request.overlay_enabled ? 1.0f : 0.0f;
-    present_constants.warp_flags_and_aspect[0] = request.warp_enabled ? 1.0f : 0.0f;
-    present_constants.warp_flags_and_aspect[1] = aspect_ratio;
-    present_constants.warp_flags_and_aspect[2] = request.flash_indicator_enabled ? 1.0f : 0.0f;
-    present_constants.warp_flags_and_aspect[3] = request.flash_triggered ? 1.0f : 0.0f;
-    write_float4(present_constants.source_camera_position_tan_y, request.source_snapshot.camera.position, request.source_snapshot.camera.tan_half_fov_y);
-    write_float4(present_constants.source_camera_right_unused, request.source_snapshot.camera.right, 0.0f);
-    write_float4(present_constants.source_camera_up_unused, request.source_snapshot.camera.up, 0.0f);
-    write_float4(present_constants.source_camera_forward_unused, request.source_snapshot.camera.forward, 0.0f);
-    write_float4(present_constants.target_camera_position_tan_y, request.target_camera.position, request.target_camera.tan_half_fov_y);
-    write_float4(present_constants.target_camera_right_unused, request.target_camera.right, 0.0f);
-    write_float4(present_constants.target_camera_up_unused, request.target_camera.up, 0.0f);
-    write_float4(present_constants.target_camera_forward_unused, request.target_camera.forward, 0.0f);
-    std::memcpy(mapped_present_constants_ + constant_offset, &present_constants, sizeof(present_constants));
+    auto* present_constants = reinterpret_cast<PresentConstantsData*>(mapped_present_constants_ + constant_offset);
+    const float source_tan_y = request.source_snapshot.camera.tan_half_fov_y;
+    const float source_tan_x = source_tan_y * aspect_ratio;
+    const float target_tan_y = request.target_camera.tan_half_fov_y;
+    const float target_tan_x = target_tan_y * aspect_ratio;
+    simd::store_float4(
+        present_constants->viewport_and_flags,
+        static_cast<float>(viewport_width_),
+        static_cast<float>(viewport_height_),
+        static_cast<float>(static_cast<std::int32_t>(request.diagnostic_view)),
+        request.overlay_enabled ? 1.0f : 0.0f);
+    simd::store_float4(
+        present_constants->warp_flags_and_aspect,
+        request.warp_enabled ? 1.0f : 0.0f,
+        aspect_ratio,
+        request.flash_indicator_enabled ? 1.0f : 0.0f,
+        request.flash_triggered ? 1.0f : 0.0f);
+    write_float4(present_constants->source_camera_position_tan_y, request.source_snapshot.camera.position, source_tan_y);
+    write_float4(present_constants->source_camera_right_unused, request.source_snapshot.camera.right, rcp_width);
+    write_float4(present_constants->source_camera_up_unused, request.source_snapshot.camera.up, rcp_height);
+    write_float4(present_constants->source_camera_forward_unused, request.source_snapshot.camera.forward, source_tan_x);
+    write_float4(present_constants->target_camera_position_tan_y, request.target_camera.position, target_tan_y);
+    write_float4(present_constants->target_camera_right_unused, request.target_camera.right, 1.0f / target_tan_x);
+    write_float4(present_constants->target_camera_up_unused, request.target_camera.up, 1.0f / target_tan_y);
+    write_float4(present_constants->target_camera_forward_unused, request.target_camera.forward, target_tan_x);
 
-    if (request.overlay_enabled) {
-        const HudConstantsData hud_constants = build_hud_constants(request.hud, viewport_width_, viewport_height_);
-        std::memcpy(mapped_hud_constants_ + hud_offset, &hud_constants, sizeof(hud_constants));
+    if (request.overlay_enabled && request.hud) {
+        auto* hud_destination = reinterpret_cast<HudConstantsData*>(mapped_hud_constants_ + hud_offset);
+        write_hud_constants_simd(hud_destination, *request.hud, viewport_width_, viewport_height_);
     }
 
     check(command_allocators_[buffer_index]->Reset(), "Reset command allocator");
@@ -438,11 +437,13 @@ FrameExecutionMetrics Renderer::render_and_present(const FrameRenderRequest& req
         command_list_->EndQuery(timestamp_query_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, query_base + 1);
     }
 
-    const auto stats_to_copy_dest = transition_barrier(reprojection_stats_uav_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST);
-    command_list_->ResourceBarrier(1, &stats_to_copy_dest);
-    command_list_->CopyBufferRegion(reprojection_stats_uav_.Get(), 0, reprojection_stats_zero_upload_.Get(), 0, sizeof(std::uint32_t));
-    const auto stats_to_uav = transition_barrier(reprojection_stats_uav_.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    command_list_->ResourceBarrier(1, &stats_to_uav);
+    if (request.warp_enabled) {
+        const auto stats_to_copy_dest = transition_barrier(reprojection_stats_uav_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST);
+        command_list_->ResourceBarrier(1, &stats_to_copy_dest);
+        command_list_->CopyBufferRegion(reprojection_stats_uav_.Get(), 0, reprojection_stats_zero_upload_.Get(), 0, sizeof(std::uint32_t));
+        const auto stats_to_uav = transition_barrier(reprojection_stats_uav_.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        command_list_->ResourceBarrier(1, &stats_to_uav);
+    }
 
     if (timestamp_query_heap_) {
         command_list_->EndQuery(timestamp_query_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, query_base + 2);
@@ -479,16 +480,18 @@ FrameExecutionMetrics Renderer::render_and_present(const FrameRenderRequest& req
             static_cast<UINT64>(query_base) * sizeof(std::uint64_t));
     }
 
-    const auto stats_to_copy_source = transition_barrier(reprojection_stats_uav_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
-    command_list_->ResourceBarrier(1, &stats_to_copy_source);
-    command_list_->CopyBufferRegion(
-        reprojection_stats_readback_.Get(),
-        static_cast<UINT64>(buffer_index) * sizeof(std::uint32_t),
-        reprojection_stats_uav_.Get(),
-        0,
-        sizeof(std::uint32_t));
-    const auto stats_restore_uav = transition_barrier(reprojection_stats_uav_.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    command_list_->ResourceBarrier(1, &stats_restore_uav);
+    if (request.warp_enabled) {
+        const auto stats_to_copy_source = transition_barrier(reprojection_stats_uav_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        command_list_->ResourceBarrier(1, &stats_to_copy_source);
+        command_list_->CopyBufferRegion(
+            reprojection_stats_readback_.Get(),
+            static_cast<UINT64>(buffer_index) * sizeof(std::uint32_t),
+            reprojection_stats_uav_.Get(),
+            0,
+            sizeof(std::uint32_t));
+        const auto stats_restore_uav = transition_barrier(reprojection_stats_uav_.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        command_list_->ResourceBarrier(1, &stats_restore_uav);
+    }
 
     check(command_list_->Close(), "Close command list");
     ID3D12CommandList* command_lists[] = {command_list_.Get()};

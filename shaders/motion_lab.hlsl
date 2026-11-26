@@ -1,10 +1,10 @@
 cbuffer SceneConstants : register(b0) {
     float4 camera_position_tan_y;
-    float4 camera_right_aspect;
-    float4 camera_up_width;
-    float4 camera_forward_height;
-    float4 previous_camera_position_tan_y;
-    float4 previous_camera_right_aspect;
+    float4 camera_right_tan_x;
+    float4 camera_up_rcp_width;
+    float4 camera_forward_rcp_height;
+    float4 previous_camera_position_rcp_tan_y;
+    float4 previous_camera_right_rcp_tan_x;
     float4 previous_camera_up_cut;
     float4 previous_camera_forward_unused;
     float4 ball_center_stress;
@@ -41,25 +41,34 @@ float2 scene_distance(float3 world_position, float3 ball_center) {
     if (ceiling_distance < nearest.x) nearest = float2(ceiling_distance, 2.0);
     float end_wall_distance = 28.0 - world_position.z;
     if (end_wall_distance < nearest.x) nearest = float2(end_wall_distance, 3.0);
-    for (int pillar_index = 0; pillar_index < 5; ++pillar_index) {
-        float pillar_z = 7.0 + pillar_index * 3.1;
-        float pillar_x = (pillar_index % 2 == 0) ? -1.35 : 1.35;
-        float pillar_distance = box_distance(world_position - float3(pillar_x, 1.6, pillar_z), float3(0.20, 1.6, 0.20));
-        if (pillar_distance < nearest.x) nearest = float2(pillar_distance, 4.0);
+
+    float3 pillar_bounds_offset = abs(world_position - float3(0.0, 1.6, 13.2)) - float3(1.60, 1.65, 6.50);
+    float pillar_bounds_distance = length(max(pillar_bounds_offset, 0.0));
+    if (pillar_bounds_distance < nearest.x) {
+        [unroll]
+        for (int pillar_index = 0; pillar_index < 5; ++pillar_index) {
+            float pillar_z = 7.0 + pillar_index * 3.1;
+            float pillar_x = (pillar_index % 2 == 0) ? -1.35 : 1.35;
+            float pillar_distance = box_distance(world_position - float3(pillar_x, 1.6, pillar_z), float3(0.20, 1.6, 0.20));
+            if (pillar_distance < nearest.x) nearest = float2(pillar_distance, 4.0);
+        }
     }
+
     float ball_distance = length(world_position - ball_center) - 0.65;
     if (ball_distance < nearest.x) nearest = float2(ball_distance, 5.0);
+
     float rail_distance = box_distance(world_position - float3(2.6, 1.2, 18.0), float3(0.025, 1.2, 4.0));
     if (rail_distance < nearest.x) nearest = float2(rail_distance, 6.0);
     return nearest;
 }
 
 float3 surface_normal(float3 world_position, float3 ball_center) {
-    float epsilon = 0.003;
-    return normalize(float3(
-        scene_distance(world_position + float3(epsilon, 0.0, 0.0), ball_center).x - scene_distance(world_position - float3(epsilon, 0.0, 0.0), ball_center).x,
-        scene_distance(world_position + float3(0.0, epsilon, 0.0), ball_center).x - scene_distance(world_position - float3(0.0, epsilon, 0.0), ball_center).x,
-        scene_distance(world_position + float3(0.0, 0.0, epsilon), ball_center).x - scene_distance(world_position - float3(0.0, 0.0, epsilon), ball_center).x));
+    const float2 offset = float2(0.003, -0.003);
+    return normalize(
+        offset.xyy * scene_distance(world_position + offset.xyy, ball_center).x +
+        offset.yyx * scene_distance(world_position + offset.yyx, ball_center).x +
+        offset.yxy * scene_distance(world_position + offset.yxy, ball_center).x +
+        offset.xxx * scene_distance(world_position + offset.xxx, ball_center).x);
 }
 
 float3 surface_color(float3 world_position, float material, float3 ball_center) {
@@ -101,37 +110,33 @@ float synthetic_stress_modulation(float3 world_position, int stress_level) {
 }
 
 float2 project_to_previous_uv(float3 previous_world_position) {
-    float3 relative = previous_world_position - previous_camera_position_tan_y.xyz;
-    float view_x = dot(relative, previous_camera_right_aspect.xyz);
+    float3 relative = previous_world_position - previous_camera_position_rcp_tan_y.xyz;
+    float view_x = dot(relative, previous_camera_right_rcp_tan_x.xyz);
     float view_y = dot(relative, previous_camera_up_cut.xyz);
-    float view_z = dot(relative, previous_camera_forward_unused.xyz);
-    float safe_z = max(view_z, 0.001);
-    float tan_half_y = previous_camera_position_tan_y.w;
-    float tan_half_x = tan_half_y * previous_camera_right_aspect.w;
-    float ndc_x = view_x / (safe_z * tan_half_x);
-    float ndc_y = view_y / (safe_z * tan_half_y);
+    float inv_z = rcp(max(dot(relative, previous_camera_forward_unused.xyz), 0.001));
+    float ndc_x = view_x * inv_z * previous_camera_right_rcp_tan_x.w;
+    float ndc_y = view_y * inv_z * previous_camera_position_rcp_tan_y.w;
     return float2(ndc_x * 0.5 + 0.5, 0.5 - ndc_y * 0.5);
 }
 
 SceneOutput pixel_main(VertexOutput input) {
-    float viewport_width = camera_up_width.w;
-    float viewport_height = camera_forward_height.w;
-    float2 current_uv = input.position.xy / float2(viewport_width, viewport_height);
+    float2 current_uv = input.position.xy * float2(camera_up_rcp_width.w, camera_forward_rcp_height.w);
     float2 ndc = float2(current_uv.x * 2.0 - 1.0, 1.0 - current_uv.y * 2.0);
-    float tan_half_y = camera_position_tan_y.w;
-    float tan_half_x = tan_half_y * camera_right_aspect.w;
     float3 camera_position = camera_position_tan_y.xyz;
-    float3 camera_right = camera_right_aspect.xyz;
-    float3 camera_up = camera_up_width.xyz;
-    float3 camera_forward = camera_forward_height.xyz;
-    float3 direction = normalize(camera_right * (ndc.x * tan_half_x) + camera_up * (ndc.y * tan_half_y) + camera_forward);
+    float3 camera_right = camera_right_tan_x.xyz;
+    float3 camera_up = camera_up_rcp_width.xyz;
+    float3 camera_forward = camera_forward_rcp_height.xyz;
+    float3 direction = normalize(
+        camera_right * (ndc.x * camera_right_tan_x.w)
+        + camera_up * (ndc.y * camera_position_tan_y.w)
+        + camera_forward);
     float3 ball_center = ball_center_stress.xyz;
 
     float distance_travelled = 0.0;
     float material = 0.0;
     float3 world_position = camera_position;
     [loop]
-    for (int step_index = 0; step_index < 100; ++step_index) {
+    for (int step_index = 0; step_index < 88; ++step_index) {
         world_position = camera_position + direction * distance_travelled;
         float2 distance_sample = scene_distance(world_position, ball_center);
         if (distance_sample.x < 0.003) {
@@ -139,7 +144,7 @@ SceneOutput pixel_main(VertexOutput input) {
             break;
         }
         distance_travelled += distance_sample.x;
-        if (distance_travelled > 45.0) break;
+        if (distance_travelled > 36.0) break;
     }
 
     float3 color = float3(0.035, 0.055, 0.07);
@@ -147,9 +152,9 @@ SceneOutput pixel_main(VertexOutput input) {
     float2 motion_vector = float2(0.0, 0.0);
     if (material > 0.0) {
         float3 normal = surface_normal(world_position, ball_center);
-        float light = 0.35 + 0.65 * saturate(dot(normal, normalize(float3(-0.4, 0.8, -0.5))));
+        float light = 0.35 + 0.65 * saturate(dot(normal, float3(-0.392232, 0.784465, -0.490290)));
         color = surface_color(world_position, material, ball_center) * light;
-        color = lerp(color, float3(0.12, 0.17, 0.20), saturate(distance_travelled / 55.0));
+        color = lerp(color, float3(0.12, 0.17, 0.20), saturate(distance_travelled * (1.0 / 55.0)));
         linear_view_depth = max(dot(world_position - camera_position, camera_forward), 0.01);
         if (previous_camera_up_cut.w < 0.5) {
             float3 previous_world_position = world_position;

@@ -345,18 +345,10 @@ void format_hud_lines(
         ? (100.0 * static_cast<double>(last_invalid_pixels) / static_cast<double>(last_total_pixels))
         : 0.0;
 
-    char line_buffer[80]{};
-    std::snprintf(line_buffer, sizeof(line_buffer), "FPS %5.1f  FT %5.2f MS  %s /%d  PACE %s", fps, frame_ms, short_mode_label(mode), source_divider, short_pacer_label(pacer_mode));
-    hud.lines[0] = line_buffer;
-
-    std::snprintf(line_buffer, sizeof(line_buffer), "GPU SCN %4.2f  WRP %4.2f  IN-PR %4.2f  MS", scene_ms, warp_ms, input_ms);
-    hud.lines[1] = line_buffer;
-
-    std::snprintf(line_buffer, sizeof(line_buffer), "HOLE %4.2f%%  MISS %lld  PCL %s  STR %d", holes_pct, static_cast<long long>(missed_deadlines), pcl_listener_active ? "LIVE" : "RDY", stress_level);
-    hud.lines[2] = line_buffer;
-
-    std::snprintf(line_buffer, sizeof(line_buffer), "%s  PATH %s  1-3 MODE  L PACE  H HOLE", mouse_look_locked ? "RMB/ESC UNLK" : "LMB/RMB LOOK", short_path_label(path));
-    hud.lines[3] = line_buffer;
+    std::snprintf(hud.lines[0], sizeof(hud.lines[0]), "FPS %5.1f  FT %5.2f MS  %s /%d  PACE %s", fps, frame_ms, short_mode_label(mode), source_divider, short_pacer_label(pacer_mode));
+    std::snprintf(hud.lines[1], sizeof(hud.lines[1]), "GPU SCN %4.2f  WRP %4.2f  IN-PR %4.2f  MS", scene_ms, warp_ms, input_ms);
+    std::snprintf(hud.lines[2], sizeof(hud.lines[2]), "HOLE %4.2f%%  MISS %lld  PCL %s  STR %d", holes_pct, static_cast<long long>(missed_deadlines), pcl_listener_active ? "LIVE" : "RDY", stress_level);
+    std::snprintf(hud.lines[3], sizeof(hud.lines[3]), "%s  PATH %s  1-3 MODE  L PACE  H HOLE", mouse_look_locked ? "RMB/ESC UNLK" : "LMB/RMB LOOK", short_path_label(path));
 }
 
 LRESULT CALLBACK window_procedure(HWND window, UINT message, WPARAM message_parameter, LPARAM message_data) {
@@ -854,7 +846,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                     frame_id_u64,
                     latest_source_snapshot,
                     target_camera,
-                    hud_state,
+                    &hud_state,
                     diagnostic_view,
                     stress_level,
                     overlay_enabled,

@@ -1,5 +1,19 @@
 # Development log
 
+## v0.10.0 — ARM64 NEON SIMD hot paths and HLSL shader optimization pass
+
+- Added `src/simd_math.h` providing native ARM64 NEON (`<arm64_neon.h>`, reported as `simd_backend: "arm64_neon"` in CLI `capabilities`) with portable scalar fallback:
+  - 128-bit NEON streaming stores (`vst1q_f32`, `vst1q_u32`, unrolled 4x for 64-byte write-combining lines) writing `SceneConstants`, `PresentConstants`, and `HudConstants` directly into persistently mapped D3D12 upload heaps without intermediate stack copies.
+  - NEON-vectorized camera position advance + clamping (`vaddq_f32`, `vminq_f32`, `vmaxq_f32`) in `src/simulation.h` and NEON `float64x2_t` min/max/mean reductions in `src/cli.cpp`.
+- Eliminated per-frame heap allocations and 2 KB struct copies by replacing `std::array<std::string, 4>` in `HudOverlayState` with fixed `char[4][64]` buffers passed by pointer, and skipped `reprojection_stats` UAV clear/copy barriers on non-warped frames.
+- Optimized `shaders/motion_lab.hlsl` and `shaders/present.hlsl` with `D3DCOMPILE_OPTIMIZATION_LEVEL3`: added AABB culling around the 5-pillar cluster in the raymarch inner loop, replaced 6-tap central-difference normals with 4-tap tetrahedron gradients, tightened raymarch max distance to 36 m, and moved viewport reciprocals and horizontal FOV tangents to CPU constant buffers.
+- Verified zero-warning ARM64 Release and Debug builds and live Release measurements on `NVIDIA RTX Spark N1X` (`1264x681`, `120 Hz` DWM deadline lock):
+  - `scene_gpu_us` (`full_render`, `stress=0`) dropped from 660 µs (`v0.9.0`) to **154 µs** (~4.3x GPU speedup).
+  - `present_gpu_us` (`full_render`) dropped from 55 µs to **28 µs** (~2x speedup).
+  - `render_submit_cpu_us` (`reproject /2`) dropped from 259–276 µs to **179 µs** (min 72 µs); `sim_cpu_us` median 2 µs.
+  - `reproject /2` (`occlusion_sweep`, `stress=0`, 90 frames) held 0 missed deadlines with `cpu_present_interval_us` median **8,333 µs**, p95 **8,446 µs**, max **8,587 µs**.
+- Limitations: physical display scanout timing (`MsBetweenDisplayChange`) and elevated FrameView/PresentMon PCL capture remain to be run from an elevated desktop session; VRS Tier 2 rendering, async multi-queue scene/warp decoupling, and Streamline/DLSS-G integration remain to be built.
+
 ## v0.9.0 — DWM phase-locked high-resolution deadline frame pacer
 
 - Added `src/frame_pacer.h` implementing a hybrid high-resolution waitable timer (`CREATE_WAITABLE_TIMER_HIGH_RESOLUTION`) + QPC spin-wait deadline pacer locked to `DwmGetCompositionTimingInfo` (`qpcRefreshPeriod` and `qpcVBlank` phase, linked via `dwmapi`), supporting `deadline` (default), `vsync_only`, and `unlocked` modes plus configurable `target_fps` (`0` = exact display refresh or `30..500`).

@@ -17,7 +17,7 @@
 
 namespace frame_warp_lab {
 
-struct HudGraphSample {
+struct alignas(16) HudGraphSample {
     float present_interval_ms;
     float gpu_total_ms;
     float frame_kind;
@@ -25,11 +25,12 @@ struct HudGraphSample {
 };
 
 struct HudOverlayState {
-    std::array<std::string, 4> lines;
+    char lines[4][64];
     std::array<HudGraphSample, hud_graph_sample_count> samples;
     std::uint32_t write_head;
     float max_graph_ms;
     float target_frame_ms;
+    std::uint32_t alignment_padding;
 };
 
 struct FrameExecutionMetrics {
@@ -51,7 +52,7 @@ struct FrameRenderRequest {
     std::uint64_t display_frame_id;
     SceneSnapshot source_snapshot;
     CameraBasis target_camera;
-    HudOverlayState hud;
+    const HudOverlayState* hud;
     DiagnosticView diagnostic_view;
     std::int32_t stress_level;
     bool overlay_enabled;

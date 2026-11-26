@@ -1,6 +1,7 @@
 #pragma once
 
 #include "runtime_state.h"
+#include "simd_math.h"
 
 #include <algorithm>
 #include <cmath>
@@ -160,9 +161,19 @@ public:
                 1.15f);
             const CameraBasis basis = make_camera_basis(manual_position_, manual_yaw_, manual_pitch_, 1.04719755f);
             const float move_speed = 4.2f * step;
-            manual_position_.x = std::clamp(manual_position_.x + (basis.forward.x * input.forward_axis + basis.right.x * input.right_axis) * move_speed, -3.5f, 3.5f);
-            manual_position_.y = std::clamp(manual_position_.y + input.vertical_axis * move_speed, 0.45f, 3.15f);
-            manual_position_.z = std::clamp(manual_position_.z + (basis.forward.z * input.forward_axis + basis.right.z * input.right_axis) * move_speed, 0.4f, 24.5f);
+            simd::advance_clamped_position(
+                manual_position_.x,
+                manual_position_.y,
+                manual_position_.z,
+                (basis.forward.x * input.forward_axis + basis.right.x * input.right_axis) * move_speed,
+                input.vertical_axis * move_speed,
+                (basis.forward.z * input.forward_axis + basis.right.z * input.right_axis) * move_speed,
+                -3.5f,
+                0.45f,
+                0.4f,
+                3.5f,
+                3.15f,
+                24.5f);
         }
     }
 
