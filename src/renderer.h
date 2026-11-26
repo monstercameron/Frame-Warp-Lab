@@ -1,5 +1,6 @@
 #pragma once
 
+#include "frame_pacer.h"
 #include "latency_monitor.h"
 #include "runtime_state.h"
 #include "simulation.h"
@@ -10,6 +11,7 @@
 #include <wrl/client.h>
 
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <string>
 
@@ -31,6 +33,7 @@ struct HudOverlayState {
 };
 
 struct FrameExecutionMetrics {
+    std::chrono::steady_clock::time_point present_call_time;
     std::int64_t completed_scene_gpu_us;
     std::int64_t completed_present_gpu_us;
     std::int64_t render_submit_cpu_us;
@@ -40,6 +43,7 @@ struct FrameExecutionMetrics {
     bool completed_slot_valid;
     bool completed_slot_source_rendered;
     bool completed_slot_warped;
+    bool missed_deadline;
     bool gpu_timing_available;
 };
 
@@ -67,7 +71,7 @@ public:
     Renderer& operator=(const Renderer&) = delete;
 
     void wait_for_frame_slot();
-    FrameExecutionMetrics render_and_present(const FrameRenderRequest& request, LatencyMonitor& latency_monitor);
+    FrameExecutionMetrics render_and_present(const FrameRenderRequest& request, LatencyMonitor& latency_monitor, FramePacer& pacer);
     void resize(UINT width, UINT height);
     void flush();
     bool gpu_timing_available() const { return gpu_timestamp_frequency_ > 0; }

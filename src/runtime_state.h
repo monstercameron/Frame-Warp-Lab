@@ -10,12 +10,13 @@
 namespace frame_warp_lab {
 
 inline constexpr wchar_t window_class_name[] = L"FrameWarpLabWindow";
-inline constexpr std::uint32_t runtime_state_version = 8;
+inline constexpr std::uint32_t runtime_state_version = 9;
 inline constexpr std::size_t runtime_event_capacity = 64;
 inline constexpr std::size_t runtime_frame_trace_capacity = 256;
 inline constexpr std::size_t hud_graph_sample_count = 128;
 inline constexpr std::int32_t max_stress_level = 64;
 inline constexpr std::int32_t max_source_divider = 8;
+inline constexpr std::int32_t max_target_fps = 500;
 inline constexpr std::int64_t max_reprojection_source_age_us = 250000;
 inline constexpr UINT control_message = WM_APP + 1;
 
@@ -31,6 +32,14 @@ enum class ControlCommand : WPARAM {
     set_source_divider = 9,
     set_vsync_enabled = 10,
     set_flash_indicator = 11,
+    set_pacer_mode = 12,
+    set_target_fps = 13,
+};
+
+enum class PacerMode : std::int32_t {
+    deadline = 0,
+    vsync_only = 1,
+    unlocked = 2,
 };
 
 enum class PresentationMode : std::int32_t {
@@ -110,6 +119,7 @@ struct RuntimeFrameSample {
     std::int32_t source_divider;
     std::int32_t source_rendered;
     std::int32_t gpu_slot_warped;
+    std::int32_t missed_deadline;
     std::int32_t discontinuity;
 };
 
@@ -127,6 +137,8 @@ struct RuntimeState {
     std::int64_t repeated_frame_count;
     std::int64_t warped_frame_count;
     std::int64_t fallback_frame_count;
+    std::int64_t missed_deadline_count;
+    std::int64_t target_period_us;
     std::int64_t last_present_interval_us;
     std::int64_t smoothed_present_interval_us;
     std::int64_t last_source_age_us;
@@ -141,6 +153,8 @@ struct RuntimeState {
     std::uint32_t last_invalid_pixel_count;
     std::uint32_t last_total_pixel_count;
     std::int32_t presentation_mode;
+    std::int32_t pacer_mode;
+    std::int32_t target_fps;
     std::int32_t source_divider;
     std::int32_t vsync_enabled;
     std::int32_t allow_tearing_enabled;
@@ -177,6 +191,15 @@ inline const char* runtime_event_name(std::int32_t event_type) {
         case RuntimeEventType::scene_reset: return "scene_reset";
         case RuntimeEventType::config_updated: return "config_updated";
         case RuntimeEventType::reprojection_fallback: return "reprojection_fallback";
+        default: return "unknown";
+    }
+}
+
+inline const char* pacer_mode_name(std::int32_t mode) {
+    switch (static_cast<PacerMode>(mode)) {
+        case PacerMode::deadline: return "deadline";
+        case PacerMode::vsync_only: return "vsync_only";
+        case PacerMode::unlocked: return "unlocked";
         default: return "unknown";
     }
 }

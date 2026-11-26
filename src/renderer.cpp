@@ -257,7 +257,7 @@ Renderer::Renderer(HWND window)
     check(factory_->CreateSwapChainForHwnd(queue_.Get(), window, &swap_chain_description, nullptr, nullptr, &swap_chain), "Create swap chain");
     check(swap_chain.As(&swap_chain_), "Query swap chain");
     check(factory_->MakeWindowAssociation(window, DXGI_MWA_NO_ALT_ENTER), "Configure window association");
-    check(swap_chain_->SetMaximumFrameLatency(1), "Set maximum frame latency");
+    check(swap_chain_->SetMaximumFrameLatency(swap_chain_buffer_count), "Set maximum frame latency");
     frame_latency_waitable_object_ = swap_chain_->GetFrameLatencyWaitableObject();
 
     D3D12_DESCRIPTOR_HEAP_DESC rtv_heap_description{};
@@ -313,8 +313,8 @@ void Renderer::wait_for_frame_slot() {
     has_acquired_slot_ = true;
 }
 
-FrameExecutionMetrics Renderer::render_and_present(const FrameRenderRequest& request, LatencyMonitor& latency_monitor) {
-    FrameExecutionMetrics metrics{-1, -1, 0, 0, 0, 0, false, false, false, gpu_timing_available()};
+FrameExecutionMetrics Renderer::render_and_present(const FrameRenderRequest& request, LatencyMonitor& latency_monitor, FramePacer& pacer) {
+    FrameExecutionMetrics metrics{std::chrono::steady_clock::now(), -1, -1, 0, 0, 0, 0, false, false, false, false, gpu_timing_available()};
     if (viewport_width_ == 0 || viewport_height_ == 0) {
         return metrics;
     }
@@ -500,7 +500,10 @@ FrameExecutionMetrics Renderer::render_and_present(const FrameRenderRequest& req
         request.display_frame_id);
     metrics.render_submit_cpu_us = std::chrono::duration_cast<std::chrono::microseconds>(submit_end_time - submit_begin_time).count();
 
+    metrics.missed_deadline = pacer.wait_for_present_deadline();
+
     const auto present_begin_time = std::chrono::steady_clock::now();
+    metrics.present_call_time = present_begin_time;
     latency_monitor.emit_marker(
         request.warp_enabled ? LatencyMarker::late_warp_present_start : LatencyMarker::present_start,
         request.display_frame_id);

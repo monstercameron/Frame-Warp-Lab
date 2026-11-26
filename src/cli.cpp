@@ -218,6 +218,8 @@ int print_status(const WindowInstance& instance) {
     const std::int64_t repeated_frames = std::atomic_ref<std::int64_t>(state->repeated_frame_count).load(std::memory_order_acquire);
     const std::int64_t warped_frames = std::atomic_ref<std::int64_t>(state->warped_frame_count).load(std::memory_order_acquire);
     const std::int64_t fallback_frames = std::atomic_ref<std::int64_t>(state->fallback_frame_count).load(std::memory_order_acquire);
+    const std::int64_t missed_deadlines = std::atomic_ref<std::int64_t>(state->missed_deadline_count).load(std::memory_order_acquire);
+    const std::int64_t target_period_us = std::atomic_ref<std::int64_t>(state->target_period_us).load(std::memory_order_acquire);
     const std::int64_t present_interval_us = std::atomic_ref<std::int64_t>(state->last_present_interval_us).load(std::memory_order_acquire);
     const std::int64_t smoothed_interval_us = std::atomic_ref<std::int64_t>(state->smoothed_present_interval_us).load(std::memory_order_acquire);
     const std::int64_t source_age_us = std::atomic_ref<std::int64_t>(state->last_source_age_us).load(std::memory_order_acquire);
@@ -232,6 +234,8 @@ int print_status(const WindowInstance& instance) {
     const std::uint32_t invalid_pixels = std::atomic_ref<std::uint32_t>(state->last_invalid_pixel_count).load(std::memory_order_acquire);
     const std::uint32_t total_pixels = std::atomic_ref<std::uint32_t>(state->last_total_pixel_count).load(std::memory_order_acquire);
     const std::int32_t presentation_mode = std::atomic_ref<std::int32_t>(state->presentation_mode).load(std::memory_order_acquire);
+    const std::int32_t pacer_mode = std::atomic_ref<std::int32_t>(state->pacer_mode).load(std::memory_order_acquire);
+    const std::int32_t target_fps = std::atomic_ref<std::int32_t>(state->target_fps).load(std::memory_order_acquire);
     const std::int32_t source_divider = std::atomic_ref<std::int32_t>(state->source_divider).load(std::memory_order_acquire);
     const std::int32_t vsync_enabled = std::atomic_ref<std::int32_t>(state->vsync_enabled).load(std::memory_order_acquire);
     const std::int32_t allow_tearing_enabled = std::atomic_ref<std::int32_t>(state->allow_tearing_enabled).load(std::memory_order_acquire);
@@ -251,7 +255,7 @@ int print_status(const WindowInstance& instance) {
 
     RECT client_rectangle{};
     const bool has_client_size = GetClientRect(instance.window, &client_rectangle) != 0;
-    std::cout << "{\"ok\":true,\"schema_version\":5,\"process_id\":" << instance.process_id
+    std::cout << "{\"ok\":true,\"schema_version\":6,\"process_id\":" << instance.process_id
               << ",\"running\":" << (running ? "true" : "false")
               << ",\"present_calls_completed\":" << present_count
               << ",\"display_frame_id\":" << display_frame_id
@@ -266,12 +270,16 @@ int print_status(const WindowInstance& instance) {
     std::cout << ",\"display\":";
     print_display(instance.window);
     std::cout << ",\"presentation\":{\"mode\":\"" << frame_warp_lab::presentation_mode_name(presentation_mode)
-              << "\",\"source_divider\":" << source_divider
+              << "\",\"pacer_mode\":\"" << frame_warp_lab::pacer_mode_name(pacer_mode)
+              << "\",\"target_fps\":" << target_fps
+              << ",\"target_period_us\":" << target_period_us
+              << ",\"missed_deadlines\":" << missed_deadlines
+              << ",\"source_divider\":" << source_divider
               << ",\"vsync_enabled\":" << (vsync_enabled ? "true" : "false")
               << ",\"allow_tearing_enabled\":" << (allow_tearing_enabled ? "true" : "false")
               << ",\"waitable_swap_chain\":" << (waitable_swap_chain ? "true" : "false")
               << ",\"wait_before_input_sample\":true"
-              << ",\"max_frame_latency\":1,\"displayed_frame_timing\":null}"
+              << ",\"max_frame_latency\":2,\"displayed_frame_timing\":null}"
               << ",\"timing\":{\"cpu_present_interval_us\":" << present_interval_us
               << ",\"smoothed_present_interval_us\":" << smoothed_interval_us
               << ",\"smoothed_present_fps\":" << std::fixed << std::setprecision(2) << smoothed_fps
@@ -319,7 +327,7 @@ int print_events(const WindowInstance& instance) {
     const std::int32_t event_count = std::atomic_ref<std::int32_t>(state->event_count).load(std::memory_order_acquire);
     const std::int32_t first_sequence = event_count > static_cast<std::int32_t>(frame_warp_lab::runtime_event_capacity)
         ? event_count - static_cast<std::int32_t>(frame_warp_lab::runtime_event_capacity) + 1 : 1;
-    std::cout << "{\"ok\":true,\"schema_version\":5,\"process_id\":" << instance.process_id
+    std::cout << "{\"ok\":true,\"schema_version\":6,\"process_id\":" << instance.process_id
               << ",\"capacity\":" << frame_warp_lab::runtime_event_capacity << ",\"total_events\":" << event_count << ",\"events\":[";
     bool first_event = true;
     for (std::int32_t sequence = first_sequence; sequence <= event_count; ++sequence) {
@@ -372,6 +380,7 @@ int print_trace(const WindowInstance& instance, std::size_t max_samples, bool in
     std::int64_t repeated_count = 0;
     std::int64_t warped_count = 0;
     std::int64_t fallback_count = 0;
+    std::int64_t missed_deadline_count = 0;
 
     for (std::int64_t sequence = first_sequence; sequence <= total_samples; ++sequence) {
         if (sequence <= 0) continue;
@@ -399,9 +408,10 @@ int print_trace(const WindowInstance& instance, std::size_t max_samples, bool in
             case frame_warp_lab::FrameKind::warped: ++warped_count; break;
             case frame_warp_lab::FrameKind::fallback: ++fallback_count; break;
         }
+        if (copy.missed_deadline) ++missed_deadline_count;
     }
 
-    std::cout << "{\"ok\":true,\"schema_version\":5,\"process_id\":" << instance.process_id
+    std::cout << "{\"ok\":true,\"schema_version\":6,\"process_id\":" << instance.process_id
               << ",\"capacity\":" << frame_warp_lab::runtime_frame_trace_capacity
               << ",\"total_frames_recorded\":" << total_samples
               << ",\"sample_count\":" << captured.size()
@@ -410,7 +420,8 @@ int print_trace(const WindowInstance& instance, std::size_t max_samples, bool in
               << ",\"summary\":{\"frame_kinds\":{\"rendered\":" << rendered_count
               << ",\"repeated\":" << repeated_count
               << ",\"warped\":" << warped_count
-              << ",\"fallback\":" << fallback_count << "}"
+              << ",\"fallback\":" << fallback_count
+              << "},\"missed_deadlines\":" << missed_deadline_count
               << ",\"cpu_present_interval_us\":";
     print_metric_summary(present_intervals);
     std::cout << ",\"cpu_source_age_us\":";
@@ -522,8 +533,21 @@ int apply_setting(const WindowInstance& instance, const std::wstring& key, const
         if (value == L"on" || value == L"1" || value == L"true") parameter = 1;
         else if (value == L"off" || value == L"0" || value == L"false") parameter = 0;
         else return fail("invalid_value", "Expected flash in {on, off}");
+    } else if (key == L"pacer") {
+        command = frame_warp_lab::ControlCommand::set_pacer_mode;
+        if (value == L"deadline") parameter = static_cast<LPARAM>(frame_warp_lab::PacerMode::deadline);
+        else if (value == L"vsync_only") parameter = static_cast<LPARAM>(frame_warp_lab::PacerMode::vsync_only);
+        else if (value == L"unlocked") parameter = static_cast<LPARAM>(frame_warp_lab::PacerMode::unlocked);
+        else return fail("invalid_value", "Expected pacer in {deadline, vsync_only, unlocked}");
+    } else if (key == L"target_fps") {
+        unsigned long parsed = 0;
+        if (!parse_unsigned_long(value.c_str(), parsed) || parsed > static_cast<unsigned long>(frame_warp_lab::max_target_fps) || (parsed > 0 && parsed < 30)) {
+            return fail("invalid_value", "Expected target_fps of 0 (display refresh) or integer in [30, 500]");
+        }
+        command = frame_warp_lab::ControlCommand::set_target_fps;
+        parameter = static_cast<LPARAM>(parsed);
     } else {
-        return fail("unknown_setting", "Supported settings are: mode, divider, vsync, view, path, stress, overlay, flash");
+        return fail("unknown_setting", "Supported settings are: mode, pacer, target_fps, divider, vsync, view, path, stress, overlay, flash");
     }
 
     if (!PostMessageW(instance.window, frame_warp_lab::control_message, static_cast<WPARAM>(command), parameter)) {
@@ -625,7 +649,7 @@ int print_capabilities() {
 
 int wmain(int argument_count, wchar_t** arguments) {
     if (argument_count == 2 && std::wstring(arguments[1]) == L"help") {
-        std::cout << "{\"ok\":true,\"schema_version\":5,\"commands\":[\"help\",\"start\",\"instances\",\"status <pid>\",\"events <pid>\",\"trace <pid> [limit] [summary]\",\"set <pid> <key> <value>\",\"pause <pid>\",\"resume <pid>\",\"reset <pid>\",\"stop <pid>\",\"capabilities\"],\"settings\":{\"mode\":[\"full_render\",\"repeat\",\"reproject\"],\"divider\":\"1..8\",\"vsync\":[\"on\",\"off\"],\"view\":[\"final\",\"depth\",\"motion\",\"holes\"],\"path\":[\"corridor_sway\",\"fast_pan\",\"occlusion_sweep\",\"camera_cut\",\"manual\"],\"stress\":\"0..64\",\"overlay\":[\"on\",\"off\"],\"flash\":[\"on\",\"off\"]}}\n";
+        std::cout << "{\"ok\":true,\"schema_version\":6,\"commands\":[\"help\",\"start\",\"instances\",\"status <pid>\",\"events <pid>\",\"trace <pid> [limit] [summary]\",\"set <pid> <key> <value>\",\"pause <pid>\",\"resume <pid>\",\"reset <pid>\",\"stop <pid>\",\"capabilities\"],\"settings\":{\"mode\":[\"full_render\",\"repeat\",\"reproject\"],\"pacer\":[\"deadline\",\"vsync_only\",\"unlocked\"],\"target_fps\":\"0 or 30..500\",\"divider\":\"1..8\",\"vsync\":[\"on\",\"off\"],\"view\":[\"final\",\"depth\",\"motion\",\"holes\"],\"path\":[\"corridor_sway\",\"fast_pan\",\"occlusion_sweep\",\"camera_cut\",\"manual\"],\"stress\":\"0..64\",\"overlay\":[\"on\",\"off\"],\"flash\":[\"on\",\"off\"]}}\n";
         return 0;
     }
     if (argument_count == 2 && std::wstring(arguments[1]) == L"capabilities") return print_capabilities();

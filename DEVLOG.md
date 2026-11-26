@@ -1,5 +1,15 @@
 # Development log
 
+## v0.9.0 — DWM phase-locked high-resolution deadline frame pacer
+
+- Added `src/frame_pacer.h` implementing a hybrid high-resolution waitable timer (`CREATE_WAITABLE_TIMER_HIGH_RESOLUTION`) + QPC spin-wait deadline pacer locked to `DwmGetCompositionTimingInfo` (`qpcRefreshPeriod` and `qpcVBlank` phase, linked via `dwmapi`), supporting `deadline` (default), `vsync_only`, and `unlocked` modes plus configurable `target_fps` (`0` = exact display refresh or `30..500`).
+- Paced the `Present()` call entry (`MsBetweenPresents` semantics matching PresentMon/FrameView) after dispatching D3D12 command lists while keeping `wait_for_input_window()` before input sampling so Raw Input deltas are sampled just-in-time (~900 µs before `Present()`). Elevated the render thread to `THREAD_PRIORITY_HIGHEST`, bumped swap-chain latency limit to match the 2 back buffers (`max_frame_latency: 2`), and counted genuine deadline overruns in `missed_deadlines`.
+- Updated the 2D HUD (`max_graph_ms = 20.0`, `PACE LOCK/VSYNC/FREE`, `MISS <n>`), hotkey `L` to cycle pacer modes, and CLI (`schema_version: 6`) with `set <pid> pacer deadline|vsync_only|unlocked` and `set <pid> target_fps <0|30..500>`.
+- Verified both ARM64 Debug and Release builds with zero `/W4` warnings and live Release measurements on `NVIDIA RTX Spark N1X` (`1264x681`, `\\.\DISPLAY6` nominal 120 Hz):
+  - `120 Hz` DWM deadline lock (`reproject /2`, `stress=48`, 90 frames): `cpu_present_interval_us` median **8,333 µs**, p95 **8,334 µs** (+1 µs spread), `sim_cpu_us` median 3 µs, `scene_gpu_us` median 3,689 µs, `present_gpu_us` median 43 µs (1 missed deadline during an 11.1 ms GPU spike, honestly recorded).
+  - Fixed `144 Hz` deadline lock (`reproject /2`, `stress=0`, 90 frames): 0 missed deadlines, `cpu_present_interval_us` median **6,944 µs**, p95 **7,004 µs**.
+- Limitations: `cpu_present_interval_us` measures CPU `Present()` entry cadence (`MsBetweenPresents`), not physical display scanout (`MsBetweenDisplayChange`), which still requires elevated PresentMon/FrameView ETW capture.
+
 ## v0.8.0 — Low-latency wait-before-input loop, Win32 Raw Input, and NVIDIA PCL ETW telemetry
 
 - Reordered the render loop in `src/main.cpp` and `src/renderer.cpp` to split `Renderer::wait_for_frame_slot()` from `render_and_present()`, waiting on the waitable swap chain and GPU fence *before* pumping the latest input and constructing the camera pose.
