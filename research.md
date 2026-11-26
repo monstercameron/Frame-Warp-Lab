@@ -2,6 +2,10 @@
 
 Research started 26 November 2026. The aim is to investigate steady, responsive display updates even when a complete scene cannot be rendered at the monitor's refresh rate. This is a research hypothesis, not a validated renderer.
 
+The primary question is whether **frame generation and asynchronous warp/reprojection together** can deliver perfectly paced output at the target monitor's upper refresh bound, with minimal image degradation and low latency. The individual techniques and ordinary presentation are experimental controls; the combined path is the main result. Test against the monitor's verified upper refresh bound, rather than selecting a lower target to make the result look successful. Perfect pacing and quality are hypotheses to measure, not promises.
+
+For each run identify the monitor, output, resolution, highest supported refresh at that resolution and active refresh as exact rational values where available, plus VRR and presentation settings. The maximum refresh may depend on resolution, cable, display configuration and driver. Attempt to select and verify the relevant upper-bound mode; if it is unavailable, cannot be verified, or is not active, record the reason and do not label that run a valid upper-bound result. VRR runs must still target the same upper bound and report observed display intervals. Log changes in display configuration during a run and invalidate or segment affected results.
+
 ## The fundamental distinction
 
 A rendered scene frame, a generated image, and a display refresh are different things. Generating intermediate images can make motion look smoother, but it does not necessarily produce a new simulation update or reduce input latency. Perfect output on every refresh regardless of GPU strength cannot be guaranteed: rendering, synthesis, memory traffic, compositing, scheduling and display all consume finite time. A 60 Hz frame has 16.67 ms; 120 Hz has 8.33 ms; 144 Hz has 6.94 ms; and 240 Hz has 4.17 ms. Missing visual information and missed deadlines are real constraints.
@@ -56,9 +60,9 @@ Very low real-frame rates limit the freshness of simulation, object motion and n
 
 ### Controlled comparison
 
-Run the deterministic Motion Lab path in four initial modes: full-render baseline, lower-rate frame repetition, our late camera reprojection, and NVIDIA frame generation if supported. Match workload, camera path, resolution and display settings as closely as practical; benchmark modes independently because displaying multiple views can itself change GPU load. Where a high-rate reference is used for image comparisons, match scene state and timestamps. Record differences in configuration and feature availability.
+Run the deterministic Motion Lab path in five modes: full-render baseline, lower-rate frame repetition, late camera reprojection, NVIDIA frame generation if supported, and the **combined frame-generation plus asynchronous-warp path** when a valid integration is established. The first four isolate contributions and provide references for the main combined experiment. If NVIDIA's presentation ownership prevents a documented combined integration, explicitly report that blocker and investigate supported integration or another frame-generation implementation; never silently substitute a single technique. Match workload, camera path, resolution and upper-bound display settings as closely as practical; benchmark modes independently because displaying multiple views can itself change GPU load. Where a high-rate reference is used for image comparisons, match scene state and timestamps. Record differences in configuration and feature availability.
 
-For each run capture: actual displayed intervals and missed refreshes; real scene frame times; source age at display; CPU and GPU timings for render and warp; queue depth; the rate and reasons for fallback; and input-to-display latency where observable. Inspect disocclusion holes, motion errors, ghosting, transparency, UI and camera-cut behavior. A successful result is more even motion than repetition at the same source workload with acceptable image quality and latency, not merely a higher reported FPS. External instrumentation or a high-speed camera is needed for physical input-to-photon validation.
+For each run capture: the target refresh interval derived from the verified upper bound; actual displayed intervals and their distribution; missed, repeated and generated display updates where observable; real scene frame times; source age at display; CPU and GPU timings for render, generation and warp; queue depth; fallback rate and reasons; and input-to-display latency where observable. Inspect disocclusion holes, motion errors, ghosting, transparency, UI and camera-cut behavior against matched reference images. Report latency and image quality alongside pacing. Compare the combined mode with both single-technique controls at the same workload and display target. Define numerical quality and latency thresholds before claiming they are met; an average FPS equal to the target alone is not evidence of perfect pacing. External instrumentation or a high-speed camera is needed for physical input-to-photon validation.
 
 ## API decision
 
@@ -66,7 +70,7 @@ On 26 November 2026, we chose **Direct3D 12** for the first renderer. Vulkan rem
 
 ## First experiment
 
-Build a native Windows D3D12 test scene with a movable camera, static geometry, moving objects, foreground occluders and separate UI. First establish ordinary rendering and frame repetition, then add depth-based camera reprojection with a visible invalid-pixel mask. Inject controllable rendering load and test several source rates, resolutions and refresh rates, including overload.
+Build a native Windows D3D12 test scene with a movable camera, static geometry, moving objects, foreground occluders and separate UI. First establish ordinary rendering and frame repetition, then add depth-based camera reprojection with a visible invalid-pixel mask and pursue the combined generation-and-warp path. Inject controllable rendering load and test several source rates and resolutions, including overload; for every chosen resolution, use the verified upper refresh bound.
 
 Use deterministic camera paths and repeatable inputs. Test sudden turns, moving objects, camera cuts and newly exposed surfaces. Compare against a high-rate reference at matching timestamps, while recognizing that image error is only a quality proxy. Add DLSS-G as an independently validated comparison if the SDK binaries and runtime support it.
 
@@ -88,7 +92,7 @@ On 26 November 2026, `nvidia-smi` reported an NVIDIA RTX Spark N1X in WDDM mode 
 
 ## Questions to resolve
 
-- Which refresh rates and resolutions should the first experiment target?
+- Which resolution and monitor should the first experiment target, and what is that configuration's verified upper refresh bound?
 - Are native ARM64 DLSS-G binaries and the required runtime features available on this machine?
 - Can a small warp consistently meet display deadlines under GPU saturation, and what image quality does it retain?
 - What balance of smoothness, image quality and input latency is acceptable when source FPS is very low?

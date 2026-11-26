@@ -4,6 +4,8 @@
 
 Frame Warp Lab is an experimental native Windows renderer investigating presentation pacing, asynchronous reprojection and frame generation. The initial graphics API is Direct3D 12, the host language is C++20, shaders use HLSL, and builds use CMake. Research claims are hypotheses until measured on the target system. Preserve the research and test-scene documents as the project evolves.
 
+The central research objective is the **combined** use of frame generation and asynchronous warp/reprojection to investigate whether they can deliver perfectly paced frames at the monitor's upper refresh bound with minimal image degradation and low latency. Single-technique modes are controls that help isolate results, not substitutes for this objective. Test at the verified upper refresh bound of the target monitor and record the active mode, actual observed refresh and whether the target was reached. Never silently lower the target or claim a result when the upper bound, combined integration or display timing cannot be verified; report the limitation. Verify vendor SDK compatibility before combining presentation paths.
+
 ## Engineering
 
 - Prefer small, cohesive components with clear ownership. Keep platform/window handling, rendering, presentation, simulation, shaders and telemetry in distinct modules as they grow. Avoid premature frameworks and unnecessary dependencies.

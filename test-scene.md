@@ -19,8 +19,9 @@ Imagine a long indoor test hall with a clear sightline and several stations alon
 - **Repeat:** render the scene at a controlled lower rate and present the latest completed frame without synthesis.
 - **Camera reprojection:** use the latest completed color/depth and camera pose to warp toward the current view. Show both ordinary output and diagnostic holes.
 - **NVIDIA frame generation:** add as a separate mode only after SDK binaries and runtime support have been verified; retain NVIDIA's documented presentation and Reflex integration. It is not interchangeable with our own warp.
+- **Combined generation and asynchronous warp:** the primary experiment. Combine the two only through an established, supported presentation integration; if unavailable, report the blocker and investigate another supported path. Compare it with all controls under the same target and workload.
 
-Keep resolution, scene, camera path, workload, display mode and capture settings matched as closely as possible. Log any differences. Support side-by-side or synchronized captures for analysis; a split-screen live view can itself change GPU load, so benchmark each mode independently too.
+All test modes target the verified upper refresh bound of the selected monitor at the chosen resolution. Record the supported upper bound, active mode, exact refresh where available, VRR state and observed display intervals. If the upper bound cannot be established or activated, report the run as inconclusive for the primary goal. Keep resolution, scene, camera path, workload, display mode and capture settings matched as closely as possible. Log any differences. Support side-by-side or synchronized captures for analysis; a split-screen live view can itself change GPU load, so benchmark each mode independently too.
 
 ## Controls and scenarios
 
@@ -32,4 +33,4 @@ Render the HUD separately where practical, at presentation cadence; report the H
 
 Record full-render FPS, actual displayed intervals, missed deadlines, source-frame age, warp GPU time, and source-to-output frame IDs. Examine input latency with appropriate tooling and, when possible, external input-to-photon measurement. Track holes, ghosting, distortions, object-motion errors and UI stability alongside numbers.
 
-A positive result would be more even displayed motion than repeat mode at the same source workload, with tolerable artifacts and no unacceptable latency increase. A failure is also useful: identify the workload, motion or display condition under which the warp misses deadlines or image quality breaks down. Do not claim a universal refresh-rate guarantee from this scene.
+A positive result for the primary hypothesis would show the combined mode meeting predefined pacing, image-quality and latency criteria at the monitor's upper refresh bound, compared with repeat and single-technique controls at the same source workload. Set numerical tolerances before judging a run; a matching average FPS does not demonstrate perfect pacing. A failure is also useful: identify the workload, motion or display condition under which the combined path misses deadlines or image quality breaks down. Do not claim a universal refresh-rate guarantee from this scene.
