@@ -19,6 +19,8 @@
 #include <stdexcept>
 #include <string>
 #include <system_error>
+#include <utility>
+#include <vector>
 
 namespace {
 
@@ -394,6 +396,7 @@ struct WindowInputState {
     int last_cursor_y = 0;
     float pending_mouse_delta_x = 0.0f;
     float pending_mouse_delta_y = 0.0f;
+    std::vector<std::pair<WPARAM, LPARAM>> queued_control_messages;
 };
 
 void stamp_input_arrival(WindowInputState& input) {
@@ -564,6 +567,10 @@ LRESULT CALLBACK window_procedure(HWND window, UINT message, WPARAM message_para
     }
     if (!input) {
         return DefWindowProcW(window, message, message_parameter, message_data);
+    }
+    if (message == frame_warp_lab::control_message) {
+        input->queued_control_messages.emplace_back(message_parameter, message_data);
+        return 0;
     }
     if (message == WM_INPUT) {
         UINT data_size = 0;
@@ -803,7 +810,241 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         };
         publish_config();
 
+        auto handle_control_message = [&](WPARAM message_wparam, LPARAM message_lparam) {
+            const auto command = static_cast<frame_warp_lab::ControlCommand>(message_wparam);
+            if (command == frame_warp_lab::ControlCommand::scene_pause) {
+                scene_paused = true;
+                runtime_state.record_event(frame_warp_lab::RuntimeEventType::scene_paused, 1);
+            } else if (command == frame_warp_lab::ControlCommand::scene_resume) {
+                scene_paused = false;
+                runtime_state.record_event(frame_warp_lab::RuntimeEventType::scene_resumed, 0);
+            } else if (command == frame_warp_lab::ControlCommand::scene_reset) {
+                simulation.reset();
+                renderer.invalidate_source_history();
+                cadence_counter = 0;
+                pacer.reset();
+                runtime_state.record_event(frame_warp_lab::RuntimeEventType::scene_reset, 0);
+            } else if (command == frame_warp_lab::ControlCommand::set_diagnostic_view) {
+                const auto raw = static_cast<std::int32_t>(message_lparam);
+                if (raw >= 0 && raw <= 6) {
+                    diagnostic_view = static_cast<frame_warp_lab::DiagnosticView>(raw);
+                    runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, raw, frame_warp_lab::ConfigKey::diagnostic_view);
+                }
+            } else if (command == frame_warp_lab::ControlCommand::set_camera_path) {
+                const auto raw = static_cast<std::int32_t>(message_lparam);
+                if (raw >= 0 && raw <= 5) {
+                    simulation.set_path(static_cast<frame_warp_lab::CameraPath>(raw));
+                    renderer.invalidate_source_history();
+                    runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, raw, frame_warp_lab::ConfigKey::camera_path);
+                }
+            } else if (command == frame_warp_lab::ControlCommand::set_stress_level) {
+                stress_level = std::clamp(static_cast<std::int32_t>(message_lparam), 0, frame_warp_lab::max_stress_level);
+                runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, stress_level, frame_warp_lab::ConfigKey::stress_level);
+            } else if (command == frame_warp_lab::ControlCommand::set_overlay_enabled) {
+                overlay_enabled = message_lparam != 0;
+                runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, overlay_enabled ? 1 : 0, frame_warp_lab::ConfigKey::overlay_enabled);
+            } else if (command == frame_warp_lab::ControlCommand::set_presentation_mode) {
+                const auto raw = static_cast<std::int32_t>(message_lparam);
+                if (raw >= 0 && raw <= 6) {
+                    adaptive_scheduler.set_enabled(false);
+                    presentation_mode = static_cast<frame_warp_lab::PresentationMode>(raw);
+                    cadence_counter = 0;
+                    runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, raw, frame_warp_lab::ConfigKey::presentation_mode);
+                }
+            } else if (command == frame_warp_lab::ControlCommand::set_dlssg_multiplier) {
+                const auto raw = static_cast<std::int32_t>(message_lparam);
+                const auto max_mult = std::max<std::int32_t>(2, static_cast<std::int32_t>(renderer.streamline_capabilities().max_frames_to_generate) + 1);
+                if (raw == 0) {
+                    dlssg_multiplier = 0;
+                } else {
+                    dlssg_multiplier = std::clamp(raw, 2, max_mult);
+                }
+                runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, dlssg_multiplier, frame_warp_lab::ConfigKey::dlssg_multiplier);
+            } else if (command == frame_warp_lab::ControlCommand::set_source_divider) {
+                adaptive_scheduler.set_enabled(false);
+                source_divider = std::clamp(static_cast<std::int32_t>(message_lparam), 1, frame_warp_lab::max_source_divider);
+                cadence_counter = 0;
+                runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, source_divider, frame_warp_lab::ConfigKey::source_divider);
+            } else if (command == frame_warp_lab::ControlCommand::set_vsync_enabled) {
+                vsync_enabled = message_lparam != 0;
+                pacer.reset();
+                runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, vsync_enabled ? 1 : 0, frame_warp_lab::ConfigKey::vsync_enabled);
+            } else if (command == frame_warp_lab::ControlCommand::set_flash_indicator) {
+                flash_indicator_enabled = message_lparam != 0;
+                runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, flash_indicator_enabled ? 1 : 0, frame_warp_lab::ConfigKey::flash_indicator);
+            } else if (command == frame_warp_lab::ControlCommand::set_pacer_mode) {
+                const auto raw = static_cast<std::int32_t>(message_lparam);
+                if (raw >= 0 && raw <= 2) {
+                    const auto new_mode = static_cast<frame_warp_lab::PacerMode>(raw);
+                    pacer.set_mode(new_mode);
+                    if (new_mode == frame_warp_lab::PacerMode::vsync_only) vsync_enabled = true;
+                    else if (new_mode == frame_warp_lab::PacerMode::deadline || new_mode == frame_warp_lab::PacerMode::unlocked) {
+                        vsync_enabled = !renderer.allow_tearing_enabled();
+                    }
+                    runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, raw, frame_warp_lab::ConfigKey::pacer_mode);
+                }
+            } else if (command == frame_warp_lab::ControlCommand::set_target_fps) {
+                const auto raw = std::clamp(static_cast<std::int32_t>(message_lparam), 0, frame_warp_lab::max_target_fps);
+                pacer.set_target_fps(raw, window);
+                hud_state.target_frame_ms = pacer.target_frame_ms();
+                runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, raw, frame_warp_lab::ConfigKey::target_fps);
+            } else if (command == frame_warp_lab::ControlCommand::set_async_gpu) {
+                async_gpu_enabled = message_lparam != 0;
+                runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, async_gpu_enabled ? 1 : 0, frame_warp_lab::ConfigKey::async_gpu);
+            } else if (command == frame_warp_lab::ControlCommand::set_vrs_mode) {
+                const auto raw = static_cast<std::int32_t>(message_lparam);
+                if (raw >= 0 && raw <= 2) {
+                    adaptive_scheduler.set_enabled(false);
+                    vrs_mode = static_cast<frame_warp_lab::VrsMode>(raw);
+                    runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, raw, frame_warp_lab::ConfigKey::vrs_mode);
+                }
+            } else if (command == frame_warp_lab::ControlCommand::set_adaptive_scheduler) {
+                const bool enable_adaptive = message_lparam != 0;
+                adaptive_scheduler.set_enabled(enable_adaptive);
+                if (enable_adaptive) {
+                    adaptive_scheduler.reset();
+                    const bool use_dlssg_policy = adaptive_dlssg_enabled && renderer.streamline_capabilities().dlssg_supported;
+                    const auto initial_policy = frame_warp_lab::AdaptiveScheduler::policy_for_tier(0, renderer.vrs_tier(), use_dlssg_policy);
+                    presentation_mode = initial_policy.mode;
+                    source_divider = initial_policy.divider;
+                    vrs_mode = initial_policy.vrs;
+                    async_gpu_enabled = initial_policy.async_gpu;
+                    dlssg_multiplier = initial_policy.dlssg_multiplier;
+                    cadence_counter = 0;
+                }
+                runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, enable_adaptive ? 1 : 0, frame_warp_lab::ConfigKey::adaptive_scheduler);
+            } else if (command == frame_warp_lab::ControlCommand::set_adaptive_dlssg) {
+                adaptive_dlssg_enabled = message_lparam != 0;
+                runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, adaptive_dlssg_enabled ? 1 : 0, frame_warp_lab::ConfigKey::adaptive_dlssg);
+            } else if (command == frame_warp_lab::ControlCommand::set_instrumentation_level) {
+                const auto raw = static_cast<std::int32_t>(message_lparam);
+                if (raw >= 0 && raw <= 2) {
+                    instrumentation_level = static_cast<frame_warp_lab::InstrumentationLevel>(raw);
+                    runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, raw, frame_warp_lab::ConfigKey::instrumentation_level);
+                }
+            } else if (command == frame_warp_lab::ControlCommand::set_selective_tiles) {
+                selective_tiles_enabled = message_lparam != 0;
+                runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, selective_tiles_enabled ? 1 : 0, frame_warp_lab::ConfigKey::selective_tiles);
+            } else if (command == frame_warp_lab::ControlCommand::set_tile_budget_pct) {
+                auto_tile_budget_enabled = false;
+                tile_budget_pct = std::clamp(static_cast<std::int32_t>(message_lparam), 5, 100);
+                runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, tile_budget_pct, frame_warp_lab::ConfigKey::tile_budget_pct);
+            } else if (command == frame_warp_lab::ControlCommand::set_tile_policy) {
+                const auto raw = static_cast<std::int32_t>(message_lparam);
+                if (raw >= 0 && raw <= 1) {
+                    tile_policy = static_cast<frame_warp_lab::TilePolicy>(raw);
+                    runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, raw, frame_warp_lab::ConfigKey::tile_policy);
+                }
+            } else if (command == frame_warp_lab::ControlCommand::set_auto_tile_budget) {
+                auto_tile_budget_enabled = message_lparam != 0;
+                auto_tile_budget.reset();
+                runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, auto_tile_budget_enabled ? 1 : 0, frame_warp_lab::ConfigKey::auto_tile_budget);
+            } else if (command == frame_warp_lab::ControlCommand::set_cache_sharpen) {
+                cache_sharpen_enabled = message_lparam != 0;
+                runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, cache_sharpen_enabled ? 1 : 0, frame_warp_lab::ConfigKey::cache_sharpen);
+            } else if (command == frame_warp_lab::ControlCommand::set_coarse_fallback) {
+                coarse_fallback_enabled = message_lparam != 0;
+                runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, coarse_fallback_enabled ? 1 : 0, frame_warp_lab::ConfigKey::coarse_fallback);
+            } else if (command == frame_warp_lab::ControlCommand::set_subtile_interleave) {
+                subtile_interleave_enabled = message_lparam != 0;
+                runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, subtile_interleave_enabled ? 1 : 0, frame_warp_lab::ConfigKey::subtile_interleave);
+            } else if (command == frame_warp_lab::ControlCommand::set_shader_flags) {
+                shader_flags = static_cast<std::uint32_t>(message_lparam) & 0xFFU;
+                renderer.invalidate_source_history();
+                runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, static_cast<std::int32_t>(shader_flags), frame_warp_lab::ConfigKey::shader_flags);
+            } else if (command == frame_warp_lab::ControlCommand::set_render_scale) {
+                drs_mode = frame_warp_lab::DrsMode::off;
+                render_scale_pct = std::clamp(static_cast<std::int32_t>(message_lparam), 25, 200);
+                render_override_width = 0;
+                render_override_height = 0;
+                renderer.set_render_resolution(0, 0, render_scale_pct);
+                runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, render_scale_pct, frame_warp_lab::ConfigKey::render_scale);
+            } else if (command == frame_warp_lab::ControlCommand::set_render_size) {
+                const auto packed = static_cast<std::uint32_t>(message_lparam);
+                const UINT req_w = static_cast<UINT>(packed & 0xFFFFU);
+                const UINT req_h = static_cast<UINT>((packed >> 16U) & 0xFFFFU);
+                if (req_w == 0U || req_h == 0U) {
+                    render_override_width = 0;
+                    render_override_height = 0;
+                } else {
+                    render_override_width = std::clamp<UINT>(req_w, 160U, 7680U);
+                    render_override_height = std::clamp<UINT>(req_h, 120U, 4320U);
+                }
+                renderer.set_render_resolution(render_override_width, render_override_height, render_scale_pct);
+                runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, static_cast<std::int32_t>(renderer.render_width()), frame_warp_lab::ConfigKey::render_size);
+            } else if (command == frame_warp_lab::ControlCommand::set_upscale_filter) {
+                const auto raw = static_cast<std::int32_t>(message_lparam);
+                if (raw >= 0 && raw <= 3) {
+                    upscale_filter = static_cast<frame_warp_lab::UpscaleFilter>(raw);
+                    runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, raw, frame_warp_lab::ConfigKey::upscale_filter);
+                }
+            } else if (command == frame_warp_lab::ControlCommand::set_drs_mode) {
+                const auto raw = static_cast<std::int32_t>(message_lparam);
+                if (raw >= 0 && raw <= 2) {
+                    drs_mode = static_cast<frame_warp_lab::DrsMode>(raw);
+                    auto_drs.reset();
+                    runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, raw, frame_warp_lab::ConfigKey::drs_mode);
+                }
+            } else if (command == frame_warp_lab::ControlCommand::set_drs_min_pct) {
+                drs_min_pct = std::clamp(static_cast<std::int32_t>(message_lparam), 25, 200);
+                if (drs_max_pct < drs_min_pct) drs_max_pct = drs_min_pct;
+                runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, drs_min_pct, frame_warp_lab::ConfigKey::drs_min_pct);
+            } else if (command == frame_warp_lab::ControlCommand::set_drs_max_pct) {
+                drs_max_pct = std::clamp(static_cast<std::int32_t>(message_lparam), 25, 200);
+                if (drs_min_pct > drs_max_pct) drs_min_pct = drs_max_pct;
+                runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, drs_max_pct, frame_warp_lab::ConfigKey::drs_max_pct);
+            } else if (command == frame_warp_lab::ControlCommand::resize_window) {
+                const auto packed = static_cast<std::uint32_t>(message_lparam);
+                const LONG requested_width = static_cast<LONG>(packed & 0xFFFFU);
+                const LONG requested_height = static_cast<LONG>((packed >> 16U) & 0xFFFFU);
+                if (requested_width >= 320 && requested_width <= 7680 && requested_height >= 240 && requested_height <= 4320) {
+                    RECT desired_rect{0, 0, requested_width, requested_height};
+                    const auto style = static_cast<DWORD>(GetWindowLongPtrW(window, GWL_STYLE));
+                    const auto ex_style = static_cast<DWORD>(GetWindowLongPtrW(window, GWL_EXSTYLE));
+                    AdjustWindowRectEx(&desired_rect, style, FALSE, ex_style);
+                    SetWindowPos(
+                        window,
+                        nullptr,
+                        0,
+                        0,
+                        desired_rect.right - desired_rect.left,
+                        desired_rect.bottom - desired_rect.top,
+                        SWP_NOZORDER | SWP_NOACTIVATE);
+                }
+            } else if (command == frame_warp_lab::ControlCommand::set_fixed_dt_us) {
+                fixed_dt_us = std::clamp(static_cast<std::int32_t>(message_lparam), 0, 100000);
+                runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, fixed_dt_us, frame_warp_lab::ConfigKey::fixed_dt_us);
+            } else if (command == frame_warp_lab::ControlCommand::capture_frame) {
+                pending_capture_tag = static_cast<std::uint32_t>(message_lparam);
+            } else if (command == frame_warp_lab::ControlCommand::step_frames) {
+                pending_step_frames = std::clamp(static_cast<std::int32_t>(message_lparam), 0, 2000);
+                runtime_state.update_pending_steps(pending_step_frames);
+            }
+            previous_tick = std::chrono::steady_clock::now();
+            publish_config();
+            float yaw_deg = 0.0f;
+            float pitch_deg = 0.0f;
+            simulation.current_camera_angles_degrees(yaw_deg, pitch_deg);
+            runtime_state.update_scene(
+                simulation.time_seconds(),
+                scene_paused,
+                input_state.mouse_look_locked || input_state.left_drag_active,
+                yaw_deg,
+                pitch_deg,
+                latency_monitor);
+        };
+
+        auto drain_queued_control_messages = [&]() {
+            if (input_state.queued_control_messages.empty()) return;
+            auto queued = std::move(input_state.queued_control_messages);
+            input_state.queued_control_messages.clear();
+            for (const auto& item : queued) {
+                handle_control_message(item.first, item.second);
+            }
+        };
+
         auto pump_messages = [&]() {
+            drain_queued_control_messages();
             MSG message{};
             while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
                 if (message.message == WM_QUIT) {
@@ -967,232 +1208,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                     }
                 }
                 if (message.message == frame_warp_lab::control_message) {
-                    const auto command = static_cast<frame_warp_lab::ControlCommand>(message.wParam);
-                    if (command == frame_warp_lab::ControlCommand::scene_pause) {
-                        scene_paused = true;
-                        runtime_state.record_event(frame_warp_lab::RuntimeEventType::scene_paused, 1);
-                    } else if (command == frame_warp_lab::ControlCommand::scene_resume) {
-                        scene_paused = false;
-                        runtime_state.record_event(frame_warp_lab::RuntimeEventType::scene_resumed, 0);
-                    } else if (command == frame_warp_lab::ControlCommand::scene_reset) {
-                        simulation.reset();
-                        renderer.invalidate_source_history();
-                        cadence_counter = 0;
-                        pacer.reset();
-                        runtime_state.record_event(frame_warp_lab::RuntimeEventType::scene_reset, 0);
-                    } else if (command == frame_warp_lab::ControlCommand::set_diagnostic_view) {
-                        const auto raw = static_cast<std::int32_t>(message.lParam);
-                        if (raw >= 0 && raw <= 6) {
-                            diagnostic_view = static_cast<frame_warp_lab::DiagnosticView>(raw);
-                            runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, raw, frame_warp_lab::ConfigKey::diagnostic_view);
-                        }
-                    } else if (command == frame_warp_lab::ControlCommand::set_camera_path) {
-                        const auto raw = static_cast<std::int32_t>(message.lParam);
-                        if (raw >= 0 && raw <= 5) {
-                            simulation.set_path(static_cast<frame_warp_lab::CameraPath>(raw));
-                            renderer.invalidate_source_history();
-                            runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, raw, frame_warp_lab::ConfigKey::camera_path);
-                        }
-                    } else if (command == frame_warp_lab::ControlCommand::set_stress_level) {
-                        stress_level = std::clamp(static_cast<std::int32_t>(message.lParam), 0, frame_warp_lab::max_stress_level);
-                        runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, stress_level, frame_warp_lab::ConfigKey::stress_level);
-                    } else if (command == frame_warp_lab::ControlCommand::set_overlay_enabled) {
-                        overlay_enabled = message.lParam != 0;
-                        runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, overlay_enabled ? 1 : 0, frame_warp_lab::ConfigKey::overlay_enabled);
-                    } else if (command == frame_warp_lab::ControlCommand::set_presentation_mode) {
-                        const auto raw = static_cast<std::int32_t>(message.lParam);
-                        if (raw >= 0 && raw <= 6) {
-                            adaptive_scheduler.set_enabled(false);
-                            presentation_mode = static_cast<frame_warp_lab::PresentationMode>(raw);
-                            cadence_counter = 0;
-                            runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, raw, frame_warp_lab::ConfigKey::presentation_mode);
-                        }
-                    } else if (command == frame_warp_lab::ControlCommand::set_dlssg_multiplier) {
-                        const auto raw = static_cast<std::int32_t>(message.lParam);
-                        const auto max_mult = std::max<std::int32_t>(2, static_cast<std::int32_t>(renderer.streamline_capabilities().max_frames_to_generate) + 1);
-                        if (raw == 0) {
-                            dlssg_multiplier = 0;
-                        } else {
-                            dlssg_multiplier = std::clamp(raw, 2, max_mult);
-                        }
-                        runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, dlssg_multiplier, frame_warp_lab::ConfigKey::dlssg_multiplier);
-                    } else if (command == frame_warp_lab::ControlCommand::set_source_divider) {
-                        adaptive_scheduler.set_enabled(false);
-                        source_divider = std::clamp(static_cast<std::int32_t>(message.lParam), 1, frame_warp_lab::max_source_divider);
-                        cadence_counter = 0;
-                        runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, source_divider, frame_warp_lab::ConfigKey::source_divider);
-                    } else if (command == frame_warp_lab::ControlCommand::set_vsync_enabled) {
-                        vsync_enabled = message.lParam != 0;
-                        pacer.reset();
-                        runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, vsync_enabled ? 1 : 0, frame_warp_lab::ConfigKey::vsync_enabled);
-                    } else if (command == frame_warp_lab::ControlCommand::set_flash_indicator) {
-                        flash_indicator_enabled = message.lParam != 0;
-                        runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, flash_indicator_enabled ? 1 : 0, frame_warp_lab::ConfigKey::flash_indicator);
-                    } else if (command == frame_warp_lab::ControlCommand::set_pacer_mode) {
-                        const auto raw = static_cast<std::int32_t>(message.lParam);
-                        if (raw >= 0 && raw <= 2) {
-                            const auto new_mode = static_cast<frame_warp_lab::PacerMode>(raw);
-                            pacer.set_mode(new_mode);
-                            if (new_mode == frame_warp_lab::PacerMode::vsync_only) vsync_enabled = true;
-                            else if (new_mode == frame_warp_lab::PacerMode::deadline || new_mode == frame_warp_lab::PacerMode::unlocked) {
-                                vsync_enabled = !renderer.allow_tearing_enabled();
-                            }
-                            runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, raw, frame_warp_lab::ConfigKey::pacer_mode);
-                        }
-                    } else if (command == frame_warp_lab::ControlCommand::set_target_fps) {
-                        const auto raw = std::clamp(static_cast<std::int32_t>(message.lParam), 0, frame_warp_lab::max_target_fps);
-                        pacer.set_target_fps(raw, window);
-                        hud_state.target_frame_ms = pacer.target_frame_ms();
-                        runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, raw, frame_warp_lab::ConfigKey::target_fps);
-                    } else if (command == frame_warp_lab::ControlCommand::set_async_gpu) {
-                        async_gpu_enabled = message.lParam != 0;
-                        runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, async_gpu_enabled ? 1 : 0, frame_warp_lab::ConfigKey::async_gpu);
-                    } else if (command == frame_warp_lab::ControlCommand::set_vrs_mode) {
-                        const auto raw = static_cast<std::int32_t>(message.lParam);
-                        if (raw >= 0 && raw <= 2) {
-                            adaptive_scheduler.set_enabled(false);
-                            vrs_mode = static_cast<frame_warp_lab::VrsMode>(raw);
-                            runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, raw, frame_warp_lab::ConfigKey::vrs_mode);
-                        }
-                    } else if (command == frame_warp_lab::ControlCommand::set_adaptive_scheduler) {
-                        const bool enable_adaptive = message.lParam != 0;
-                        adaptive_scheduler.set_enabled(enable_adaptive);
-                        if (enable_adaptive) {
-                            adaptive_scheduler.reset();
-                            const bool use_dlssg_policy = adaptive_dlssg_enabled && renderer.streamline_capabilities().dlssg_supported;
-                            const auto initial_policy = frame_warp_lab::AdaptiveScheduler::policy_for_tier(0, renderer.vrs_tier(), use_dlssg_policy);
-                            presentation_mode = initial_policy.mode;
-                            source_divider = initial_policy.divider;
-                            vrs_mode = initial_policy.vrs;
-                            async_gpu_enabled = initial_policy.async_gpu;
-                            dlssg_multiplier = initial_policy.dlssg_multiplier;
-                            cadence_counter = 0;
-                        }
-                        runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, enable_adaptive ? 1 : 0, frame_warp_lab::ConfigKey::adaptive_scheduler);
-                    } else if (command == frame_warp_lab::ControlCommand::set_adaptive_dlssg) {
-                        adaptive_dlssg_enabled = message.lParam != 0;
-                        runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, adaptive_dlssg_enabled ? 1 : 0, frame_warp_lab::ConfigKey::adaptive_dlssg);
-                    } else if (command == frame_warp_lab::ControlCommand::set_instrumentation_level) {
-                        const auto raw = static_cast<std::int32_t>(message.lParam);
-                        if (raw >= 0 && raw <= 2) {
-                            instrumentation_level = static_cast<frame_warp_lab::InstrumentationLevel>(raw);
-                            runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, raw, frame_warp_lab::ConfigKey::instrumentation_level);
-                        }
-                    } else if (command == frame_warp_lab::ControlCommand::set_selective_tiles) {
-                        selective_tiles_enabled = message.lParam != 0;
-                        runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, selective_tiles_enabled ? 1 : 0, frame_warp_lab::ConfigKey::selective_tiles);
-                    } else if (command == frame_warp_lab::ControlCommand::set_tile_budget_pct) {
-                        auto_tile_budget_enabled = false;
-                        tile_budget_pct = std::clamp(static_cast<std::int32_t>(message.lParam), 5, 100);
-                        runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, tile_budget_pct, frame_warp_lab::ConfigKey::tile_budget_pct);
-                    } else if (command == frame_warp_lab::ControlCommand::set_tile_policy) {
-                        const auto raw = static_cast<std::int32_t>(message.lParam);
-                        if (raw >= 0 && raw <= 1) {
-                            tile_policy = static_cast<frame_warp_lab::TilePolicy>(raw);
-                            runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, raw, frame_warp_lab::ConfigKey::tile_policy);
-                        }
-                    } else if (command == frame_warp_lab::ControlCommand::set_auto_tile_budget) {
-                        auto_tile_budget_enabled = message.lParam != 0;
-                        auto_tile_budget.reset();
-                        runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, auto_tile_budget_enabled ? 1 : 0, frame_warp_lab::ConfigKey::auto_tile_budget);
-                    } else if (command == frame_warp_lab::ControlCommand::set_cache_sharpen) {
-                        cache_sharpen_enabled = message.lParam != 0;
-                        runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, cache_sharpen_enabled ? 1 : 0, frame_warp_lab::ConfigKey::cache_sharpen);
-                    } else if (command == frame_warp_lab::ControlCommand::set_coarse_fallback) {
-                        coarse_fallback_enabled = message.lParam != 0;
-                        runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, coarse_fallback_enabled ? 1 : 0, frame_warp_lab::ConfigKey::coarse_fallback);
-                    } else if (command == frame_warp_lab::ControlCommand::set_subtile_interleave) {
-                        subtile_interleave_enabled = message.lParam != 0;
-                        runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, subtile_interleave_enabled ? 1 : 0, frame_warp_lab::ConfigKey::subtile_interleave);
-                    } else if (command == frame_warp_lab::ControlCommand::set_shader_flags) {
-                        shader_flags = static_cast<std::uint32_t>(message.lParam) & 0xFFU;
-                        renderer.invalidate_source_history();
-                        runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, static_cast<std::int32_t>(shader_flags), frame_warp_lab::ConfigKey::shader_flags);
-                    } else if (command == frame_warp_lab::ControlCommand::set_render_scale) {
-                        drs_mode = frame_warp_lab::DrsMode::off;
-                        render_scale_pct = std::clamp(static_cast<std::int32_t>(message.lParam), 25, 200);
-                        render_override_width = 0;
-                        render_override_height = 0;
-                        renderer.set_render_resolution(0, 0, render_scale_pct);
-                        runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, render_scale_pct, frame_warp_lab::ConfigKey::render_scale);
-                    } else if (command == frame_warp_lab::ControlCommand::set_render_size) {
-                        const auto packed = static_cast<std::uint32_t>(message.lParam);
-                        const UINT req_w = static_cast<UINT>(packed & 0xFFFFU);
-                        const UINT req_h = static_cast<UINT>((packed >> 16U) & 0xFFFFU);
-                        if (req_w == 0U || req_h == 0U) {
-                            render_override_width = 0;
-                            render_override_height = 0;
-                        } else {
-                            render_override_width = std::clamp<UINT>(req_w, 160U, 7680U);
-                            render_override_height = std::clamp<UINT>(req_h, 120U, 4320U);
-                        }
-                        renderer.set_render_resolution(render_override_width, render_override_height, render_scale_pct);
-                        runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, static_cast<std::int32_t>(renderer.render_width()), frame_warp_lab::ConfigKey::render_size);
-                    } else if (command == frame_warp_lab::ControlCommand::set_upscale_filter) {
-                        const auto raw = static_cast<std::int32_t>(message.lParam);
-                        if (raw >= 0 && raw <= 3) {
-                            upscale_filter = static_cast<frame_warp_lab::UpscaleFilter>(raw);
-                            runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, raw, frame_warp_lab::ConfigKey::upscale_filter);
-                        }
-                    } else if (command == frame_warp_lab::ControlCommand::set_drs_mode) {
-                        const auto raw = static_cast<std::int32_t>(message.lParam);
-                        if (raw >= 0 && raw <= 2) {
-                            drs_mode = static_cast<frame_warp_lab::DrsMode>(raw);
-                            auto_drs.reset();
-                            runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, raw, frame_warp_lab::ConfigKey::drs_mode);
-                        }
-                    } else if (command == frame_warp_lab::ControlCommand::set_drs_min_pct) {
-                        drs_min_pct = std::clamp(static_cast<std::int32_t>(message.lParam), 25, 200);
-                        if (drs_max_pct < drs_min_pct) drs_max_pct = drs_min_pct;
-                        runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, drs_min_pct, frame_warp_lab::ConfigKey::drs_min_pct);
-                    } else if (command == frame_warp_lab::ControlCommand::set_drs_max_pct) {
-                        drs_max_pct = std::clamp(static_cast<std::int32_t>(message.lParam), 25, 200);
-                        if (drs_min_pct > drs_max_pct) drs_min_pct = drs_max_pct;
-                        runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, drs_max_pct, frame_warp_lab::ConfigKey::drs_max_pct);
-                    } else if (command == frame_warp_lab::ControlCommand::resize_window) {
-                        const auto packed = static_cast<std::uint32_t>(message.lParam);
-                        const LONG requested_width = static_cast<LONG>(packed & 0xFFFFU);
-                        const LONG requested_height = static_cast<LONG>((packed >> 16U) & 0xFFFFU);
-                        if (requested_width >= 320 && requested_width <= 7680 && requested_height >= 240 && requested_height <= 4320) {
-                            RECT desired_rect{0, 0, requested_width, requested_height};
-                            const auto style = static_cast<DWORD>(GetWindowLongPtrW(window, GWL_STYLE));
-                            const auto ex_style = static_cast<DWORD>(GetWindowLongPtrW(window, GWL_EXSTYLE));
-                            AdjustWindowRectEx(&desired_rect, style, FALSE, ex_style);
-                            SetWindowPos(
-                                window,
-                                nullptr,
-                                0,
-                                0,
-                                desired_rect.right - desired_rect.left,
-                                desired_rect.bottom - desired_rect.top,
-                                SWP_NOZORDER | SWP_NOACTIVATE);
-                        }
-                    } else if (command == frame_warp_lab::ControlCommand::set_fixed_dt_us) {
-                        fixed_dt_us = std::clamp(static_cast<std::int32_t>(message.lParam), 0, 100000);
-                        runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, fixed_dt_us, frame_warp_lab::ConfigKey::fixed_dt_us);
-                    } else if (command == frame_warp_lab::ControlCommand::capture_frame) {
-                        pending_capture_tag = static_cast<std::uint32_t>(message.lParam);
-                    } else if (command == frame_warp_lab::ControlCommand::step_frames) {
-                        pending_step_frames = std::clamp(static_cast<std::int32_t>(message.lParam), 0, 2000);
-                        runtime_state.update_pending_steps(pending_step_frames);
-                    }
-                    previous_tick = std::chrono::steady_clock::now();
-                    publish_config();
-                    float yaw_deg = 0.0f;
-                    float pitch_deg = 0.0f;
-                    simulation.current_camera_angles_degrees(yaw_deg, pitch_deg);
-                    runtime_state.update_scene(
-                        simulation.time_seconds(),
-                        scene_paused,
-                        input_state.mouse_look_locked || input_state.left_drag_active,
-                        yaw_deg,
-                        pitch_deg,
-                        latency_monitor);
+                    handle_control_message(message.wParam, message.lParam);
                     continue;
                 }
                 TranslateMessage(&message);
                 DispatchMessageW(&message);
+                drain_queued_control_messages();
             }
+            drain_queued_control_messages();
         };
 
         while (running) {

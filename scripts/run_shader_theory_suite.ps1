@@ -229,7 +229,14 @@ try {
         $prevF = 0
         foreach ($f in $seqFrames) {
             $tag++
-            $cap = (& $cli capture $fpid $tag ($f - $prevF) | ConvertFrom-Json)
+            $capRaw = & $cli capture $fpid $tag ($f - $prevF)
+            if ($LASTEXITCODE -ne 0 -or -not $capRaw) {
+                throw "Capture failed for shader '$($sh.key)' GT at frame $f (tag=$tag)"
+            }
+            $cap = ($capRaw | ConvertFrom-Json)
+            if (-not $cap.ok -or -not $cap.path) {
+                throw "Capture returned invalid response for shader '$($sh.key)' GT at frame $f"
+            }
             $gtPaths += $cap.path
             $tempPpms += $cap.path
             $st = (& $cli status $fpid | ConvertFrom-Json)
@@ -256,7 +263,14 @@ try {
             $prevF = 0
             foreach ($f in $seqFrames) {
                 $tag++
-                $cap = (& $cli capture $fpid $tag ($f - $prevF) | ConvertFrom-Json)
+                $capRaw = & $cli capture $fpid $tag ($f - $prevF)
+                if ($LASTEXITCODE -ne 0 -or -not $capRaw) {
+                    throw "Capture failed for shader '$($sh.key)' $($md.name) at frame $f (tag=$tag)"
+                }
+                $cap = ($capRaw | ConvertFrom-Json)
+                if (-not $cap.ok -or -not $cap.path) {
+                    throw "Capture returned invalid response for shader '$($sh.key)' $($md.name) at frame $f"
+                }
                 $testPaths += $cap.path
                 $tempPpms += $cap.path
                 $st = (& $cli status $fpid | ConvertFrom-Json)

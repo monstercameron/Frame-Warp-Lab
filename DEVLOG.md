@@ -1,5 +1,10 @@
 # Development log
 
+## v0.26.1 — Buffer CLI control messages during Win32 modal loops (`WM_ENTERSIZEMOVE` / menu) so dragging or clicking the window never drops `set`/`capture` commands
+
+- Fixed a Win32 message-pump race in `src/main.cpp` where clicking, dragging, or resizing the window entered `DefWindowProcW`'s modal message loop and dispatched posted `frame_warp_lab::control_message` (`WM_APP + 1`) events directly to `window_procedure`, which previously passed them to `DefWindowProcW` and silently dropped CLI `set`/`reset`/`step`/`capture` commands (causing `capture_timeout` or stale settings when moving the window mid-benchmark).
+- Added a FIFO `queued_control_messages` buffer in `WindowInputState` captured by `window_procedure` and drained in strict FIFO order right after `DispatchMessageW` inside `pump_messages()`, and hardened `scripts/run_shader_theory_suite.ps1` to fail fast on any non-zero `capture` exit code.
+
 ## v0.26.0 — 8-shader theory stress-test suite: isolating material, lighting, shadow, normal-map, and transparency failure modes of naive geometry-only PAR
 
 - Implemented all 8 isolated shader theory stress features bit-identically in both `shaders/motion_lab.hlsl` (Ground Truth + Hardware VRS) and `shaders/selective_tiles.hlsl` (`PAR-3`), exposed via `set <pid> shader_feature <name|0..255>` (`RuntimeState` v25 / CLI schema v20) and benchmarked with `scripts/run_shader_theory_suite.ps1` (`src/runtime_state.h`, `src/renderer.h`, `src/renderer.cpp`, `src/main.cpp`, `src/cli.cpp`, `CMakeLists.txt`):
