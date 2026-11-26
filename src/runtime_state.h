@@ -10,7 +10,7 @@
 namespace frame_warp_lab {
 
 inline constexpr wchar_t window_class_name[] = L"FrameWarpLabWindow";
-inline constexpr std::uint32_t runtime_state_version = 7;
+inline constexpr std::uint32_t runtime_state_version = 8;
 inline constexpr std::size_t runtime_event_capacity = 64;
 inline constexpr std::size_t runtime_frame_trace_capacity = 256;
 inline constexpr std::size_t hud_graph_sample_count = 128;
@@ -30,6 +30,7 @@ enum class ControlCommand : WPARAM {
     set_presentation_mode = 8,
     set_source_divider = 9,
     set_vsync_enabled = 10,
+    set_flash_indicator = 11,
 };
 
 enum class PresentationMode : std::int32_t {
@@ -92,6 +93,10 @@ struct RuntimeFrameSample {
     std::int64_t source_frame_id;
     std::int64_t present_interval_us;
     std::int64_t source_age_us;
+    std::int64_t input_to_present_us;
+    std::int64_t sim_cpu_us;
+    std::int64_t render_submit_cpu_us;
+    std::int64_t present_call_cpu_us;
     std::int64_t scene_gpu_us;
     std::int64_t present_gpu_us;
     std::uint32_t invalid_pixel_count;
@@ -125,8 +130,14 @@ struct RuntimeState {
     std::int64_t last_present_interval_us;
     std::int64_t smoothed_present_interval_us;
     std::int64_t last_source_age_us;
+    std::int64_t last_input_to_present_us;
+    std::int64_t last_sim_cpu_us;
+    std::int64_t last_render_submit_cpu_us;
+    std::int64_t last_present_call_cpu_us;
     std::int64_t last_scene_gpu_us;
     std::int64_t last_present_gpu_us;
+    std::int64_t pcl_markers_emitted;
+    std::int64_t pcl_pings_received;
     std::uint32_t last_invalid_pixel_count;
     std::uint32_t last_total_pixel_count;
     std::int32_t presentation_mode;
@@ -138,11 +149,15 @@ struct RuntimeState {
     std::int32_t camera_path;
     std::int32_t stress_level;
     std::int32_t overlay_enabled;
+    std::int32_t flash_indicator_enabled;
+    std::int32_t raw_input_enabled;
+    std::int32_t pcl_etw_listener_active;
     std::int32_t mouse_look_active;
     std::int32_t camera_yaw_millideg;
     std::int32_t camera_pitch_millideg;
     std::int32_t gpu_timing_available;
     std::int32_t event_count;
+    std::int32_t reserved;
     std::int64_t trace_count;
     RuntimeEvent events[runtime_event_capacity];
     RuntimeFrameSample trace[runtime_frame_trace_capacity];

@@ -1,3 +1,4 @@
+#include "latency_monitor.h"
 #include "renderer.h"
 #include "runtime_state.h"
 #include "simulation.h"
@@ -32,7 +33,7 @@ private:
 
 class RuntimeStatePublisher {
 public:
-    RuntimeStatePublisher(bool gpu_timing_available, bool allow_tearing_enabled, bool waitable_swap_chain)
+    RuntimeStatePublisher(bool gpu_timing_available, bool allow_tearing_enabled, bool waitable_swap_chain, bool raw_input_enabled)
         : mapping_(CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0,
                                       sizeof(frame_warp_lab::RuntimeState),
                                       frame_warp_lab::runtime_mapping_name(GetCurrentProcessId()).c_str()),
@@ -47,7 +48,9 @@ public:
         std::atomic_ref<std::int32_t>(state_->vsync_enabled).store(1, std::memory_order_relaxed);
         std::atomic_ref<std::int32_t>(state_->allow_tearing_enabled).store(allow_tearing_enabled ? 1 : 0, std::memory_order_relaxed);
         std::atomic_ref<std::int32_t>(state_->waitable_swap_chain).store(waitable_swap_chain ? 1 : 0, std::memory_order_relaxed);
+        std::atomic_ref<std::int32_t>(state_->raw_input_enabled).store(raw_input_enabled ? 1 : 0, std::memory_order_relaxed);
         std::atomic_ref<std::int32_t>(state_->gpu_timing_available).store(gpu_timing_available ? 1 : 0, std::memory_order_relaxed);
+        std::atomic_ref<std::int64_t>(state_->last_input_to_present_us).store(-1, std::memory_order_relaxed);
         std::atomic_ref<std::int64_t>(state_->last_scene_gpu_us).store(-1, std::memory_order_relaxed);
         std::atomic_ref<std::int64_t>(state_->last_present_gpu_us).store(-1, std::memory_order_relaxed);
         std::atomic_ref<std::uint32_t>(state_->version).store(frame_warp_lab::runtime_state_version, std::memory_order_release);
@@ -67,7 +70,8 @@ public:
         frame_warp_lab::DiagnosticView view,
         frame_warp_lab::CameraPath path,
         std::int32_t stress_level,
-        bool overlay_enabled) {
+        bool overlay_enabled,
+        bool flash_indicator_enabled) {
         std::atomic_ref<std::int32_t>(state_->presentation_mode).store(static_cast<std::int32_t>(presentation_mode), std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->source_divider).store(source_divider, std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->vsync_enabled).store(vsync_enabled ? 1 : 0, std::memory_order_release);
@@ -75,14 +79,24 @@ public:
         std::atomic_ref<std::int32_t>(state_->camera_path).store(static_cast<std::int32_t>(path), std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->stress_level).store(stress_level, std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->overlay_enabled).store(overlay_enabled ? 1 : 0, std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->flash_indicator_enabled).store(flash_indicator_enabled ? 1 : 0, std::memory_order_release);
     }
 
-    void update_scene(double scene_time_seconds, bool paused, bool mouse_look_active, float yaw_deg, float pitch_deg) {
+    void update_scene(
+        double scene_time_seconds,
+        bool paused,
+        bool mouse_look_active,
+        float yaw_deg,
+        float pitch_deg,
+        const frame_warp_lab::LatencyMonitor& latency_monitor) {
         std::atomic_ref<std::int64_t>(state_->scene_time_ms).store(static_cast<std::int64_t>(scene_time_seconds * 1000.0), std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->scene_paused).store(paused ? 1 : 0, std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->mouse_look_active).store(mouse_look_active ? 1 : 0, std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->camera_yaw_millideg).store(static_cast<std::int32_t>(yaw_deg * 1000.0f), std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->camera_pitch_millideg).store(static_cast<std::int32_t>(pitch_deg * 1000.0f), std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->pcl_etw_listener_active).store(latency_monitor.etw_listener_active() ? 1 : 0, std::memory_order_release);
+        std::atomic_ref<std::int64_t>(state_->pcl_markers_emitted).store(latency_monitor.markers_emitted(), std::memory_order_release);
+        std::atomic_ref<std::int64_t>(state_->pcl_pings_received).store(latency_monitor.pings_received(), std::memory_order_release);
     }
 
     void record_frame(const frame_warp_lab::RuntimeFrameSample& sample, std::int64_t smoothed_present_interval_us) {
@@ -108,6 +122,12 @@ public:
         std::atomic_ref<std::int64_t>(state_->last_present_interval_us).store(sample.present_interval_us, std::memory_order_release);
         std::atomic_ref<std::int64_t>(state_->smoothed_present_interval_us).store(smoothed_present_interval_us, std::memory_order_release);
         std::atomic_ref<std::int64_t>(state_->last_source_age_us).store(sample.source_age_us, std::memory_order_release);
+        if (sample.input_to_present_us >= 0) {
+            std::atomic_ref<std::int64_t>(state_->last_input_to_present_us).store(sample.input_to_present_us, std::memory_order_release);
+        }
+        std::atomic_ref<std::int64_t>(state_->last_sim_cpu_us).store(sample.sim_cpu_us, std::memory_order_release);
+        std::atomic_ref<std::int64_t>(state_->last_render_submit_cpu_us).store(sample.render_submit_cpu_us, std::memory_order_release);
+        std::atomic_ref<std::int64_t>(state_->last_present_call_cpu_us).store(sample.present_call_cpu_us, std::memory_order_release);
         if (sample.scene_gpu_us >= 0) {
             std::atomic_ref<std::int64_t>(state_->last_scene_gpu_us).store(sample.scene_gpu_us, std::memory_order_release);
         }
@@ -125,6 +145,10 @@ public:
         slot.source_frame_id = sample.source_frame_id;
         slot.present_interval_us = sample.present_interval_us;
         slot.source_age_us = sample.source_age_us;
+        slot.input_to_present_us = sample.input_to_present_us;
+        slot.sim_cpu_us = sample.sim_cpu_us;
+        slot.render_submit_cpu_us = sample.render_submit_cpu_us;
+        slot.present_call_cpu_us = sample.present_call_cpu_us;
         slot.scene_gpu_us = sample.scene_gpu_us;
         slot.present_gpu_us = sample.present_gpu_us;
         slot.invalid_pixel_count = sample.invalid_pixel_count;
@@ -172,22 +196,22 @@ struct WindowInputState {
     bool left_drag_active = false;
     bool mouse_look_locked = false;
     bool cursor_hidden = false;
-    bool ignore_next_recenter = false;
+    bool raw_input_registered = false;
+    bool raw_input_received_this_frame = false;
+    bool flash_trigger_pending = false;
+    bool has_input_timestamp = false;
+    std::chrono::steady_clock::time_point earliest_input_time{};
     int last_cursor_x = 0;
     int last_cursor_y = 0;
     float pending_mouse_delta_x = 0.0f;
     float pending_mouse_delta_y = 0.0f;
 };
 
-void recenter_cursor(HWND window, WindowInputState& input) {
-    RECT client{};
-    if (!GetClientRect(window, &client)) return;
-    POINT center{(client.right - client.left) / 2, (client.bottom - client.top) / 2};
-    input.last_cursor_x = center.x;
-    input.last_cursor_y = center.y;
-    ClientToScreen(window, &center);
-    input.ignore_next_recenter = true;
-    SetCursorPos(center.x, center.y);
+void stamp_input_arrival(WindowInputState& input) {
+    if (!input.has_input_timestamp) {
+        input.earliest_input_time = std::chrono::steady_clock::now();
+        input.has_input_timestamp = true;
+    }
 }
 
 void set_mouse_look_locked(HWND window, WindowInputState& input, bool locked) {
@@ -204,12 +228,16 @@ void set_mouse_look_locked(HWND window, WindowInputState& input, bool locked) {
             ClientToScreen(window, &bottom_right);
             RECT screen_rect{top_left.x, top_left.y, bottom_right.x, bottom_right.y};
             ClipCursor(&screen_rect);
+            POINT center{(client.right - client.left) / 2, (client.bottom - client.top) / 2};
+            input.last_cursor_x = center.x;
+            input.last_cursor_y = center.y;
+            ClientToScreen(window, &center);
+            SetCursorPos(center.x, center.y);
         }
         if (!input.cursor_hidden) {
             ShowCursor(FALSE);
             input.cursor_hidden = true;
         }
-        recenter_cursor(window, input);
     } else {
         ClipCursor(nullptr);
         if (GetCapture() == window) ReleaseCapture();
@@ -217,16 +245,27 @@ void set_mouse_look_locked(HWND window, WindowInputState& input, bool locked) {
             ShowCursor(TRUE);
             input.cursor_hidden = false;
         }
-        input.ignore_next_recenter = false;
     }
 }
 
-frame_warp_lab::ManualCameraInput poll_manual_camera_input(HWND window, WindowInputState& input_state) {
+frame_warp_lab::ManualCameraInput consume_manual_camera_input(
+    HWND window,
+    WindowInputState& input_state,
+    bool& out_has_input_timestamp,
+    std::chrono::steady_clock::time_point& out_earliest_input_time,
+    bool& out_flash_triggered) {
     frame_warp_lab::ManualCameraInput input{};
     input.mouse_delta_x_px = input_state.pending_mouse_delta_x;
     input.mouse_delta_y_px = input_state.pending_mouse_delta_y;
     input_state.pending_mouse_delta_x = 0.0f;
     input_state.pending_mouse_delta_y = 0.0f;
+    input_state.raw_input_received_this_frame = false;
+    out_has_input_timestamp = input_state.has_input_timestamp;
+    out_earliest_input_time = input_state.earliest_input_time;
+    input_state.has_input_timestamp = false;
+    out_flash_triggered = input_state.flash_trigger_pending;
+    input_state.flash_trigger_pending = false;
+
     if (GetForegroundWindow() != window) return input;
     auto key_down = [](int virtual_key) -> bool { return (GetAsyncKeyState(virtual_key) & 0x8000) != 0; };
     if (key_down('W')) input.forward_axis += 1.0f;
@@ -291,7 +330,7 @@ void format_hud_lines(
     double smoothed_interval_us,
     std::int64_t last_scene_gpu_us,
     std::int64_t last_present_gpu_us,
-    std::int64_t last_source_age_us,
+    std::int64_t last_input_to_present_us,
     std::uint32_t last_invalid_pixels,
     std::uint32_t last_total_pixels,
     frame_warp_lab::PresentationMode mode,
@@ -300,12 +339,13 @@ void format_hud_lines(
     frame_warp_lab::CameraPath path,
     std::int32_t stress_level,
     bool vsync_enabled,
+    bool pcl_listener_active,
     bool mouse_look_locked) {
     const double frame_ms = smoothed_interval_us > 1.0 ? smoothed_interval_us / 1000.0 : 0.0;
     const double fps = frame_ms > 0.01 ? 1000.0 / frame_ms : 0.0;
     const double scene_ms = last_scene_gpu_us >= 0 ? static_cast<double>(last_scene_gpu_us) / 1000.0 : 0.0;
     const double warp_ms = last_present_gpu_us >= 0 ? static_cast<double>(last_present_gpu_us) / 1000.0 : 0.0;
-    const double age_ms = static_cast<double>(std::max<std::int64_t>(0, last_source_age_us)) / 1000.0;
+    const double input_ms = last_input_to_present_us >= 0 ? static_cast<double>(last_input_to_present_us) / 1000.0 : 0.0;
     const double holes_pct = last_total_pixels > 0
         ? (100.0 * static_cast<double>(last_invalid_pixels) / static_cast<double>(last_total_pixels))
         : 0.0;
@@ -314,13 +354,13 @@ void format_hud_lines(
     std::snprintf(line_buffer, sizeof(line_buffer), "FPS %5.1f  FT %5.2f MS  MODE %s /%d", fps, frame_ms, short_mode_label(mode), source_divider);
     hud.lines[0] = line_buffer;
 
-    std::snprintf(line_buffer, sizeof(line_buffer), "GPU SCN %4.2f MS  WRP %4.2f MS  AGE %4.1f MS", scene_ms, warp_ms, age_ms);
+    std::snprintf(line_buffer, sizeof(line_buffer), "GPU SCN %4.2f  WRP %4.2f  IN-PR %4.2f MS", scene_ms, warp_ms, input_ms);
     hud.lines[1] = line_buffer;
 
-    std::snprintf(line_buffer, sizeof(line_buffer), "HOLE %4.2f%%  PATH %s  STR %d  VSYNC %s", holes_pct, short_path_label(path), stress_level, vsync_enabled ? "ON" : "OFF");
+    std::snprintf(line_buffer, sizeof(line_buffer), "HOLE %4.2f%%  PCL %s  PATH %s  STR %d", holes_pct, pcl_listener_active ? "LIVE" : "RDY", short_path_label(path), stress_level);
     hud.lines[2] = line_buffer;
 
-    std::snprintf(line_buffer, sizeof(line_buffer), "%s  VIEW %s  1-3 MODE  H HOLE  O HUD", mouse_look_locked ? "RMB/ESC UNLOCK" : "LMB/RMB LOOK", short_view_label(view));
+    std::snprintf(line_buffer, sizeof(line_buffer), "%s  VSYNC %s  VIEW %s  F FLASH", mouse_look_locked ? "RMB/ESC UNLK" : "LMB/RMB LOOK", vsync_enabled ? "ON" : "OFF", short_view_label(view));
     hud.lines[3] = line_buffer;
 }
 
@@ -334,7 +374,34 @@ LRESULT CALLBACK window_procedure(HWND window, UINT message, WPARAM message_para
     if (!input) {
         return DefWindowProcW(window, message, message_parameter, message_data);
     }
+    if (message == WM_INPUT) {
+        UINT data_size = 0;
+        if (GetRawInputData(reinterpret_cast<HRAWINPUT>(message_data), RID_INPUT, nullptr, &data_size, sizeof(RAWINPUTHEADER)) == 0
+            && data_size > 0 && data_size <= 256) {
+            alignas(RAWINPUT) std::uint8_t buffer[256]{};
+            if (GetRawInputData(reinterpret_cast<HRAWINPUT>(message_data), RID_INPUT, buffer, &data_size, sizeof(RAWINPUTHEADER)) == data_size) {
+                const auto* raw = reinterpret_cast<const RAWINPUT*>(buffer);
+                if (raw->header.dwType == RIM_TYPEMOUSE) {
+                    if ((raw->data.mouse.usButtonFlags & RI_MOUSE_LEFT_BUTTON_DOWN) != 0) {
+                        input->flash_trigger_pending = true;
+                        stamp_input_arrival(*input);
+                    }
+                    if ((input->mouse_look_locked || input->left_drag_active)
+                        && (raw->data.mouse.usFlags & MOUSE_MOVE_ABSOLUTE) == 0
+                        && (raw->data.mouse.lLastX != 0 || raw->data.mouse.lLastY != 0)) {
+                        input->pending_mouse_delta_x += static_cast<float>(raw->data.mouse.lLastX);
+                        input->pending_mouse_delta_y += static_cast<float>(raw->data.mouse.lLastY);
+                        input->raw_input_received_this_frame = true;
+                        stamp_input_arrival(*input);
+                    }
+                }
+            }
+        }
+        return 0;
+    }
     if (message == WM_LBUTTONDOWN) {
+        input->flash_trigger_pending = true;
+        stamp_input_arrival(*input);
         if (!input->mouse_look_locked) {
             input->left_drag_active = true;
             input->last_cursor_x = GET_X_LPARAM(message_data);
@@ -357,29 +424,17 @@ LRESULT CALLBACK window_procedure(HWND window, UINT message, WPARAM message_para
     if (message == WM_MOUSEMOVE) {
         const int x = GET_X_LPARAM(message_data);
         const int y = GET_Y_LPARAM(message_data);
-        if (input->mouse_look_locked) {
-            if (input->ignore_next_recenter) {
-                input->ignore_next_recenter = false;
-                input->last_cursor_x = x;
-                input->last_cursor_y = y;
-                return 0;
-            }
+        if (!input->raw_input_received_this_frame && input->left_drag_active) {
             const int dx = x - input->last_cursor_x;
             const int dy = y - input->last_cursor_y;
             if (dx != 0 || dy != 0) {
                 input->pending_mouse_delta_x += static_cast<float>(dx);
                 input->pending_mouse_delta_y += static_cast<float>(dy);
-                recenter_cursor(window, *input);
+                stamp_input_arrival(*input);
             }
-            return 0;
         }
-        if (input->left_drag_active) {
-            input->pending_mouse_delta_x += static_cast<float>(x - input->last_cursor_x);
-            input->pending_mouse_delta_y += static_cast<float>(y - input->last_cursor_y);
-            input->last_cursor_x = x;
-            input->last_cursor_y = y;
-            return 0;
-        }
+        input->last_cursor_x = x;
+        input->last_cursor_y = y;
         return 0;
     }
     if (message == WM_KILLFOCUS || (message == WM_CAPTURECHANGED && reinterpret_cast<HWND>(message_data) != window)) {
@@ -412,18 +467,28 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         WindowInputState input_state{};
         SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(&input_state));
 
+        RAWINPUTDEVICE raw_mouse{};
+        raw_mouse.usUsagePage = 0x01;
+        raw_mouse.usUsage = 0x02;
+        raw_mouse.dwFlags = 0;
+        raw_mouse.hwndTarget = window;
+        input_state.raw_input_registered = RegisterRawInputDevices(&raw_mouse, 1, sizeof(raw_mouse)) != FALSE;
+
+        frame_warp_lab::LatencyMonitor latency_monitor;
+        latency_monitor.start_ping_loop(window);
+
         frame_warp_lab::Renderer renderer(window);
         RuntimeStatePublisher runtime_state(
             renderer.gpu_timing_available(),
             renderer.allow_tearing_enabled(),
-            renderer.waitable_swap_chain_enabled());
+            renderer.waitable_swap_chain_enabled(),
+            input_state.raw_input_registered);
         frame_warp_lab::SceneSimulation simulation;
 
         ShowWindow(window, show == SW_HIDE ? SW_SHOWNORMAL : show);
         RECT previous_client_rectangle{};
         GetClientRect(window, &previous_client_rectangle);
 
-        MSG message{};
         bool running = true;
         bool scene_paused = false;
         frame_warp_lab::PresentationMode presentation_mode = frame_warp_lab::PresentationMode::full_render;
@@ -432,6 +497,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         frame_warp_lab::DiagnosticView diagnostic_view = frame_warp_lab::DiagnosticView::final_color;
         std::int32_t stress_level = 0;
         bool overlay_enabled = true;
+        bool flash_indicator_enabled = false;
+        bool pending_pcl_ping = false;
 
         std::int64_t display_frame_id = 0;
         std::int64_t source_frame_id = 0;
@@ -445,7 +512,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         double smoothed_present_interval_us = 0.0;
         std::int64_t last_scene_gpu_us = -1;
         std::int64_t last_present_gpu_us = -1;
-        std::int64_t last_source_age_us = 0;
+        std::int64_t last_input_to_present_us = -1;
         std::uint32_t last_invalid_pixels = 0;
         std::uint32_t last_total_pixels = 0;
 
@@ -453,13 +520,27 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         hud_state.max_graph_ms = 25.0f;
         hud_state.target_frame_ms = query_nominal_target_frame_ms(window);
 
-        runtime_state.update_config(presentation_mode, source_divider, vsync_enabled, diagnostic_view, simulation.path(), stress_level, overlay_enabled);
+        runtime_state.update_config(
+            presentation_mode,
+            source_divider,
+            vsync_enabled,
+            diagnostic_view,
+            simulation.path(),
+            stress_level,
+            overlay_enabled,
+            flash_indicator_enabled);
 
-        while (running) {
+        auto pump_messages = [&]() {
+            MSG message{};
             while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
                 if (message.message == WM_QUIT) {
                     running = false;
                     break;
+                }
+                if (latency_monitor.is_ping_message(message.message)) {
+                    pending_pcl_ping = true;
+                    stamp_input_arrival(input_state);
+                    continue;
                 }
                 if (message.message == WM_KEYDOWN && (message.lParam & (1LL << 30)) == 0) {
                     bool config_changed = false;
@@ -488,6 +569,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                         config_changed = true;
                     } else if (message.wParam == 'O') {
                         overlay_enabled = !overlay_enabled;
+                        config_changed = true;
+                    } else if (message.wParam == 'F') {
+                        flash_indicator_enabled = !flash_indicator_enabled;
                         config_changed = true;
                     } else if (message.wParam == 'V') {
                         vsync_enabled = !vsync_enabled;
@@ -524,7 +608,15 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                     }
                     if (config_changed) {
                         runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, static_cast<std::int32_t>(message.wParam));
-                        runtime_state.update_config(presentation_mode, source_divider, vsync_enabled, diagnostic_view, simulation.path(), stress_level, overlay_enabled);
+                        runtime_state.update_config(
+                            presentation_mode,
+                            source_divider,
+                            vsync_enabled,
+                            diagnostic_view,
+                            simulation.path(),
+                            stress_level,
+                            overlay_enabled,
+                            flash_indicator_enabled);
                     }
                 }
                 if (message.message == frame_warp_lab::control_message) {
@@ -573,18 +665,39 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                     } else if (command == frame_warp_lab::ControlCommand::set_vsync_enabled) {
                         vsync_enabled = message.lParam != 0;
                         runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, vsync_enabled ? 601 : 600);
+                    } else if (command == frame_warp_lab::ControlCommand::set_flash_indicator) {
+                        flash_indicator_enabled = message.lParam != 0;
+                        runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, flash_indicator_enabled ? 701 : 700);
                     }
                     previous_tick = std::chrono::steady_clock::now();
-                    runtime_state.update_config(presentation_mode, source_divider, vsync_enabled, diagnostic_view, simulation.path(), stress_level, overlay_enabled);
+                    runtime_state.update_config(
+                        presentation_mode,
+                        source_divider,
+                        vsync_enabled,
+                        diagnostic_view,
+                        simulation.path(),
+                        stress_level,
+                        overlay_enabled,
+                        flash_indicator_enabled);
                     float yaw_deg = 0.0f;
                     float pitch_deg = 0.0f;
                     simulation.current_camera_angles_degrees(yaw_deg, pitch_deg);
-                    runtime_state.update_scene(simulation.time_seconds(), scene_paused, input_state.mouse_look_locked || input_state.left_drag_active, yaw_deg, pitch_deg);
+                    runtime_state.update_scene(
+                        simulation.time_seconds(),
+                        scene_paused,
+                        input_state.mouse_look_locked || input_state.left_drag_active,
+                        yaw_deg,
+                        pitch_deg,
+                        latency_monitor);
                     continue;
                 }
                 TranslateMessage(&message);
                 DispatchMessageW(&message);
             }
+        };
+
+        while (running) {
+            pump_messages();
             if (!running) break;
             if (IsIconic(window)) {
                 WaitMessage();
@@ -592,16 +705,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 has_previous_present = false;
                 continue;
             }
-
-            const auto current_tick = std::chrono::steady_clock::now();
-            const frame_warp_lab::ManualCameraInput manual_input = poll_manual_camera_input(window, input_state);
-            if (simulation.take_manual_control_if_needed(manual_input)) {
-                has_completed_source = false;
-                runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, 104);
-                runtime_state.update_config(presentation_mode, source_divider, vsync_enabled, diagnostic_view, simulation.path(), stress_level, overlay_enabled);
-            }
-            simulation.advance(std::chrono::duration<double>(current_tick - previous_tick).count(), scene_paused, manual_input);
-            previous_tick = current_tick;
 
             RECT current_client_rectangle{};
             if (!GetClientRect(window, &current_client_rectangle)) {
@@ -624,7 +727,50 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 hud_state.target_frame_ms = query_nominal_target_frame_ms(window);
             }
 
+            renderer.wait_for_frame_slot();
+            pump_messages();
+            if (!running) break;
+
             ++display_frame_id;
+            const auto frame_id_u64 = static_cast<std::uint64_t>(display_frame_id);
+            const auto sim_begin_time = std::chrono::steady_clock::now();
+            latency_monitor.emit_marker(frame_warp_lab::LatencyMarker::simulation_start, frame_id_u64);
+            if (pending_pcl_ping) {
+                latency_monitor.record_ping_received(frame_id_u64);
+                pending_pcl_ping = false;
+            }
+
+            bool has_input_timestamp = false;
+            std::chrono::steady_clock::time_point earliest_input_time{};
+            bool flash_triggered = false;
+            const frame_warp_lab::ManualCameraInput manual_input = consume_manual_camera_input(
+                window,
+                input_state,
+                has_input_timestamp,
+                earliest_input_time,
+                flash_triggered);
+            if (flash_triggered && flash_indicator_enabled) {
+                latency_monitor.emit_marker(frame_warp_lab::LatencyMarker::trigger_flash, frame_id_u64);
+            }
+
+            if (simulation.take_manual_control_if_needed(manual_input)) {
+                has_completed_source = false;
+                runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, 104);
+                runtime_state.update_config(
+                    presentation_mode,
+                    source_divider,
+                    vsync_enabled,
+                    diagnostic_view,
+                    simulation.path(),
+                    stress_level,
+                    overlay_enabled,
+                    flash_indicator_enabled);
+            }
+
+            const auto current_tick = std::chrono::steady_clock::now();
+            simulation.advance(std::chrono::duration<double>(current_tick - previous_tick).count(), scene_paused, manual_input);
+            previous_tick = current_tick;
+
             const std::int32_t effective_divider = presentation_mode == frame_warp_lab::PresentationMode::full_render ? 1 : source_divider;
             const bool render_scene_pass = !has_completed_source || (cadence_counter % effective_divider == 0);
             ++cadence_counter;
@@ -666,12 +812,17 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 }
             }
 
+            latency_monitor.emit_marker(frame_warp_lab::LatencyMarker::camera_constructed, frame_id_u64);
+            const auto sim_end_time = std::chrono::steady_clock::now();
+            latency_monitor.emit_marker(frame_warp_lab::LatencyMarker::simulation_end, frame_id_u64);
+            const std::int64_t sim_cpu_us = std::chrono::duration_cast<std::chrono::microseconds>(sim_end_time - sim_begin_time).count();
+
             format_hud_lines(
                 hud_state,
                 smoothed_present_interval_us,
                 last_scene_gpu_us,
                 last_present_gpu_us,
-                last_source_age_us,
+                last_input_to_present_us,
                 last_invalid_pixels,
                 last_total_pixels,
                 presentation_mode,
@@ -680,24 +831,34 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 simulation.path(),
                 stress_level,
                 vsync_enabled,
+                latency_monitor.etw_listener_active(),
                 input_state.mouse_look_locked);
 
-            const frame_warp_lab::FrameExecutionMetrics gpu_metrics = renderer.render_and_present(frame_warp_lab::FrameRenderRequest{
-                latest_source_snapshot,
-                target_camera,
-                hud_state,
-                diagnostic_view,
-                stress_level,
-                overlay_enabled,
-                render_scene_pass,
-                warp_enabled,
-                vsync_enabled,
-            });
+            const frame_warp_lab::FrameExecutionMetrics gpu_metrics = renderer.render_and_present(
+                frame_warp_lab::FrameRenderRequest{
+                    frame_id_u64,
+                    latest_source_snapshot,
+                    target_camera,
+                    hud_state,
+                    diagnostic_view,
+                    stress_level,
+                    overlay_enabled,
+                    flash_indicator_enabled,
+                    flash_triggered && flash_indicator_enabled,
+                    render_scene_pass,
+                    warp_enabled,
+                    vsync_enabled,
+                },
+                latency_monitor);
+
             const auto present_complete_time = std::chrono::steady_clock::now();
             const std::int64_t present_interval_us = has_previous_present
                 ? std::chrono::duration_cast<std::chrono::microseconds>(present_complete_time - previous_present_tick).count()
                 : 0;
             const std::int64_t source_age_us = std::chrono::duration_cast<std::chrono::microseconds>(present_complete_time - latest_source_capture_time).count();
+            const std::int64_t input_to_present_us = has_input_timestamp
+                ? std::chrono::duration_cast<std::chrono::microseconds>(present_complete_time - earliest_input_time).count()
+                : -1;
             previous_present_tick = present_complete_time;
             has_previous_present = true;
 
@@ -708,9 +869,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                     smoothed_present_interval_us = smoothed_present_interval_us * 0.88 + static_cast<double>(present_interval_us) * 0.12;
                 }
             }
+            if (input_to_present_us >= 0) last_input_to_present_us = input_to_present_us;
             if (gpu_metrics.completed_scene_gpu_us >= 0) last_scene_gpu_us = gpu_metrics.completed_scene_gpu_us;
             if (gpu_metrics.completed_present_gpu_us >= 0) last_present_gpu_us = gpu_metrics.completed_present_gpu_us;
-            last_source_age_us = source_age_us;
             if (gpu_metrics.completed_slot_warped) {
                 last_invalid_pixels = gpu_metrics.completed_invalid_pixel_count;
                 last_total_pixels = gpu_metrics.completed_total_pixel_count;
@@ -732,7 +893,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
             float yaw_deg = 0.0f;
             float pitch_deg = 0.0f;
             simulation.current_camera_angles_degrees(yaw_deg, pitch_deg);
-            runtime_state.update_scene(simulation.time_seconds(), scene_paused, input_state.mouse_look_locked || input_state.left_drag_active, yaw_deg, pitch_deg);
+            runtime_state.update_scene(
+                simulation.time_seconds(),
+                scene_paused,
+                input_state.mouse_look_locked || input_state.left_drag_active,
+                yaw_deg,
+                pitch_deg,
+                latency_monitor);
             runtime_state.record_frame(
                 frame_warp_lab::RuntimeFrameSample{
                     0,
@@ -740,6 +907,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                     latest_source_snapshot.source_frame_id,
                     present_interval_us,
                     source_age_us,
+                    input_to_present_us,
+                    sim_cpu_us,
+                    gpu_metrics.render_submit_cpu_us,
+                    gpu_metrics.present_call_cpu_us,
                     gpu_metrics.completed_scene_gpu_us,
                     gpu_metrics.completed_present_gpu_us,
                     gpu_metrics.completed_invalid_pixel_count,
@@ -759,6 +930,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         }
 
         set_mouse_look_locked(window, input_state, false);
+        latency_monitor.stop();
         renderer.flush();
         return 0;
     } catch (const std::exception& error) {

@@ -399,5 +399,15 @@ float4 pixel_main(VertexOutput input) : SV_Target {
         output_color = composite_hud_layer(input.position.xy, output_color);
     }
 
+    bool flash_enabled = warp_flags_and_aspect.z > 0.5;
+    if (flash_enabled) {
+        bool in_flash_box = input.position.x >= 0.0 && input.position.x < 72.0
+            && abs(input.position.y - viewport_size.y * 0.5) < 48.0;
+        if (in_flash_box) {
+            bool flash_lit = warp_flags_and_aspect.w > 0.5;
+            output_color = flash_lit ? float3(1.0, 1.0, 1.0) : float3(0.02, 0.02, 0.02);
+        }
+    }
+
     return float4(output_color, 1.0);
 }

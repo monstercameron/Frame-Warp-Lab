@@ -1,5 +1,6 @@
 #pragma once
 
+#include "latency_monitor.h"
 #include "runtime_state.h"
 #include "simulation.h"
 
@@ -32,6 +33,8 @@ struct HudOverlayState {
 struct FrameExecutionMetrics {
     std::int64_t completed_scene_gpu_us;
     std::int64_t completed_present_gpu_us;
+    std::int64_t render_submit_cpu_us;
+    std::int64_t present_call_cpu_us;
     std::uint32_t completed_invalid_pixel_count;
     std::uint32_t completed_total_pixel_count;
     bool completed_slot_valid;
@@ -41,12 +44,15 @@ struct FrameExecutionMetrics {
 };
 
 struct FrameRenderRequest {
+    std::uint64_t display_frame_id;
     SceneSnapshot source_snapshot;
     CameraBasis target_camera;
     HudOverlayState hud;
     DiagnosticView diagnostic_view;
     std::int32_t stress_level;
     bool overlay_enabled;
+    bool flash_indicator_enabled;
+    bool flash_triggered;
     bool render_scene_pass;
     bool warp_enabled;
     bool vsync_enabled;
@@ -60,7 +66,8 @@ public:
     Renderer(const Renderer&) = delete;
     Renderer& operator=(const Renderer&) = delete;
 
-    FrameExecutionMetrics render_and_present(const FrameRenderRequest& request);
+    void wait_for_frame_slot();
+    FrameExecutionMetrics render_and_present(const FrameRenderRequest& request, LatencyMonitor& latency_monitor);
     void resize(UINT width, UINT height);
     void flush();
     bool gpu_timing_available() const { return gpu_timestamp_frequency_ > 0; }
@@ -132,6 +139,8 @@ private:
     std::array<bool, swap_chain_buffer_count> buffer_warped_{};
     std::array<std::uint32_t, swap_chain_buffer_count> buffer_total_pixels_{};
     std::uint64_t next_fence_value_ = 1;
+    UINT pending_buffer_index_ = 0;
+    bool has_acquired_slot_ = false;
     UINT swap_chain_flags_ = 0;
     bool allow_tearing_supported_ = false;
     UINT render_target_descriptor_stride_ = 0;

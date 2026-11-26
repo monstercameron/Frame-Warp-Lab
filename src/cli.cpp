@@ -9,6 +9,7 @@
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -75,6 +76,11 @@ bool parse_unsigned_long(const wchar_t* text, unsigned long& value) {
     if (text[0] == L'\0' || *end != L'\0' || parsed == ULONG_MAX) return false;
     value = parsed;
     return true;
+}
+
+bool file_exists(const wchar_t* path) {
+    std::error_code error;
+    return std::filesystem::exists(path, error);
 }
 
 class RuntimeStateView {
@@ -215,8 +221,14 @@ int print_status(const WindowInstance& instance) {
     const std::int64_t present_interval_us = std::atomic_ref<std::int64_t>(state->last_present_interval_us).load(std::memory_order_acquire);
     const std::int64_t smoothed_interval_us = std::atomic_ref<std::int64_t>(state->smoothed_present_interval_us).load(std::memory_order_acquire);
     const std::int64_t source_age_us = std::atomic_ref<std::int64_t>(state->last_source_age_us).load(std::memory_order_acquire);
+    const std::int64_t input_to_present_us = std::atomic_ref<std::int64_t>(state->last_input_to_present_us).load(std::memory_order_acquire);
+    const std::int64_t sim_cpu_us = std::atomic_ref<std::int64_t>(state->last_sim_cpu_us).load(std::memory_order_acquire);
+    const std::int64_t render_submit_cpu_us = std::atomic_ref<std::int64_t>(state->last_render_submit_cpu_us).load(std::memory_order_acquire);
+    const std::int64_t present_call_cpu_us = std::atomic_ref<std::int64_t>(state->last_present_call_cpu_us).load(std::memory_order_acquire);
     const std::int64_t scene_gpu_us = std::atomic_ref<std::int64_t>(state->last_scene_gpu_us).load(std::memory_order_acquire);
     const std::int64_t present_gpu_us = std::atomic_ref<std::int64_t>(state->last_present_gpu_us).load(std::memory_order_acquire);
+    const std::int64_t pcl_markers_emitted = std::atomic_ref<std::int64_t>(state->pcl_markers_emitted).load(std::memory_order_acquire);
+    const std::int64_t pcl_pings_received = std::atomic_ref<std::int64_t>(state->pcl_pings_received).load(std::memory_order_acquire);
     const std::uint32_t invalid_pixels = std::atomic_ref<std::uint32_t>(state->last_invalid_pixel_count).load(std::memory_order_acquire);
     const std::uint32_t total_pixels = std::atomic_ref<std::uint32_t>(state->last_total_pixel_count).load(std::memory_order_acquire);
     const std::int32_t presentation_mode = std::atomic_ref<std::int32_t>(state->presentation_mode).load(std::memory_order_acquire);
@@ -228,6 +240,9 @@ int print_status(const WindowInstance& instance) {
     const std::int32_t camera_path = std::atomic_ref<std::int32_t>(state->camera_path).load(std::memory_order_acquire);
     const std::int32_t stress_level = std::atomic_ref<std::int32_t>(state->stress_level).load(std::memory_order_acquire);
     const std::int32_t overlay_enabled = std::atomic_ref<std::int32_t>(state->overlay_enabled).load(std::memory_order_acquire);
+    const std::int32_t flash_indicator_enabled = std::atomic_ref<std::int32_t>(state->flash_indicator_enabled).load(std::memory_order_acquire);
+    const std::int32_t raw_input_enabled = std::atomic_ref<std::int32_t>(state->raw_input_enabled).load(std::memory_order_acquire);
+    const std::int32_t pcl_etw_listener_active = std::atomic_ref<std::int32_t>(state->pcl_etw_listener_active).load(std::memory_order_acquire);
     const std::int32_t mouse_look_active = std::atomic_ref<std::int32_t>(state->mouse_look_active).load(std::memory_order_acquire);
     const std::int32_t camera_yaw_millideg = std::atomic_ref<std::int32_t>(state->camera_yaw_millideg).load(std::memory_order_acquire);
     const std::int32_t camera_pitch_millideg = std::atomic_ref<std::int32_t>(state->camera_pitch_millideg).load(std::memory_order_acquire);
@@ -236,7 +251,7 @@ int print_status(const WindowInstance& instance) {
 
     RECT client_rectangle{};
     const bool has_client_size = GetClientRect(instance.window, &client_rectangle) != 0;
-    std::cout << "{\"ok\":true,\"schema_version\":4,\"process_id\":" << instance.process_id
+    std::cout << "{\"ok\":true,\"schema_version\":5,\"process_id\":" << instance.process_id
               << ",\"running\":" << (running ? "true" : "false")
               << ",\"present_calls_completed\":" << present_count
               << ",\"display_frame_id\":" << display_frame_id
@@ -255,6 +270,7 @@ int print_status(const WindowInstance& instance) {
               << ",\"vsync_enabled\":" << (vsync_enabled ? "true" : "false")
               << ",\"allow_tearing_enabled\":" << (allow_tearing_enabled ? "true" : "false")
               << ",\"waitable_swap_chain\":" << (waitable_swap_chain ? "true" : "false")
+              << ",\"wait_before_input_sample\":true"
               << ",\"max_frame_latency\":1,\"displayed_frame_timing\":null}"
               << ",\"timing\":{\"cpu_present_interval_us\":" << present_interval_us
               << ",\"smoothed_present_interval_us\":" << smoothed_interval_us
@@ -269,6 +285,18 @@ int print_status(const WindowInstance& instance) {
               << ",\"invalid_pixel_ratio\":";
     print_ratio(invalid_pixels, total_pixels);
     std::cout << ",\"note\":\"cpu_present_interval_us and smoothed_present_fps reflect Present return cadence, not physical display scanout\"}"
+              << ",\"latency\":{\"raw_input_enabled\":" << (raw_input_enabled ? "true" : "false")
+              << ",\"flash_indicator_enabled\":" << (flash_indicator_enabled ? "true" : "false")
+              << ",\"input_to_present_us\":";
+    print_nullable_int64(input_to_present_us);
+    std::cout << ",\"sim_cpu_us\":" << sim_cpu_us
+              << ",\"render_submit_cpu_us\":" << render_submit_cpu_us
+              << ",\"present_call_cpu_us\":" << present_call_cpu_us
+              << ",\"nvidia_pcl_etw\":{\"provider\":\"PCLStatsTraceLoggingProvider\",\"listener_active\":"
+              << (pcl_etw_listener_active ? "true" : "false")
+              << ",\"markers_emitted\":" << pcl_markers_emitted
+              << ",\"pings_received\":" << pcl_pings_received
+              << "},\"note\":\"input_to_present_us measures software input arrival to Present return; physical display scanout requires FrameView/PresentMon ETW or Reflex Latency Analyzer\"}"
               << ",\"scene\":{\"name\":\"motion_lab\",\"time_ms\":" << scene_time_ms
               << ",\"paused\":" << (scene_paused ? "true" : "false")
               << ",\"camera_path\":\"" << frame_warp_lab::camera_path_name(camera_path)
@@ -278,7 +306,7 @@ int print_status(const WindowInstance& instance) {
               << "},\"diagnostic_view\":\"" << frame_warp_lab::diagnostic_view_name(diagnostic_view)
               << "\",\"stress_level\":" << stress_level
               << ",\"overlay_enabled\":" << (overlay_enabled ? "true" : "false") << "}"
-              << ",\"features\":{\"scene\":\"cpu_camera_gbuffer\",\"hud\":\"2d_frametime_graph_and_readout\",\"reprojection\":\"depth_camera_warp\",\"frame_generation\":\"not_implemented\",\"vrs\":\"not_implemented\"}}\n";
+              << ",\"features\":{\"scene\":\"cpu_camera_gbuffer\",\"hud\":\"2d_frametime_graph_and_readout\",\"reprojection\":\"depth_camera_warp\",\"nvidia_pcl_markers\":\"etw_tracelogging_active\",\"frame_generation\":\"not_implemented\",\"vrs\":\"not_implemented\"}}\n";
     return 0;
 }
 
@@ -291,7 +319,7 @@ int print_events(const WindowInstance& instance) {
     const std::int32_t event_count = std::atomic_ref<std::int32_t>(state->event_count).load(std::memory_order_acquire);
     const std::int32_t first_sequence = event_count > static_cast<std::int32_t>(frame_warp_lab::runtime_event_capacity)
         ? event_count - static_cast<std::int32_t>(frame_warp_lab::runtime_event_capacity) + 1 : 1;
-    std::cout << "{\"ok\":true,\"schema_version\":4,\"process_id\":" << instance.process_id
+    std::cout << "{\"ok\":true,\"schema_version\":5,\"process_id\":" << instance.process_id
               << ",\"capacity\":" << frame_warp_lab::runtime_event_capacity << ",\"total_events\":" << event_count << ",\"events\":[";
     bool first_event = true;
     for (std::int32_t sequence = first_sequence; sequence <= event_count; ++sequence) {
@@ -333,6 +361,10 @@ int print_trace(const WindowInstance& instance, std::size_t max_samples, bool in
     captured.reserve(static_cast<std::size_t>(std::max<std::int64_t>(0, available)));
     std::vector<std::int64_t> present_intervals;
     std::vector<std::int64_t> source_ages;
+    std::vector<std::int64_t> input_to_presents;
+    std::vector<std::int64_t> sim_cpu_times;
+    std::vector<std::int64_t> render_submit_cpu_times;
+    std::vector<std::int64_t> present_call_cpu_times;
     std::vector<std::int64_t> scene_gpu_times;
     std::vector<std::int64_t> present_gpu_times;
     std::vector<double> invalid_ratios;
@@ -352,6 +384,10 @@ int print_trace(const WindowInstance& instance, std::size_t max_samples, bool in
         captured.push_back(copy);
         if (copy.present_interval_us > 0) present_intervals.push_back(copy.present_interval_us);
         if (copy.source_age_us >= 0) source_ages.push_back(copy.source_age_us);
+        if (copy.input_to_present_us >= 0) input_to_presents.push_back(copy.input_to_present_us);
+        if (copy.sim_cpu_us >= 0) sim_cpu_times.push_back(copy.sim_cpu_us);
+        if (copy.render_submit_cpu_us >= 0) render_submit_cpu_times.push_back(copy.render_submit_cpu_us);
+        if (copy.present_call_cpu_us >= 0) present_call_cpu_times.push_back(copy.present_call_cpu_us);
         if (copy.scene_gpu_us >= 0) scene_gpu_times.push_back(copy.scene_gpu_us);
         if (copy.present_gpu_us >= 0) present_gpu_times.push_back(copy.present_gpu_us);
         if (copy.gpu_slot_warped && copy.total_pixel_count > 0) {
@@ -365,12 +401,12 @@ int print_trace(const WindowInstance& instance, std::size_t max_samples, bool in
         }
     }
 
-    std::cout << "{\"ok\":true,\"schema_version\":4,\"process_id\":" << instance.process_id
+    std::cout << "{\"ok\":true,\"schema_version\":5,\"process_id\":" << instance.process_id
               << ",\"capacity\":" << frame_warp_lab::runtime_frame_trace_capacity
               << ",\"total_frames_recorded\":" << total_samples
               << ",\"sample_count\":" << captured.size()
               << ",\"units\":\"microseconds\""
-              << ",\"note\":\"cpu_present_interval_us is Present return cadence, not physical display scanout; GPU timings and invalid-pixel counts come from the completed swap-chain slot\""
+              << ",\"note\":\"cpu_present_interval_us is Present return cadence; input_to_present_us is software input arrival to Present return; GPU timings come from the completed swap-chain slot\""
               << ",\"summary\":{\"frame_kinds\":{\"rendered\":" << rendered_count
               << ",\"repeated\":" << repeated_count
               << ",\"warped\":" << warped_count
@@ -379,6 +415,14 @@ int print_trace(const WindowInstance& instance, std::size_t max_samples, bool in
     print_metric_summary(present_intervals);
     std::cout << ",\"cpu_source_age_us\":";
     print_metric_summary(source_ages);
+    std::cout << ",\"input_to_present_us\":";
+    print_metric_summary(input_to_presents);
+    std::cout << ",\"sim_cpu_us\":";
+    print_metric_summary(sim_cpu_times);
+    std::cout << ",\"render_submit_cpu_us\":";
+    print_metric_summary(render_submit_cpu_times);
+    std::cout << ",\"present_call_cpu_us\":";
+    print_metric_summary(present_call_cpu_times);
     std::cout << ",\"scene_gpu_us\":";
     print_metric_summary(scene_gpu_times);
     std::cout << ",\"present_gpu_us\":";
@@ -402,6 +446,11 @@ int print_trace(const WindowInstance& instance, std::size_t max_samples, bool in
                       << ",\"source_divider\":" << sample.source_divider
                       << ",\"cpu_present_interval_us\":" << sample.present_interval_us
                       << ",\"cpu_source_age_us\":" << sample.source_age_us
+                      << ",\"input_to_present_us\":";
+            print_nullable_int64(sample.input_to_present_us);
+            std::cout << ",\"sim_cpu_us\":" << sample.sim_cpu_us
+                      << ",\"render_submit_cpu_us\":" << sample.render_submit_cpu_us
+                      << ",\"present_call_cpu_us\":" << sample.present_call_cpu_us
                       << ",\"scene_gpu_us\":";
             print_nullable_int64(sample.scene_gpu_us);
             std::cout << ",\"present_gpu_us\":";
@@ -468,8 +517,13 @@ int apply_setting(const WindowInstance& instance, const std::wstring& key, const
         if (value == L"on" || value == L"1" || value == L"true") parameter = 1;
         else if (value == L"off" || value == L"0" || value == L"false") parameter = 0;
         else return fail("invalid_value", "Expected overlay in {on, off}");
+    } else if (key == L"flash") {
+        command = frame_warp_lab::ControlCommand::set_flash_indicator;
+        if (value == L"on" || value == L"1" || value == L"true") parameter = 1;
+        else if (value == L"off" || value == L"0" || value == L"false") parameter = 0;
+        else return fail("invalid_value", "Expected flash in {on, off}");
     } else {
-        return fail("unknown_setting", "Supported settings are: mode, divider, vsync, view, path, stress, overlay");
+        return fail("unknown_setting", "Supported settings are: mode, divider, vsync, view, path, stress, overlay, flash");
     }
 
     if (!PostMessageW(instance.window, frame_warp_lab::control_message, static_cast<WPARAM>(command), parameter)) {
@@ -543,7 +597,14 @@ int print_capabilities() {
     }
     D3D12_FEATURE_DATA_D3D12_OPTIONS6 options{};
     result = device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS6, &options, sizeof(options));
-    std::cout << "{\"ok\":true,\"schema_version\":4,\"scope\":\"new_default_d3d12_device_not_runtime_instance\",\"adapter\":";
+
+    const bool nvapi_arm64_present = file_exists(L"C:\\Windows\\System32\\nvapia64.dll");
+    const bool frameview_sdk_arm64_present = file_exists(L"C:\\Program Files\\NVIDIA Corporation\\FrameViewSDK\\bin\\FvSDK_arm64.dll")
+        || file_exists(L"C:\\Program Files\\NVIDIA Corporation\\FrameViewSDK\\SDK\\Public_Release\\ARM64\\FvSDK_ARM64.dll");
+    const bool presentmon_arm64_present = file_exists(L"C:\\Program Files\\NVIDIA Corporation\\FrameViewSDK\\bin\\PresentMon_arm64.exe");
+    const bool nvrla_present = file_exists(L"C:\\Program Files\\NVIDIA Corporation\\FrameViewSDK\\bin\\nvrla.exe");
+
+    std::cout << "{\"ok\":true,\"schema_version\":5,\"scope\":\"new_default_d3d12_device_not_runtime_instance\",\"adapter\":";
     print_adapter(device.Get(), factory.Get());
     std::cout << ",\"presentation\":{\"allow_tearing_query_available\":" << (tearing_query_available ? "true" : "false")
               << ",\"allow_tearing_supported\":" << (allow_tearing ? "true" : "false") << "},\"vrs\":";
@@ -551,7 +612,12 @@ int print_capabilities() {
     else std::cout << "{\"query_available\":true,\"tier\":" << static_cast<int>(options.VariableShadingRateTier)
                    << ",\"additional_shading_rates_supported\":" << (options.AdditionalShadingRatesSupported ? "true" : "false")
                    << ",\"tile_size_px\":" << options.ShadingRateImageTileSize << "}";
-    std::cout << ",\"dlss_frame_generation\":\"not_queried\"}\n";
+    std::cout << ",\"nvidia_latency_tools\":{\"pcl_etw_provider_integrated\":true,\"nvapi_arm64_dll_present\":"
+              << (nvapi_arm64_present ? "true" : "false")
+              << ",\"frameview_sdk_arm64_present\":" << (frameview_sdk_arm64_present ? "true" : "false")
+              << ",\"presentmon_arm64_present\":" << (presentmon_arm64_present ? "true" : "false")
+              << ",\"reflex_latency_analyzer_cli_present\":" << (nvrla_present ? "true" : "false")
+              << "},\"dlss_frame_generation\":\"not_queried\"}\n";
     return 0;
 }
 
@@ -559,14 +625,14 @@ int print_capabilities() {
 
 int wmain(int argument_count, wchar_t** arguments) {
     if (argument_count == 2 && std::wstring(arguments[1]) == L"help") {
-        std::cout << "{\"ok\":true,\"schema_version\":4,\"commands\":[\"help\",\"start\",\"instances\",\"status <pid>\",\"events <pid>\",\"trace <pid> [limit] [summary]\",\"set <pid> <key> <value>\",\"pause <pid>\",\"resume <pid>\",\"reset <pid>\",\"stop <pid>\",\"capabilities\"],\"settings\":{\"mode\":[\"full_render\",\"repeat\",\"reproject\"],\"divider\":\"1..8\",\"vsync\":[\"on\",\"off\"],\"view\":[\"final\",\"depth\",\"motion\",\"holes\"],\"path\":[\"corridor_sway\",\"fast_pan\",\"occlusion_sweep\",\"camera_cut\",\"manual\"],\"stress\":\"0..64\",\"overlay\":[\"on\",\"off\"]}}\n";
+        std::cout << "{\"ok\":true,\"schema_version\":5,\"commands\":[\"help\",\"start\",\"instances\",\"status <pid>\",\"events <pid>\",\"trace <pid> [limit] [summary]\",\"set <pid> <key> <value>\",\"pause <pid>\",\"resume <pid>\",\"reset <pid>\",\"stop <pid>\",\"capabilities\"],\"settings\":{\"mode\":[\"full_render\",\"repeat\",\"reproject\"],\"divider\":\"1..8\",\"vsync\":[\"on\",\"off\"],\"view\":[\"final\",\"depth\",\"motion\",\"holes\"],\"path\":[\"corridor_sway\",\"fast_pan\",\"occlusion_sweep\",\"camera_cut\",\"manual\"],\"stress\":\"0..64\",\"overlay\":[\"on\",\"off\"],\"flash\":[\"on\",\"off\"]}}\n";
         return 0;
     }
     if (argument_count == 2 && std::wstring(arguments[1]) == L"capabilities") return print_capabilities();
     if (argument_count == 2 && std::wstring(arguments[1]) == L"start") return start_instance();
     const auto instances = find_instances();
     if (argument_count == 2 && std::wstring(arguments[1]) == L"instances") {
-        std::cout << "{\"ok\":true,\"schema_version\":4,\"instances\":[";
+        std::cout << "{\"ok\":true,\"schema_version\":5,\"instances\":[";
         for (std::size_t index = 0; index < instances.size(); ++index) {
             if (index) std::cout << ',';
             std::cout << "{\"process_id\":" << instances[index].process_id << "}";

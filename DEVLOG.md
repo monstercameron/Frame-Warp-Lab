@@ -1,5 +1,16 @@
 # Development log
 
+## v0.8.0 — Low-latency wait-before-input loop, Win32 Raw Input, and NVIDIA PCL ETW telemetry
+
+- Reordered the render loop in `src/main.cpp` and `src/renderer.cpp` to split `Renderer::wait_for_frame_slot()` from `render_and_present()`, waiting on the waitable swap chain and GPU fence *before* pumping the latest input and constructing the camera pose.
+- Added Win32 Raw Input (`RegisterRawInputDevices` for `HID_USAGE_GENERIC_MOUSE` + `WM_INPUT` `GetRawInputData`) so hardware mouse deltas bypass Windows cursor acceleration and `SetCursorPos` round-trip latency, with `WM_MOUSEMOVE` kept as fallback when Raw Input is absent.
+- Added clean-room NVIDIA PC Latency (PCL) ETW instrumentation in `src/latency_monitor.h` and `src/latency_monitor.cpp` using Windows SDK TraceLogging (`PCLStatsTraceLoggingProvider`, GUID `0d216f06-82a6-4d49-bc4f-8f38ae56efab`, ping message `PC_Latency_Stats_Ping`), emitting `SIMULATION_START/END`, `CAMERA_CONSTRUCTED`, `RENDERSUBMIT_START/END`, `LATE_WARP_SUBMIT_START/END`, `PRESENT_START/END`, `LATE_WARP_PRESENT_START/END`, `PC_LATENCY_PING`, and `TRIGGER_FLASH`.
+- Added an optional left-edge optical flash square (`flash` setting / `F` key) for NVIDIA Reflex Latency Analyzer (RLA) / LDAT hardware verification, in-process CPU latency stage timings (`input_to_present_us`, `sim_cpu_us`, `render_submit_cpu_us`, `present_call_cpu_us`), and CLI `capabilities` probing for local ARM64 NVIDIA latency tools.
+- Verified ARM64 Debug build with zero `/W4` warnings and live CLI run on `NVIDIA RTX Spark N1X` (`1264x681`, `\\.\DISPLAY6` nominal 120 Hz):
+  - Moving `wait_for_frame_slot()` before input sampling cut `cpu_source_age_us` median in `full_render` from 8,330 µs (`v0.7.0`) to 985 µs (`v0.8.0`), with `sim_cpu_us` median 11 µs, `render_submit_cpu_us` median 429 µs, and `present_call_cpu_us` median 422 µs.
+  - `capabilities` detected native ARM64 `nvapia64.dll`, `FvSDK_ARM64.dll`, `PresentMon_arm64.exe`, and `nvrla.exe` installed on this machine; `status` reported `raw_input_enabled: true` and 232 PCL ETW markers emitted.
+- Limitations: ETW capture by FrameView/PresentMon requires elevated privileges or Performance Log Users membership (`FvSvc` is currently stopped on this host, so `pcl_etw_listener_active` was `false` during the unprivileged test); CPU Present return interval under plain VSync still jitters across ~6.1–9.3 ms, which will be addressed next by precision deadline pacing.
+
 ## v0.7.0 — 2D HUD frametime graph, live FPS/frametime readout, and mouse-move camera controls
 
 - Added a GPU-composited 2D HUD layer in `shaders/present.hlsl` (`HudConstants : register(b1)`) rendering a real-time 128-frame frametime graph (color-coded by `rendered` cyan, `repeated` amber, `warped` emerald, and `fallback` magenta, with nominal target and 16.67 ms reference lines plus GPU pass time overlay) and a 4-line 5x7 bitmap telemetry readout showing smoothed Present cadence FPS, frametime (ms), mode/divider, Scene/Warp GPU times (ms), source age (ms), invalid-hole percentage, camera path, stress, and VSync state. Toggleable cleanly with `O` or CLI `set <pid> overlay off`.

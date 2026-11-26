@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstring>
 #include <filesystem>
 #include <stdexcept>
@@ -302,18 +303,27 @@ Renderer::~Renderer() noexcept {
     }
 }
 
-FrameExecutionMetrics Renderer::render_and_present(const FrameRenderRequest& request) {
-    FrameExecutionMetrics metrics{-1, -1, 0, 0, false, false, false, gpu_timing_available()};
+void Renderer::wait_for_frame_slot() {
+    if (viewport_width_ == 0 || viewport_height_ == 0 || has_acquired_slot_) return;
+    if (frame_latency_waitable_object_) {
+        WaitForSingleObjectEx(frame_latency_waitable_object_, 1000, TRUE);
+    }
+    pending_buffer_index_ = swap_chain_->GetCurrentBackBufferIndex();
+    wait_for_fence(buffer_fence_values_[pending_buffer_index_]);
+    has_acquired_slot_ = true;
+}
+
+FrameExecutionMetrics Renderer::render_and_present(const FrameRenderRequest& request, LatencyMonitor& latency_monitor) {
+    FrameExecutionMetrics metrics{-1, -1, 0, 0, 0, 0, false, false, false, gpu_timing_available()};
     if (viewport_width_ == 0 || viewport_height_ == 0) {
         return metrics;
     }
 
-    if (frame_latency_waitable_object_) {
-        WaitForSingleObjectEx(frame_latency_waitable_object_, 1000, TRUE);
+    if (!has_acquired_slot_) {
+        wait_for_frame_slot();
     }
-
-    const UINT buffer_index = swap_chain_->GetCurrentBackBufferIndex();
-    wait_for_fence(buffer_fence_values_[buffer_index]);
+    const UINT buffer_index = pending_buffer_index_;
+    has_acquired_slot_ = false;
 
     if (buffer_has_data_[buffer_index]) {
         metrics.completed_slot_valid = true;
@@ -337,6 +347,11 @@ FrameExecutionMetrics Renderer::render_and_present(const FrameRenderRequest& req
             metrics.completed_invalid_pixel_count = mapped_reprojection_stats_[buffer_index];
         }
     }
+
+    const auto submit_begin_time = std::chrono::steady_clock::now();
+    latency_monitor.emit_marker(
+        request.warp_enabled ? LatencyMarker::late_warp_submit_start : LatencyMarker::render_submit_start,
+        request.display_frame_id);
 
     const float aspect_ratio = static_cast<float>(viewport_width_) / static_cast<float>(viewport_height_);
     const std::size_t constant_offset = static_cast<std::size_t>(buffer_index) * constant_buffer_stride;
@@ -364,8 +379,8 @@ FrameExecutionMetrics Renderer::render_and_present(const FrameRenderRequest& req
     present_constants.viewport_and_flags[3] = request.overlay_enabled ? 1.0f : 0.0f;
     present_constants.warp_flags_and_aspect[0] = request.warp_enabled ? 1.0f : 0.0f;
     present_constants.warp_flags_and_aspect[1] = aspect_ratio;
-    present_constants.warp_flags_and_aspect[2] = 0.0f;
-    present_constants.warp_flags_and_aspect[3] = 0.0f;
+    present_constants.warp_flags_and_aspect[2] = request.flash_indicator_enabled ? 1.0f : 0.0f;
+    present_constants.warp_flags_and_aspect[3] = request.flash_triggered ? 1.0f : 0.0f;
     write_float4(present_constants.source_camera_position_tan_y, request.source_snapshot.camera.position, request.source_snapshot.camera.tan_half_fov_y);
     write_float4(present_constants.source_camera_right_unused, request.source_snapshot.camera.right, 0.0f);
     write_float4(present_constants.source_camera_up_unused, request.source_snapshot.camera.up, 0.0f);
@@ -479,9 +494,26 @@ FrameExecutionMetrics Renderer::render_and_present(const FrameRenderRequest& req
     ID3D12CommandList* command_lists[] = {command_list_.Get()};
     queue_->ExecuteCommandLists(1, command_lists);
 
+    const auto submit_end_time = std::chrono::steady_clock::now();
+    latency_monitor.emit_marker(
+        request.warp_enabled ? LatencyMarker::late_warp_submit_end : LatencyMarker::render_submit_end,
+        request.display_frame_id);
+    metrics.render_submit_cpu_us = std::chrono::duration_cast<std::chrono::microseconds>(submit_end_time - submit_begin_time).count();
+
+    const auto present_begin_time = std::chrono::steady_clock::now();
+    latency_monitor.emit_marker(
+        request.warp_enabled ? LatencyMarker::late_warp_present_start : LatencyMarker::present_start,
+        request.display_frame_id);
+
     const UINT sync_interval = request.vsync_enabled ? 1U : 0U;
     const UINT present_flags = (!request.vsync_enabled && allow_tearing_supported_) ? DXGI_PRESENT_ALLOW_TEARING : 0U;
     check(swap_chain_->Present(sync_interval, present_flags), "Present");
+
+    const auto present_end_time = std::chrono::steady_clock::now();
+    latency_monitor.emit_marker(
+        request.warp_enabled ? LatencyMarker::late_warp_present_end : LatencyMarker::present_end,
+        request.display_frame_id);
+    metrics.present_call_cpu_us = std::chrono::duration_cast<std::chrono::microseconds>(present_end_time - present_begin_time).count();
 
     const auto value = next_fence_value_++;
     check(queue_->Signal(fence_.Get(), value), "Signal frame fence");
@@ -497,6 +529,7 @@ FrameExecutionMetrics Renderer::render_and_present(const FrameRenderRequest& req
 void Renderer::resize(UINT width, UINT height) {
     if (width == 0 || height == 0) return;
     flush();
+    has_acquired_slot_ = false;
     for (auto& target : render_targets_) target.Reset();
     scene_color_target_.Reset();
     scene_depth_target_.Reset();
