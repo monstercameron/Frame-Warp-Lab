@@ -2,7 +2,7 @@
 
 A Direct3D 12 rendering experiment investigating presentation pacing, reprojection and frame generation.
 
-Read [research.md](research.md) for the research and architecture, [test-scene.md](test-scene.md) for the proposed first experiment, and [spacewarp-references.md](spacewarp-references.md) for related implementations and SDKs. [AGENTS.md](AGENTS.md) records the engineering and measurement rules.
+Read [experiment-plan.md](experiment-plan.md) for the prioritized experiment, [research.md](research.md) for the research and architecture, [test-scene.md](test-scene.md) for the proposed test scene, and [spacewarp-references.md](spacewarp-references.md) for related implementations and SDKs. [AGENTS.md](AGENTS.md) records the engineering and measurement rules.
 
 ## Current baseline
 
