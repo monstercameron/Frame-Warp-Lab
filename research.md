@@ -255,8 +255,29 @@ Operations such as late camera warp, motion extrapolation, disocclusion recovery
 | 22 | 3D Spatiotemporal Blue Noise (STBN) tile/pixel refresh phasing | Perceptual masking (P0) | Implemented (`v0.20.0`, 16×16 void-and-cluster toroidal blue-noise phase LUT) |
 | 23 | Hybrid contiguous (`16×16` disocclusions) + `4×4` sub-tile interleaved shading + `3×3` sliding window | High-Hz integration (P0) | Planned (`v0.21.0`, Andersson et al. 2019) |
 | 24 | TCSF-clamped Temporal Resolution Multiplexing (TRM) detail compensation on repainted/warped frames | Sharpness recovery (P1) | Implemented (`v0.21.0`, 5-tap clamped Catmull-Rom + TCSF TRM: `+2.30 dB` PSNR and `74.9% → 90.9%` sharpness on `fast_pan 10%`; `101.0%` sharpness at `15%`) |
-| 25 | Authoritative vs. synthesized history firewall (anti-recursive-drift enforcement + PatchEX-style fg/bg repair) | Temporal stability (P0) | Partial (`v0.19.0`–`v0.21.0` enforces authoritative `SourceSlot` cache vs read-only synthesis; fg/bg layer separation pending) |
-| 26 | Matched-reference PAR quality & perceptual test matrix (Modes A–F: `240 Hz` native vs `5%/10%/20%` patch budgets, static vs smooth pursuit) | Validation (P0) | Partial (`v0.21.0` automated exact-timestamp PSNR/SSIM/Sharpness/P99 harness proved `15%` PAR+SHARP beats VRS Tier 2 by `+3.8–4.1 dB`; blinded human & FovVideoVDP tests pending) |
+| 25 | Authoritative vs. synthesized history firewall (anti-recursive-drift enforcement + PatchEX-style fg/bg repair) | Temporal stability (P0) | Partial (`v0.19.0`–`v0.23.0` enforces authoritative `SourceSlot` cache vs read-only synthesis; long-run drift audit & fg/bg layer separation pending) |
+| 26 | Matched-reference PAR quality & perceptual test matrix (Modes A–F: `240 Hz` native vs `5%/10%/20%` patch budgets, static vs smooth pursuit) | Validation (P0) | Partial (`v0.21.0`–`v0.23.0` automated exact-timestamp PSNR/SSIM/Sharpness/P99 harness proved `15%` PAR beats VRS Tier 2 & `50%/67%` spatial upscaling; multi-second temporal video harness, FovVideoVDP & blinded human tests pending) |
+| 27 | Damage-rate-aware scheduler (preventing sustained repair backlog + camera-cut budget bursts) | Resilience (P0) | Partial (`v0.21.0`–`v0.22.0` auto-budgeter + `age=255` provenance + `4×4` coarse fallback; explicit damage-rate floor & cut-burst admission pending) |
+| 28 | Multi-resolution scaling (`1080p`, `1440p`, `4K`) & offscreen upscaling | Scaling (P0) | Proven (`v0.23.0` offscreen `1080p`/`1440p`/`4K` scaling + spatial upscaling vs PAR; temporal upscaling `TAAU`/`DLSS-SR` pending) |
+| 29 | Temporal video quality harness (multi-second motion sequence & FovVideoVDP) | Validation (P0) | Planned |
+| 30 | Post-synthesis painting (repairing residual artifacts after warp/frame-gen) | Artifact reduction (P1) | Planned |
+
+### 8. Recommended experiments before complex shaders
+
+Before expanding to complex rasterized mesh/PBR shaders, validate the architecture through these 10 gated experiments (mirrored in `experiment-plan.md`):
+
+| Priority | Experiment | Passing criterion | Current status (`v0.23.0`) |
+| :---: | :--- | :--- | :--- |
+| 1 | PAR-3 sub-tile interleaving | Better temporal quality at equivalent painting cost | Planned |
+| 2 | PAR-5 history firewall | No unbounded recursive degradation | Partial (authoritative cache invariant enforced; long-run drift test & fg/bg separation pending) |
+| 3 | Damage-rate-aware scheduler | No sustained repair backlog under feasible load | Partial (deadline auto-budgeter + `age=255` + `4×4` coarse fallback done; damage-rate floor pending) |
+| 4 | Independent update frequencies | Stable output with reduced visibility and shading frequencies | Partial (camera/HUD vs. scene decoupled; decoupled visibility/shading/lighting rates pending) |
+| 5 | Multi-resolution scaling | Predictable performance at 1080p, 1440p and 4K | Proven (`v0.23.0` offscreen `1080p`/`1440p`/`4K` + `1080p` upscaling envelope) |
+| 6 | Temporal video quality harness | Quality measured across entire motion sequences | Planned |
+| 7 | Physical display measurements | Verified displayed cadence and input latency | Planned (interactive FrameView / PresentMon run) |
+| 8 | Foreground DLSS-G validation | Actual generated frames with acceptable quality | Partial (Streamline ARM64 `6×` MFG verified; interactive focused run pending) |
+| 9 | Post-synthesis painting | Measurable improvement over uncorrected synthesis | Planned |
+| 10 | Blinded perceptual A/B tests | Establish perceptual equivalence thresholds | Planned |
 
 ## Inverse-rendering architecture and verified literature backlog
 

@@ -1,5 +1,10 @@
 # Development log
 
+## v0.23.1 — Register 10 pre-complex-shader validation experiments with passing criteria in experiment-plan.md and research.md
+
+- Added the 10-item **Recommended experiments before complex shaders** priority gate table (`PAR-3` sub-tile interleaving, `PAR-5` history firewall, damage-rate-aware scheduler, independent update frequencies, multi-resolution scaling, temporal video quality harness, physical display measurements, foreground DLSS-G validation, post-synthesis painting, and blinded perceptual A/B tests) with explicit passing criteria and `v0.23.0` status tracking to `experiment-plan.md` and `research.md`.
+- Documentation-only change; verified with `git diff --check` and pushed to `main`.
+
 ## v0.23.0 — Decoupled offscreen render resolution, spatial upscaling filters (`bilinear`/`catmull_rom`/`cas`/`nearest`), and true `1440p`/`4K` scaling proof
 
 - Decoupled internal offscreen scene rendering (`render_width_ × render_height_`) from swap-chain display output (`viewport_width_ × viewport_height_`) across the entire D3D12 scene, VRS, PAR selective-tile, and presentation pipelines (`shaders/present.hlsl`, `src/runtime_state.h`, `src/renderer.h`, `src/renderer.cpp`, `src/main.cpp`, `src/cli.cpp`, `CMakeLists.txt`, `scripts/run_upscaling_research.ps1`):

@@ -89,7 +89,24 @@ Track the following frameless/perceptual rendering items as explicit, independen
 | **PAR-3** | P0 | **Hybrid contiguous + `4×4` sub-tile interleaved shading with `3×3` sliding window** | Andersson et al. (NVIDIA, HPG 2019) | Repaint hard disocclusions as contiguous `16×16` tiles while interleaving background shading refreshes at `4×4` sub-tile granularity without EMA-TAA ghosting. |
 | **PAR-4** | P1 | **TCSF-clamped Temporal Resolution Multiplexing (TRM) + 5-tap Catmull-Rom cache sharpening** *(implemented `v0.21.0`)* | Denes, Maruszczyk, Ash & Mantiuk (IEEE TVCG 2019) | Verified on RTX Spark N1X: lifted `fast_pan 10%` PSNR `+2.30 dB` (`31.55 → 33.85 dB`) and edge sharpness `74.9% → 90.9%`; reached `101.0%` sharpness parity at `15%`. |
 | **PAR-5** | P0 | **Authoritative vs. synthesized history firewall + foreground/background repair** | Dixit & Sarangi (`PatchEX`, ACM TOG 2025) | Strictly prevent DLSS-G / warped display outputs from feeding back into the persistent scene cache, avoiding recursive geometry, motion, and lighting drift. |
-| **PAR-6** | P0 | **Matched-reference PAR quality & perceptual test matrix (Modes A–F)** *(automated PSNR/SSIM/Sharpness harness implemented `v0.21.0`)* | Deodato & Melcher (2024); FovVideoVDP (2021) | Verified on exact `t = 408,366 µs` Frame `#98`: `15%` PAR+SHARP beat VRS Tier 2 by `+4.08 dB` (`occlusion_sweep`) and `+3.80 dB` (`fast_pan`) at `1.9–2.8×` faster GPU time, and exposed the `5%` disocclusion quality cliff (`20.6–21.6 dB`). Blinded human + FovVideoVDP viewing remains next. |
+| **PAR-6** | P0 | **Matched-reference PAR quality & perceptual test matrix (Modes A–F)** *(automated PSNR/SSIM/Sharpness harness implemented `v0.21.0`)* | Deodato & Melcher (2024); FovVideoVDP (2021) | Verified on exact `t = 408,366 µs` Frame `#98`: `15%` PAR+SHARP beat VRS Tier 2 by `+4.08 dB` (`occlusion_sweep`) and `+3.80 dB` (`fast_pan`) at `1.9–2.8×` faster GPU time (`v0.22.0` fixed the `age=0` poisoning bug lifting `5%` by `+12.26 dB`, and `v0.23.0` beat `50%/67%` spatial upscaling at `1080p`). Blinded human + FovVideoVDP viewing remains next. |
+
+## Recommended experiments before complex shaders
+
+Execute and gate the following 10 pre-complex-shader validation experiments before investing in full triangle-mesh / complex PBR shader scenes:
+
+| Priority | Experiment | Passing criterion | Current status (`v0.23.0`) |
+| :---: | :--- | :--- | :--- |
+| 1 | **PAR-3 sub-tile interleaving** | Better temporal quality at equivalent painting cost | Planned |
+| 2 | **PAR-5 history firewall** | No unbounded recursive degradation | Partial (authoritative `SourceSlot` cache vs. read-only synthesis enforced `v0.19.0`–`v0.23.0`; explicit long-run drift audit & fg/bg separation pending) |
+| 3 | **Damage-rate-aware scheduler** | No sustained repair backlog under feasible load | Partial (`AutoTileBudgetController` deadline loop + `age=255` provenance + `4×4` coarse fallback proven `v0.21.0`–`v0.22.0`; explicit disocclusion damage-rate floor & camera-cut burst boost pending) |
+| 4 | **Independent update frequencies** | Stable output with reduced visibility and shading frequencies | Partial (camera/HUD vs. scene decoupled via `reproject`/`combined` divider; decoupled visibility vs. shading vs. lighting rates pending) |
+| 5 | **Multi-resolution scaling** | Predictable performance at 1080p, 1440p and 4K | Proven (`v0.23.0` decoupled offscreen render targets: `1080p` `7.25×`, `1440p` `4.98×`, `4K` `4.82×` faster than Native at `stress=64`, plus `1080p` spatial upscaling comparison; `stress=0` bypass threshold mapped) |
+| 6 | **Temporal video quality harness** | Quality measured across entire motion sequences | Planned (single-frame + cut-burst PSNR/SSIM/Sharpness harness exists; full multi-second sequence & FovVideoVDP harness pending) |
+| 7 | **Physical display measurements** | Verified displayed cadence and input latency | Planned (requires interactive `WinSta0\Default` run with FrameView / PresentMon `MsBetweenDisplayChange`, `MsUntilDisplayed`, `MsPCLatency`) |
+| 8 | **Foreground DLSS-G validation** | Actual generated frames with acceptable quality | Partial (Streamline ARM64 `6×` MFG + Clean-Feed PAR verified with `api_error_count=0`, `0.000%` holes; interactive focused `numFramesActuallyPresented >= 2` + quality check pending) |
+| 9 | **Post-synthesis painting** | Measurable improvement over uncorrected synthesis | Planned (repairing residual holes/disocclusions after warp/synthesis rather than only pre-synthesis) |
+| 10 | **Blinded perceptual A/B tests** | Establish perceptual equivalence thresholds | Planned (static gaze + smooth-pursuit human viewing against native high-Hz reference) |
 
 ## Experiment progression and CLI
 
