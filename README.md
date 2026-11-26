@@ -19,3 +19,19 @@ cmake --build build --config Debug
 ```
 
 Close the window to exit. Debug builds enable the D3D12 debug layer if available. NVIDIA SDK integration is not included and its ARM64 support has not been established.
+
+## CLI foundation
+
+The console executable emits JSON and uses exit code 0 for success and 1 for errors. Start the application separately, then use:
+
+```powershell
+./build/Debug/frame_warp_cli.exe help
+./build/Debug/frame_warp_cli.exe instances
+./build/Debug/frame_warp_cli.exe status <pid>
+./build/Debug/frame_warp_cli.exe capabilities
+./build/Debug/frame_warp_cli.exe stop <pid>
+```
+
+`instances` discovers application windows, including hidden ones. `status` reads local shared state for a specific process and reports completed present calls, resize count, client size and nominal Windows display modes. These are not displayed-frame measurements. Windows' enumerated highest nominal refresh for the active resolution is not a verified monitor upper bound, and actual displayed timing is unavailable. `stop` requests a normal window close and does not wait for exit. `capabilities` queries a newly created default D3D12 device, not necessarily the running instance's adapter; VRS support does not mean VRS rendering is implemented.
+
+The CLI does not yet start instances, collect detailed traces, manage scenes or experiment configurations, measure latency, or control generation, reprojection or VRS. Structured event logging and the remaining agent operations are still planned.

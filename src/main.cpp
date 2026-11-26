@@ -8,6 +8,7 @@
 #include <stdexcept>
 #include <string>
 #include <system_error>
+#include "runtime_state.h"
 
 using Microsoft::WRL::ComPtr;
 
@@ -31,6 +32,31 @@ public:
     HANDLE get() const { return value_; }
 private:
     HANDLE value_;
+};
+
+class RuntimeStatePublisher {
+public:
+    RuntimeStatePublisher()
+        : mapping_(CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0,
+                                     sizeof(frame_warp_lab::RuntimeState),
+                                     frame_warp_lab::runtime_mapping_name(GetCurrentProcessId()).c_str())) {
+        state_ = static_cast<frame_warp_lab::RuntimeState*>(MapViewOfFile(mapping_.get(), FILE_MAP_ALL_ACCESS, 0, 0, sizeof(frame_warp_lab::RuntimeState)));
+        if (!state_) throw std::system_error(static_cast<int>(GetLastError()), std::system_category(), "Map runtime state");
+        state_->version = frame_warp_lab::runtime_state_version;
+        state_->process_id = GetCurrentProcessId();
+        InterlockedExchange(&state_->present_count, 0);
+        InterlockedExchange(&state_->resize_count, 0);
+        InterlockedExchange(&state_->running, 1);
+    }
+    ~RuntimeStatePublisher() {
+        InterlockedExchange(&state_->running, 0);
+        UnmapViewOfFile(state_);
+    }
+    void record_present() { InterlockedIncrement(&state_->present_count); }
+    void record_resize() { InterlockedIncrement(&state_->resize_count); }
+private:
+    Handle mapping_;
+    frame_warp_lab::RuntimeState* state_ = nullptr;
 };
 
 class Renderer {
@@ -164,7 +190,7 @@ LRESULT CALLBACK window_procedure(HWND window, UINT message, WPARAM message_para
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     try {
-        const wchar_t* class_name = L"FrameWarpLabWindow";
+        const wchar_t* class_name = frame_warp_lab::window_class_name;
         WNDCLASSW window_class{};
         window_class.lpfnWndProc = window_procedure;
         window_class.hInstance = instance;
@@ -175,6 +201,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                                       CW_USEDEFAULT, CW_USEDEFAULT, 1280, 720, nullptr, nullptr, instance, nullptr);
         if (!window) throw std::system_error(static_cast<int>(GetLastError()), std::system_category(), "Create window");
         Renderer renderer(window);
+        RuntimeStatePublisher runtime_state;
         ShowWindow(window, show);
         RECT previous_client_rectangle{};
         GetClientRect(window, &previous_client_rectangle);
@@ -192,9 +219,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
             if (!GetClientRect(window, &current_client_rectangle)) throw std::system_error(static_cast<int>(GetLastError()), std::system_category(), "Get client size");
             if (current_client_rectangle.right != previous_client_rectangle.right || current_client_rectangle.bottom != previous_client_rectangle.bottom) {
                 renderer.resize(static_cast<UINT>(current_client_rectangle.right), static_cast<UINT>(current_client_rectangle.bottom));
+                runtime_state.record_resize();
                 previous_client_rectangle = current_client_rectangle;
             }
             renderer.draw();
+            runtime_state.record_present();
         }
         renderer.flush();
         return 0;
