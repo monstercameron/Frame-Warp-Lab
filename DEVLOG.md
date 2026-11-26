@@ -1,5 +1,28 @@
 # Development log
 
+## v0.31.0 — Priority 1: Hardware Triangle Visibility Buffer + Deferred PAR-3 Selective Tile Shading (14-Light PBR Gun Range)
+
+- Replaced expensive ray-marched visibility on the 14-light PBR Indoor Gun Range with a true **4-Pass Hardware Triangle Visibility Buffer + Deferred `PAR-3` Selective Tile Shading** pipeline (`shaders/range_lighting.hlsl`, `shaders/range_mesh.hlsl`, `shaders/range_vis_par.hlsl`, `src/renderer.h`, `src/renderer.cpp`, `CMakeLists.txt`, `scripts/run_visbuffer_par_experiment.ps1`):
+  - **Shared 14-Light PBR Shading Module (`shaders/range_lighting.hlsl`)**:
+    - Extracted the full 14-light PBR + Karis/Frostbite MRP Rectangular Area Lights + Cone Spot Lights + Kulla-Conty multiscatter + Clearcoat + IBL + ACES Filmic evaluator into `range_lighting.hlsl` so both Forward PBR (`range_mesh.hlsl`) and Visibility Buffer Compute Shading (`range_vis_par.hlsl`) execute bit-consistent surface lighting.
+  - **Pass 1 — Hardware Triangle Visibility Rasterizer (`range_vis_ps_main`, `R32_UINT`)**:
+    - Rasterizes opaque world geometry + depth-cleared viewmodel Service Pistol into `slot.vis_target` (`DXGI_FORMAT_R32_UINT`, packing `7-bit instance_id | 1-bit viewmodel | 24-bit global_triangle_id`), `slot.depth_target` (`R32_FLOAT`), and `slot.motion_target` (`R16G16_FLOAT`) with zero overdraw shading.
+  - **Passes 2–4 — Compute `PAR-3` Temporal Classify, Priority Admit & World-Space Ray-Triangle Shade (`shaders/range_vis_par.hlsl`)**:
+    - `range_vis_classify_main`: Reprojects previous frame color with 5-tap Catmull-Rom bicubic filtering, verifies instance ID + relative depth + valid shaded sentinel (`a < 253.5`), detects moving instances/viewmodel/muzzle-flash, and assigns 16×16 tiles into `PAR-3` priority buckets.
+    - `range_vis_admit_main`: Enforces a 100% cold-start bootstrap on frame 0 / discontinuity and allocates per-frame tile budgets with `PAR-3` 4:1 STBN subtile interleaving for background refresh tiles via `ExecuteIndirect`.
+    - `range_vis_shade_main`: Reconstructs exact vertex attributes (`range_vertices` `t11`, `range_indices` `t12`, `range_instances` `t13`) via **world-space Möller-Trumbore ray-triangle intersection** (eliminating near-plane vertex clipping singularities on floor/wall/ceiling triangles) and analytical screen-space ray derivatives (`duv_dx`, `duv_dy`, `dn_dx`, `dn_dy`) for full 16× anisotropic `SampleGrad`.
+- Verified zero code comments, ARM64 Release + Debug builds, Debug D3D12 Debug Layer validation (`1920×1080` VisBuffer active, `8160/8160` tiles, `0` D3D12 errors), visual capture comparison (`visbuf_gt.png` vs `visbuf_par3_15pct.png`), and `scripts/run_visbuffer_par_experiment.ps1` on **NVIDIA RTX Spark N1X**:
+  - **Quality Sequence (`1280×720`, 8 motion frames `F24..F80 @ 240Hz`, `corridor_sway`, 14-Light PBR Gun Range)**:
+    - `Forward_1x1_GT`: `941 µs` (`100%` shaded, Ground Truth)
+    - `VRS_Tier2_Fov`: `320 µs` (`100%`), `PSNR=30.81 dB` (`min=29.80`), `SSIM=0.8799`, `tRMSE=8.27`, `P99=29.8`
+    - `VisBuf_100pct`: **`595 µs`** (`1.58×` faster than Forward at 100% from zero overdraw!), **`PSNR=34.79 dB`**, **`SSIM=0.9868`**, **`tRMSE=3.60`**, **`P99=10.0`**
+    - `VisBuf_PAR3_25p`: **`316 µs`** (`2.98×` faster than Forward), `PSNR=29.75 dB`, **`SSIM=0.9428`** (+0.0629 over VRS Tier 2 at equal cost!), `tRMSE=6.60`, `P99=31.6`
+    - `VisBuf_PAR3_15p`: **`301 µs`** (`3.13×` faster than Forward), `PSNR=28.02 dB`, `SSIM=0.8746`, `tRMSE=8.66`, `P99=43.1` (honest finding: unified diffuse+specular caching exhibits view-dependent specular parallax lag at 15% on glossy wood/concrete/gunmetal — directly motivating Priorities 5 & 6).
+  - **Live Resolution Scaling (`120Hz` Paced `corridor_sway`, 14-Light PBR Gun Range)**:
+    - `1080p`: `Forward=2,616 µs (0 miss)` · `VRS_T2=799 µs (0)` · `Vis100%=1,280 µs (0)` · **`VisPAR15=618 µs (0 miss, 4.23× faster!)`**
+    - `1440p`: `Forward=4,541 µs (0 miss)` · `VRS_T2=1,985 µs (1 miss)` · `Vis100%=3,473 µs (0)` · **`VisPAR15=1,157 µs (0 miss, 3.92× faster!)`**
+    - `4K`: `Forward=8,598 µs (3 miss)` · `VRS_T2=4,433 µs (1 miss)` · `Vis100%=6,990 µs (0)` · **`VisPAR15=3,471 µs (0 miss, 2.48× faster, inside 240Hz budget!)`**
+
 ## v0.30.0 — Indoor Tactical Gun Range Overhaul: 512×512 Cracked/Polished Concrete, Wood & Metal PBR, Analytical Area/Spot/Colored Lights, Gaussian Bullet Spread, and Multi-Threaded ECS/Jolt/Asset Pipeline
 
 - Transformed the Tactical Aim Range into a high-contrast indoor shooting facility with upgraded PBR materials, physically-based multi-light shading, a Counter-Strike style dynamic bullet-spread model, and full multi-threading across assets, physics, and ECS (`src/job_system.h`, `src/job_system.cpp`, `src/pbr_assets.h`, `src/pbr_assets.cpp`, `src/range_mesh.cpp`, `shaders/range_mesh.hlsl`, `src/ecs.h`, `src/lua_engine.cpp`, `assets/scripts/pistol_behavior.lua`, `src/tactical_range.h`, `src/tactical_range.cpp`, `src/renderer.h`, `src/runtime_state.h`, `src/main.cpp`, `src/cli.cpp`, `CMakeLists.txt`, `scripts/run_tactical_range_verify.ps1`):

@@ -284,6 +284,11 @@ private:
     PbrAssetBundle pbr_assets_{};
     Microsoft::WRL::ComPtr<ID3D12RootSignature> range_root_signature_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> range_pipeline_;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> range_vis_pipeline_;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> range_vis_compute_root_signature_;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> range_vis_classify_pipeline_;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> range_vis_admit_pipeline_;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> range_vis_shade_pipeline_;
     Microsoft::WRL::ComPtr<ID3D12Resource> range_depth_buffer_;
     Microsoft::WRL::ComPtr<ID3D12Resource> range_vertex_buffer_;
     Microsoft::WRL::ComPtr<ID3D12Resource> range_index_buffer_;

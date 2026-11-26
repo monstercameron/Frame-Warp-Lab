@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(FrameWarpLab VERSION 0.30.0 LANGUAGES C CXX)
+project(FrameWarpLab VERSION 0.31.0 LANGUAGES C CXX)
 
 if(NOT WIN32)
     message(FATAL_ERROR "Frame Warp Lab currently requires Windows and Direct3D 12.")
@@ -131,7 +131,7 @@ function(add_dxc_shader OUT_VAR SOURCE_FILE ENTRY_POINT PROFILE OUTPUT_NAME)
     add_custom_command(
         OUTPUT "${OUTPUT_PATH}"
         COMMAND "${DXC_EXECUTABLE}" -nologo -T ${PROFILE} -E ${ENTRY_POINT} -I "${CMAKE_CURRENT_SOURCE_DIR}/shaders" -O3 -WX ${EXTRA_DEFINES} -Fo "${OUTPUT_PATH}" "${SOURCE_FILE}"
-        DEPENDS "${SOURCE_FILE}" "${CMAKE_CURRENT_SOURCE_DIR}/shaders/pbr_materials.hlsl"
+        DEPENDS "${SOURCE_FILE}" "${CMAKE_CURRENT_SOURCE_DIR}/shaders/pbr_materials.hlsl" "${CMAKE_CURRENT_SOURCE_DIR}/shaders/range_lighting.hlsl"
         COMMENT "Compiling ${OUTPUT_NAME} (${PROFILE})"
         VERBATIM
     )
@@ -154,6 +154,10 @@ add_dxc_shader(COMPILED_SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/selective_t
 add_dxc_shader(COMPILED_SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/selective_tiles.hlsl" tile_shade_main cs_6_0 tile_shade_indirect_cs.cso)
 add_dxc_shader(COMPILED_SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/range_mesh.hlsl" range_vs_main vs_6_0 range_vs.cso)
 add_dxc_shader(COMPILED_SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/range_mesh.hlsl" range_ps_main ps_6_0 range_ps.cso)
+add_dxc_shader(COMPILED_SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/range_mesh.hlsl" range_vis_ps_main ps_6_0 range_vis_ps.cso)
+add_dxc_shader(COMPILED_SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/range_vis_par.hlsl" range_vis_classify_main cs_6_0 range_vis_classify_cs.cso)
+add_dxc_shader(COMPILED_SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/range_vis_par.hlsl" range_vis_admit_main cs_6_0 range_vis_admit_cs.cso)
+add_dxc_shader(COMPILED_SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/range_vis_par.hlsl" range_vis_shade_main cs_6_0 range_vis_shade_cs.cso)
 
 add_custom_target(frame_warp_shaders ALL DEPENDS ${COMPILED_SHADERS})
 add_dependencies(frame_warp_lab frame_warp_shaders)
