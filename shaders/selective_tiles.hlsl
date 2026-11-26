@@ -57,6 +57,42 @@ uint lookup_stbn_phase(uint tx, uint ty) {
     return (word >> ((col & 7u) * 4u)) & 15u;
 }
 
+float3 sample_catmull_rom_5tap(float2 uv, float2 tex_size, float2 inv_tex_size) {
+    float2 sample_pos = uv * tex_size;
+    float2 tc1 = floor(sample_pos - 0.5) + 0.5;
+    float2 f = sample_pos - tc1;
+    float2 f2 = f * f;
+    float2 f3 = f2 * f;
+
+    float2 w0 = f2 - 0.5 * (f3 + f);
+    float2 w1 = 1.5 * f3 - 2.5 * f2 + 1.0;
+    float2 w3 = 0.5 * (f3 - f2);
+    float2 w2 = 1.0 - w0 - w1 - w3;
+
+    float2 w12 = w1 + w2;
+    float2 offset12 = w2 / max(w12, float2(1e-4, 1e-4));
+
+    float2 tc0 = saturate((tc1 - 1.0) * inv_tex_size);
+    float2 tc3 = saturate((tc1 + 2.0) * inv_tex_size);
+    float2 tc12 = saturate((tc1 + offset12) * inv_tex_size);
+
+    float3 s0 = prev_color_texture.SampleLevel(linear_clamp_sampler, float2(tc12.x, tc0.y), 0).rgb;
+    float3 s1 = prev_color_texture.SampleLevel(linear_clamp_sampler, float2(tc0.x, tc12.y), 0).rgb;
+    float3 s2 = prev_color_texture.SampleLevel(linear_clamp_sampler, float2(tc12.x, tc12.y), 0).rgb;
+    float3 s3 = prev_color_texture.SampleLevel(linear_clamp_sampler, float2(tc3.x, tc12.y), 0).rgb;
+    float3 s4 = prev_color_texture.SampleLevel(linear_clamp_sampler, float2(tc12.x, tc3.y), 0).rgb;
+
+    float wt0 = w12.x * w0.y;
+    float wt1 = w0.x * w12.y;
+    float wt2 = w12.x * w12.y;
+    float wt3 = w3.x * w12.y;
+    float wt4 = w12.x * w3.y;
+    float3 bicubic = (s0 * wt0 + s1 * wt1 + s2 * wt2 + s3 * wt3 + s4 * wt4) / max(wt0 + wt1 + wt2 + wt3 + wt4, 1e-4);
+    float3 box_min = min(min(s0, s1), min(s2, min(s3, s4)));
+    float3 box_max = max(max(s0, s1), max(s2, max(s3, s4)));
+    return clamp(bicubic, box_min, box_max);
+}
+
 float box_distance(float3 world_position, float3 half_size) {
     float3 offset = abs(world_position) - half_size;
     return length(max(offset, 0.0)) + min(max(offset.x, max(offset.y, offset.z)), 0.0);
@@ -254,7 +290,14 @@ void vis_classify_main(
                 uint prev_vis = prev_vis_texture.Load(int3(prev_coord, 0));
                 uint prev_mat = prev_vis & 255u;
                 uint prev_age = (prev_vis >> 8u) & 255u;
-                cached_color = prev_color_texture.SampleLevel(linear_clamp_sampler, previous_uv, 0).rgb;
+                if (policy_params.z != 0u) {
+                    cached_color = sample_catmull_rom_5tap(
+                        previous_uv,
+                        float2((float)viewport_width, (float)viewport_height),
+                        float2(camera_up_rcp_width.w, camera_forward_rcp_height.w));
+                } else {
+                    cached_color = prev_color_texture.SampleLevel(linear_clamp_sampler, previous_uv, 0).rgb;
+                }
                 float rel_z_err = abs(prev_z - expected_prev_z) / max(expected_prev_z, 0.25);
                 bool depth_match = rel_z_err < 0.035;
                 bool mat_match = (prev_mat == mat_id);
@@ -495,6 +538,16 @@ void tile_shade_main(
     int stress_level = (int)(ball_center_stress.w + 0.5);
     if (stress_level > 0) {
         color += synthetic_stress_modulation(world_position, stress_level);
+    }
+
+    if (policy_params.z != 0u && cache_params.x != 0u) {
+        float3 prev_cached = out_color_uav[pixel_coord].rgb;
+        float3 diff = color - prev_cached;
+        if (length(diff) < 0.25) {
+            float luma = dot(max(color, 0.0), float3(0.2126, 0.7152, 0.0722));
+            float tcsf_limit = 0.08 * max(luma, 0.12);
+            color += clamp(diff * 0.35, -tcsf_limit, tcsf_limit);
+        }
     }
 
     out_color_uav[pixel_coord] = float4(max(color, 0.0), 1.0);

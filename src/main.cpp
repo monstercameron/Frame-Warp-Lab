@@ -11,9 +11,11 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
 #include <stdexcept>
 #include <string>
 #include <system_error>
@@ -161,16 +163,38 @@ public:
         std::atomic_ref<std::int64_t>(state_->adaptive_decision_count).store(telemetry.decision_count, std::memory_order_release);
     }
 
-    void update_selective_tiles(bool enabled, std::int32_t budget_pct, frame_warp_lab::TilePolicy policy, const frame_warp_lab::TileCacheStats& stats) {
+    void update_selective_tiles(
+        bool enabled,
+        std::int32_t budget_pct,
+        frame_warp_lab::TilePolicy policy,
+        bool auto_budget_enabled,
+        bool cache_sharpen_enabled,
+        std::int32_t fixed_dt_us,
+        std::int64_t target_scene_budget_us,
+        const frame_warp_lab::TileCacheStats& stats) {
         std::atomic_ref<std::int32_t>(state_->selective_tiles_enabled).store(enabled ? 1 : 0, std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->tile_budget_pct).store(budget_pct, std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->tile_policy).store(static_cast<std::int32_t>(policy), std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->auto_tile_budget_enabled).store(auto_budget_enabled ? 1 : 0, std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->cache_sharpen_enabled).store(cache_sharpen_enabled ? 1 : 0, std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->fixed_dt_us).store(fixed_dt_us, std::memory_order_release);
+        std::atomic_ref<std::int64_t>(state_->last_target_scene_budget_us).store(target_scene_budget_us, std::memory_order_release);
         std::atomic_ref<std::uint32_t>(state_->last_tile_total_count).store(stats.total_tiles, std::memory_order_release);
         std::atomic_ref<std::uint32_t>(state_->last_tile_cached_count).store(stats.cached_tiles, std::memory_order_release);
         std::atomic_ref<std::uint32_t>(state_->last_tile_shaded_count).store(stats.shaded_tiles, std::memory_order_release);
         std::atomic_ref<std::uint32_t>(state_->last_tile_deferred_count).store(stats.deferred_tiles, std::memory_order_release);
         std::atomic_ref<std::uint32_t>(state_->last_tile_critical_total).store(stats.critical_total_tiles, std::memory_order_release);
         std::atomic_ref<std::uint32_t>(state_->last_tile_critical_deferred).store(stats.critical_deferred_tiles, std::memory_order_release);
+    }
+
+    void record_capture_completed(std::uint32_t tag, std::int64_t frame_id, std::int64_t scene_time_us) {
+        std::atomic_ref<std::int64_t>(state_->last_capture_frame_id).store(frame_id, std::memory_order_relaxed);
+        std::atomic_ref<std::int64_t>(state_->last_capture_scene_time_us).store(scene_time_us, std::memory_order_relaxed);
+        std::atomic_ref<std::uint32_t>(state_->last_capture_tag).store(tag, std::memory_order_release);
+    }
+
+    void update_pending_steps(std::int32_t pending) {
+        std::atomic_ref<std::int32_t>(state_->pending_step_frames).store(pending, std::memory_order_release);
     }
 
     void update_scene(
@@ -646,6 +670,15 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         bool selective_tiles_enabled = false;
         std::int32_t tile_budget_pct = 100;
         frame_warp_lab::TilePolicy tile_policy = frame_warp_lab::TilePolicy::priority_stbn;
+        bool auto_tile_budget_enabled = false;
+        bool cache_sharpen_enabled = false;
+        std::int32_t fixed_dt_us = 0;
+        std::int32_t pending_step_frames = 0;
+        std::uint32_t pending_capture_tag = 0;
+        frame_warp_lab::AutoTileBudgetController auto_tile_budget;
+        wchar_t exe_path_buf[32768]{};
+        GetModuleFileNameW(nullptr, exe_path_buf, static_cast<DWORD>(std::size(exe_path_buf)));
+        const std::filesystem::path capture_dir = std::filesystem::path(exe_path_buf).parent_path() / L"captures";
         frame_warp_lab::VrsMode vrs_mode = frame_warp_lab::VrsMode::off;
         frame_warp_lab::InstrumentationLevel instrumentation_level = frame_warp_lab::InstrumentationLevel::diagnostic;
         frame_warp_lab::AdaptiveScheduler adaptive_scheduler;
@@ -696,7 +729,15 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 overlay_enabled,
                 flash_indicator_enabled);
             runtime_state.update_adaptive(adaptive_scheduler.enabled(), adaptive_scheduler.telemetry());
-            runtime_state.update_selective_tiles(selective_tiles_enabled, tile_budget_pct, tile_policy, renderer.latest_completed_source().tile_stats);
+            runtime_state.update_selective_tiles(
+                selective_tiles_enabled,
+                tile_budget_pct,
+                tile_policy,
+                auto_tile_budget_enabled,
+                cache_sharpen_enabled,
+                fixed_dt_us,
+                auto_tile_budget.last_target_scene_budget_us(),
+                renderer.latest_completed_source().tile_stats);
         };
         publish_config();
 
@@ -979,6 +1020,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                         selective_tiles_enabled = message.lParam != 0;
                         runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, selective_tiles_enabled ? 1 : 0, frame_warp_lab::ConfigKey::selective_tiles);
                     } else if (command == frame_warp_lab::ControlCommand::set_tile_budget_pct) {
+                        auto_tile_budget_enabled = false;
                         tile_budget_pct = std::clamp(static_cast<std::int32_t>(message.lParam), 5, 100);
                         runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, tile_budget_pct, frame_warp_lab::ConfigKey::tile_budget_pct);
                     } else if (command == frame_warp_lab::ControlCommand::set_tile_policy) {
@@ -987,6 +1029,21 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                             tile_policy = static_cast<frame_warp_lab::TilePolicy>(raw);
                             runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, raw, frame_warp_lab::ConfigKey::tile_policy);
                         }
+                    } else if (command == frame_warp_lab::ControlCommand::set_auto_tile_budget) {
+                        auto_tile_budget_enabled = message.lParam != 0;
+                        auto_tile_budget.reset();
+                        runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, auto_tile_budget_enabled ? 1 : 0, frame_warp_lab::ConfigKey::auto_tile_budget);
+                    } else if (command == frame_warp_lab::ControlCommand::set_cache_sharpen) {
+                        cache_sharpen_enabled = message.lParam != 0;
+                        runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, cache_sharpen_enabled ? 1 : 0, frame_warp_lab::ConfigKey::cache_sharpen);
+                    } else if (command == frame_warp_lab::ControlCommand::set_fixed_dt_us) {
+                        fixed_dt_us = std::clamp(static_cast<std::int32_t>(message.lParam), 0, 100000);
+                        runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, fixed_dt_us, frame_warp_lab::ConfigKey::fixed_dt_us);
+                    } else if (command == frame_warp_lab::ControlCommand::capture_frame) {
+                        pending_capture_tag = static_cast<std::uint32_t>(message.lParam);
+                    } else if (command == frame_warp_lab::ControlCommand::step_frames) {
+                        pending_step_frames = std::clamp(static_cast<std::int32_t>(message.lParam), 0, 2000);
+                        runtime_state.update_pending_steps(pending_step_frames);
                     }
                     previous_tick = std::chrono::steady_clock::now();
                     publish_config();
@@ -1096,7 +1153,15 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
             }
 
             const auto current_tick = std::chrono::steady_clock::now();
-            simulation.advance(std::chrono::duration<double>(current_tick - previous_tick).count(), scene_paused, manual_input);
+            const bool stepping_now = pending_step_frames > 0;
+            const double delta_seconds = fixed_dt_us > 0
+                ? (static_cast<double>(fixed_dt_us) / 1000000.0)
+                : std::chrono::duration<double>(current_tick - previous_tick).count();
+            simulation.advance(delta_seconds, scene_paused && !stepping_now, manual_input);
+            if (stepping_now) {
+                --pending_step_frames;
+                runtime_state.update_pending_steps(pending_step_frames);
+            }
             previous_tick = current_tick;
 
             renderer.poll_completed_scenes();
@@ -1122,6 +1187,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                     selective_tiles_enabled,
                     tile_budget_pct,
                     tile_policy,
+                    cache_sharpen_enabled,
                     frame_id_u64,
                     latency_monitor,
                     must_wait);
@@ -1249,6 +1315,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
             const float dlss_object_motion_scale = presentation_mode == frame_warp_lab::PresentationMode::dlss_g_warp
                 ? (1.0f / static_cast<float>(std::max<std::int32_t>(1, effective_divider)))
                 : 1.0f;
+            std::wstring capture_file_path;
+            const std::uint32_t active_capture_tag = (pending_capture_tag != 0U && pending_step_frames == 0) ? pending_capture_tag : 0U;
+            if (active_capture_tag != 0U) {
+                pending_capture_tag = 0U;
+                capture_file_path = (capture_dir / (L"capture_" + std::to_wstring(GetCurrentProcessId()) + L"_" + std::to_wstring(active_capture_tag) + L".ppm")).wstring();
+            }
             const frame_warp_lab::FrameExecutionMetrics gpu_metrics = renderer.present_from_source(
                 frame_warp_lab::PresentRequest{
                     frame_id_u64,
@@ -1273,9 +1345,16 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                     static_cast<float>(pacer.target_fps_override()),
                     dlss_object_motion_scale,
                     frame_discontinuity,
+                    capture_file_path.empty() ? nullptr : capture_file_path.c_str(),
                 },
                 latency_monitor,
                 pacer);
+            if (active_capture_tag != 0U) {
+                runtime_state.record_capture_completed(
+                    active_capture_tag,
+                    display_frame_id,
+                    static_cast<std::int64_t>(std::llround(simulation.time_seconds() * 1000000.0)));
+            }
 
             const auto present_complete_time = std::chrono::steady_clock::now();
             const auto present_entry_time = gpu_metrics.present_call_time;
@@ -1382,8 +1461,30 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                     : (pacer.mode() == frame_warp_lab::PacerMode::vsync_only
                         ? frame_warp_lab::PacingOwner::dxgi_vsync
                         : frame_warp_lab::PacingOwner::unlocked));
+            if (auto_tile_budget_enabled && selective_tiles_enabled && active_source.valid) {
+                if (auto_tile_budget.update(
+                        pacer.target_period_us(),
+                        effective_divider,
+                        active_source.snapshot.source_frame_id,
+                        active_source.scene_gpu_us,
+                        last_present_gpu_us,
+                        active_source.tile_stats.total_tiles,
+                        active_source.tile_stats.shaded_tiles,
+                        gpu_metrics.missed_deadline,
+                        tile_budget_pct)) {
+                    hud_text_dirty = true;
+                }
+            }
             runtime_state.update_present_variant(gpu_metrics.selected_present_variant);
-            runtime_state.update_selective_tiles(selective_tiles_enabled, tile_budget_pct, tile_policy, active_source.tile_stats);
+            runtime_state.update_selective_tiles(
+                selective_tiles_enabled,
+                tile_budget_pct,
+                tile_policy,
+                auto_tile_budget_enabled,
+                cache_sharpen_enabled,
+                fixed_dt_us,
+                auto_tile_budget.last_target_scene_budget_us(),
+                active_source.tile_stats);
             runtime_state.update_dlssg(
                 dlssg_multiplier,
                 window_focused,

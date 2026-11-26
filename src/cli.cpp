@@ -300,6 +300,11 @@ int print_status(const WindowInstance& instance) {
     const std::int32_t selective_tiles_enabled = std::atomic_ref<std::int32_t>(state->selective_tiles_enabled).load(std::memory_order_acquire);
     const std::int32_t tile_budget_pct = std::atomic_ref<std::int32_t>(state->tile_budget_pct).load(std::memory_order_acquire);
     const std::int32_t tile_policy = std::atomic_ref<std::int32_t>(state->tile_policy).load(std::memory_order_acquire);
+    const std::int32_t auto_tile_budget_enabled = std::atomic_ref<std::int32_t>(state->auto_tile_budget_enabled).load(std::memory_order_acquire);
+    const std::int32_t cache_sharpen_enabled = std::atomic_ref<std::int32_t>(state->cache_sharpen_enabled).load(std::memory_order_acquire);
+    const std::int32_t fixed_dt_us = std::atomic_ref<std::int32_t>(state->fixed_dt_us).load(std::memory_order_acquire);
+    const std::int64_t target_scene_budget_us = std::atomic_ref<std::int64_t>(state->last_target_scene_budget_us).load(std::memory_order_acquire);
+    const std::int32_t pending_step_frames = std::atomic_ref<std::int32_t>(state->pending_step_frames).load(std::memory_order_acquire);
     const std::uint32_t tile_total = std::atomic_ref<std::uint32_t>(state->last_tile_total_count).load(std::memory_order_acquire);
     const std::uint32_t tile_cached = std::atomic_ref<std::uint32_t>(state->last_tile_cached_count).load(std::memory_order_acquire);
     const std::uint32_t tile_shaded = std::atomic_ref<std::uint32_t>(state->last_tile_shaded_count).load(std::memory_order_acquire);
@@ -310,7 +315,7 @@ int print_status(const WindowInstance& instance) {
 
     RECT client_rectangle{};
     const bool has_client_size = GetClientRect(instance.window, &client_rectangle) != 0;
-    std::cout << "{\"ok\":true,\"schema_version\":14,\"process_id\":" << instance.process_id
+    std::cout << "{\"ok\":true,\"schema_version\":15,\"process_id\":" << instance.process_id
               << ",\"running\":" << (running ? "true" : "false")
               << ",\"present_calls_completed\":" << present_count
               << ",\"display_frame_id\":" << display_frame_id
@@ -372,6 +377,8 @@ int print_status(const WindowInstance& instance) {
               << ",\"pings_received\":" << pcl_pings_received
               << "},\"note\":\"input_to_present_us measures software input arrival to Present return; physical display scanout requires FrameView/PresentMon ETW or Reflex Latency Analyzer\"}"
               << ",\"scene\":{\"name\":\"motion_lab\",\"time_ms\":" << scene_time_ms
+              << ",\"fixed_dt_us\":" << fixed_dt_us
+              << ",\"pending_step_frames\":" << pending_step_frames
               << ",\"paused\":" << (scene_paused ? "true" : "false")
               << ",\"camera_path\":\"" << frame_warp_lab::camera_path_name(camera_path)
               << "\",\"camera\":{\"yaw_deg\":" << std::fixed << std::setprecision(2) << (static_cast<double>(camera_yaw_millideg) / 1000.0)
@@ -415,6 +422,9 @@ int print_status(const WindowInstance& instance) {
               << ",\"total_generated_frames\":" << dlssg_total_generated_frames << "}"
               << ",\"selective_tiles\":{\"enabled\":" << (selective_tiles_enabled ? "true" : "false")
               << ",\"policy\":\"" << frame_warp_lab::tile_policy_name(tile_policy) << "\""
+              << ",\"auto_budget_enabled\":" << (auto_tile_budget_enabled ? "true" : "false")
+              << ",\"cache_sharpen_enabled\":" << (cache_sharpen_enabled ? "true" : "false")
+              << ",\"target_scene_budget_us\":" << target_scene_budget_us
               << ",\"tile_size_px\":16"
               << ",\"budget_pct\":" << tile_budget_pct
               << ",\"total_tiles\":" << tile_total
@@ -428,9 +438,9 @@ int print_status(const WindowInstance& instance) {
               << ",\"critical_coverage_ratio\":";
     print_ratio(tile_crit_total >= tile_crit_deferred ? tile_crit_total - tile_crit_deferred : 0U, tile_crit_total);
     std::cout << "}"
-              << ",\"features\":{\"scene\":\"cpu_camera_gbuffer\",\"selective_tiles\":\"par_priority_stbn_execute_indirect_16x16\",\"hud\":\"2d_frametime_graph_and_readout\",\"async_gpu\":\"dual_queue_3slot_ring\",\"reprojection\":\"depth_camera_warp\",\"nvidia_pcl_markers\":\"etw_and_streamline_pcl\",\"frame_generation\":\"mv_extrapolation_temporal_and_dlss_g\",\"dlss_g_inputs\":\"3slot_aligned_hudless_clipdepth_motion\",\"vrs\":\""
+              << ",\"features\":{\"scene\":\"cpu_camera_gbuffer\",\"selective_tiles\":\"par_priority_stbn_auto_budget_trm_16x16\",\"hud\":\"2d_frametime_graph_and_readout\",\"async_gpu\":\"dual_queue_3slot_ring\",\"reprojection\":\"depth_camera_warp\",\"nvidia_pcl_markers\":\"etw_and_streamline_pcl\",\"frame_generation\":\"mv_extrapolation_temporal_and_dlss_g\",\"dlss_g_inputs\":\"3slot_aligned_hudless_clipdepth_motion\",\"vrs\":\""
               << (vrs_tier >= 2 ? "tier1_and_tier2_foveated_image" : vrs_tier == 1 ? "tier1_per_draw" : "unsupported")
-              << "\",\"adaptive_scheduler\":\"unified_vrs_dlss_warp_ladder\",\"ipc\":\"seqlock_v19\",\"shaders\":\"dxc_sm6_0_wave_specialized\"}}\n";
+              << "\",\"adaptive_scheduler\":\"unified_vrs_dlss_warp_ladder\",\"ipc\":\"seqlock_v20\",\"shaders\":\"dxc_sm6_0_wave_specialized\"}}\n";
     return 0;
 }
 
@@ -443,7 +453,7 @@ int print_events(const WindowInstance& instance) {
     const std::int32_t event_count = std::atomic_ref<std::int32_t>(state->event_count).load(std::memory_order_acquire);
     const std::int32_t first_sequence = event_count > static_cast<std::int32_t>(frame_warp_lab::runtime_event_capacity)
         ? event_count - static_cast<std::int32_t>(frame_warp_lab::runtime_event_capacity) + 1 : 1;
-    std::cout << "{\"ok\":true,\"schema_version\":14,\"process_id\":" << instance.process_id
+    std::cout << "{\"ok\":true,\"schema_version\":15,\"process_id\":" << instance.process_id
               << ",\"capacity\":" << frame_warp_lab::runtime_event_capacity << ",\"total_events\":" << event_count << ",\"events\":[";
     bool first_event = true;
     for (std::int32_t sequence = first_sequence; sequence <= event_count; ++sequence) {
@@ -544,7 +554,7 @@ int print_trace(const WindowInstance& instance, std::size_t max_samples, bool in
         if (copy.missed_deadline) ++missed_deadline_count;
     }
 
-    std::cout << "{\"ok\":true,\"schema_version\":14,\"process_id\":" << instance.process_id
+    std::cout << "{\"ok\":true,\"schema_version\":15,\"process_id\":" << instance.process_id
               << ",\"capacity\":" << frame_warp_lab::runtime_frame_trace_capacity
               << ",\"total_frames_recorded\":" << total_samples
               << ",\"sample_count\":" << captured.size()
@@ -780,8 +790,25 @@ int apply_setting(const WindowInstance& instance, const std::wstring& key, const
         if (value == L"fifo") parameter = static_cast<LPARAM>(frame_warp_lab::TilePolicy::fifo);
         else if (value == L"priority_stbn") parameter = static_cast<LPARAM>(frame_warp_lab::TilePolicy::priority_stbn);
         else return fail("invalid_value", "Expected tile_policy in {fifo, priority_stbn}");
+    } else if (key == L"auto_tile_budget") {
+        command = frame_warp_lab::ControlCommand::set_auto_tile_budget;
+        if (value == L"on" || value == L"1" || value == L"true") parameter = 1;
+        else if (value == L"off" || value == L"0" || value == L"false") parameter = 0;
+        else return fail("invalid_value", "Expected auto_tile_budget in {on, off}");
+    } else if (key == L"cache_sharpen") {
+        command = frame_warp_lab::ControlCommand::set_cache_sharpen;
+        if (value == L"on" || value == L"1" || value == L"true") parameter = 1;
+        else if (value == L"off" || value == L"0" || value == L"false") parameter = 0;
+        else return fail("invalid_value", "Expected cache_sharpen in {on, off}");
+    } else if (key == L"fixed_dt_us") {
+        unsigned long parsed = 0;
+        if (!parse_unsigned_long(value.c_str(), parsed) || parsed > 100000UL) {
+            return fail("invalid_value", "Expected fixed_dt_us integer in [0, 100000]");
+        }
+        command = frame_warp_lab::ControlCommand::set_fixed_dt_us;
+        parameter = static_cast<LPARAM>(parsed);
     } else {
-        return fail("unknown_setting", "Supported settings are: mode, dlssg_mult, pacer, target_fps, async_gpu, vrs, selective_tiles, tile_budget, tile_policy, adaptive, adaptive_dlssg, instrumentation, divider, vsync, view, path, stress, overlay, flash");
+        return fail("unknown_setting", "Supported settings are: mode, dlssg_mult, pacer, target_fps, async_gpu, vrs, selective_tiles, tile_budget, tile_policy, auto_tile_budget, cache_sharpen, fixed_dt_us, adaptive, adaptive_dlssg, instrumentation, divider, vsync, view, path, stress, overlay, flash");
     }
 
     if (!PostMessageW(instance.window, frame_warp_lab::control_message, static_cast<WPARAM>(command), parameter)) {
@@ -792,6 +819,66 @@ int apply_setting(const WindowInstance& instance, const std::wstring& key, const
               << ",\"requested_value\":" << json_string(value)
               << ",\"applied_async\":true}\n";
     return 0;
+}
+
+int capture_instance_frame(const WindowInstance& instance, std::uint32_t tag, std::int32_t step_count = 0) {
+    RuntimeStateView state_view;
+    const char* error_code = nullptr;
+    const char* error_message = nullptr;
+    if (!state_view.open(instance.process_id, error_code, error_message)) return fail(error_code, error_message);
+    if (step_count > 0) {
+        if (!PostMessageW(instance.window, frame_warp_lab::control_message, static_cast<WPARAM>(frame_warp_lab::ControlCommand::step_frames), static_cast<LPARAM>(step_count))) {
+            return fail("control_failed", "Could not send step request");
+        }
+    }
+    if (!PostMessageW(instance.window, frame_warp_lab::control_message, static_cast<WPARAM>(frame_warp_lab::ControlCommand::capture_frame), static_cast<LPARAM>(tag))) {
+        return fail("control_failed", "Could not send capture request");
+    }
+    auto* state = state_view.get();
+    for (int attempt = 0; attempt < 600; ++attempt) {
+        const std::uint32_t completed_tag = std::atomic_ref<std::uint32_t>(state->last_capture_tag).load(std::memory_order_acquire);
+        if (completed_tag == tag) {
+            const std::int64_t frame_id = std::atomic_ref<std::int64_t>(state->last_capture_frame_id).load(std::memory_order_acquire);
+            const std::int64_t scene_time_us = std::atomic_ref<std::int64_t>(state->last_capture_scene_time_us).load(std::memory_order_acquire);
+            wchar_t exe_path[32768]{};
+            GetModuleFileNameW(nullptr, exe_path, static_cast<DWORD>(std::size(exe_path)));
+            const std::filesystem::path capture_path = std::filesystem::path(exe_path).parent_path()
+                / L"captures"
+                / (L"capture_" + std::to_wstring(instance.process_id) + L"_" + std::to_wstring(tag) + L".ppm");
+            std::cout << "{\"ok\":true,\"process_id\":" << instance.process_id
+                      << ",\"tag\":" << tag
+                      << ",\"display_frame_id\":" << frame_id
+                      << ",\"scene_time_us\":" << scene_time_us
+                      << ",\"path\":" << json_string(capture_path.wstring()) << "}\n";
+            return 0;
+        }
+        Sleep(15);
+    }
+    return fail("capture_timeout", "Timed out waiting for frame capture completion");
+}
+
+int step_instance_frames(const WindowInstance& instance, std::int32_t count) {
+    RuntimeStateView state_view;
+    const char* error_code = nullptr;
+    const char* error_message = nullptr;
+    if (!state_view.open(instance.process_id, error_code, error_message)) return fail(error_code, error_message);
+    if (!PostMessageW(instance.window, frame_warp_lab::control_message, static_cast<WPARAM>(frame_warp_lab::ControlCommand::step_frames), static_cast<LPARAM>(count))) {
+        return fail("control_failed", "Could not send step request");
+    }
+    auto* state = state_view.get();
+    Sleep(30);
+    for (int attempt = 0; attempt < 600; ++attempt) {
+        const std::int32_t remaining = std::atomic_ref<std::int32_t>(state->pending_step_frames).load(std::memory_order_acquire);
+        if (remaining == 0) {
+            const std::int64_t scene_time_ms = std::atomic_ref<std::int64_t>(state->scene_time_ms).load(std::memory_order_acquire);
+            std::cout << "{\"ok\":true,\"process_id\":" << instance.process_id
+                      << ",\"stepped_frames\":" << count
+                      << ",\"scene_time_ms\":" << scene_time_ms << "}\n";
+            return 0;
+        }
+        Sleep(15);
+    }
+    return fail("step_timeout", "Timed out waiting for deterministic step completion");
 }
 
 int start_instance() {
@@ -909,14 +996,14 @@ int print_capabilities() {
 
 int wmain(int argument_count, wchar_t** arguments) {
     if (argument_count == 2 && std::wstring(arguments[1]) == L"help") {
-        std::cout << "{\"ok\":true,\"schema_version\":14,\"commands\":[\"help\",\"start\",\"instances\",\"status <pid>\",\"events <pid>\",\"trace <pid> [limit] [summary]\",\"set <pid> <key> <value>\",\"pause <pid>\",\"resume <pid>\",\"reset <pid>\",\"stop <pid>\",\"capabilities\"],\"settings\":{\"mode\":[\"full_render\",\"repeat\",\"reproject\",\"frame_gen\",\"combined\",\"dlss_g\",\"dlss_g_warp\"],\"dlssg_mult\":[\"2\",\"3\",\"4\",\"5\",\"6\",\"dynamic\"],\"pacer\":[\"deadline\",\"vsync_only\",\"unlocked\"],\"target_fps\":\"0 or 30..500\",\"async_gpu\":[\"on\",\"off\"],\"vrs\":[\"off\",\"uniform_2x2\",\"foveated\"],\"selective_tiles\":[\"on\",\"off\"],\"tile_budget\":\"5..100\",\"tile_policy\":[\"fifo\",\"priority_stbn\"],\"adaptive\":[\"on\",\"off\"],\"adaptive_dlssg\":[\"on\",\"off\"],\"instrumentation\":[\"minimal\",\"standard\",\"diagnostic\"],\"divider\":\"1..8\",\"vsync\":[\"on\",\"off\"],\"view\":[\"final\",\"depth\",\"motion\",\"holes\",\"vrs\",\"tiles\",\"priority\"],\"path\":[\"corridor_sway\",\"fast_pan\",\"occlusion_sweep\",\"camera_cut\",\"manual\",\"pure_rotation\"],\"stress\":\"0..64\",\"overlay\":[\"on\",\"off\"],\"flash\":[\"on\",\"off\"]}}\n";
+        std::cout << "{\"ok\":true,\"schema_version\":15,\"commands\":[\"help\",\"start\",\"instances\",\"status <pid>\",\"events <pid>\",\"trace <pid> [limit] [summary]\",\"set <pid> <key> <value>\",\"step <pid> <frames>\",\"capture <pid> <tag>\",\"pause <pid>\",\"resume <pid>\",\"reset <pid>\",\"stop <pid>\",\"capabilities\"],\"settings\":{\"mode\":[\"full_render\",\"repeat\",\"reproject\",\"frame_gen\",\"combined\",\"dlss_g\",\"dlss_g_warp\"],\"dlssg_mult\":[\"2\",\"3\",\"4\",\"5\",\"6\",\"dynamic\"],\"pacer\":[\"deadline\",\"vsync_only\",\"unlocked\"],\"target_fps\":\"0 or 30..500\",\"async_gpu\":[\"on\",\"off\"],\"vrs\":[\"off\",\"uniform_2x2\",\"foveated\"],\"selective_tiles\":[\"on\",\"off\"],\"tile_budget\":\"5..100\",\"tile_policy\":[\"fifo\",\"priority_stbn\"],\"auto_tile_budget\":[\"on\",\"off\"],\"cache_sharpen\":[\"on\",\"off\"],\"fixed_dt_us\":\"0..100000\",\"adaptive\":[\"on\",\"off\"],\"adaptive_dlssg\":[\"on\",\"off\"],\"instrumentation\":[\"minimal\",\"standard\",\"diagnostic\"],\"divider\":\"1..8\",\"vsync\":[\"on\",\"off\"],\"view\":[\"final\",\"depth\",\"motion\",\"holes\",\"vrs\",\"tiles\",\"priority\"],\"path\":[\"corridor_sway\",\"fast_pan\",\"occlusion_sweep\",\"camera_cut\",\"manual\",\"pure_rotation\"],\"stress\":\"0..64\",\"overlay\":[\"on\",\"off\"],\"flash\":[\"on\",\"off\"]}}\n";
         return 0;
     }
     if (argument_count == 2 && std::wstring(arguments[1]) == L"capabilities") return print_capabilities();
     if (argument_count == 2 && std::wstring(arguments[1]) == L"start") return start_instance();
     const auto instances = find_instances();
     if (argument_count == 2 && std::wstring(arguments[1]) == L"instances") {
-        std::cout << "{\"ok\":true,\"schema_version\":14,\"instances\":[";
+        std::cout << "{\"ok\":true,\"schema_version\":15,\"instances\":[";
         for (std::size_t index = 0; index < instances.size(); ++index) {
             if (index) std::cout << ',';
             std::cout << "{\"process_id\":" << instances[index].process_id << "}";
@@ -961,6 +1048,26 @@ int wmain(int argument_count, wchar_t** arguments) {
     }
     if (command == L"set" && argument_count == 5) {
         return apply_setting(*matched_instance, arguments[3], arguments[4]);
+    }
+    if (command == L"capture" && (argument_count == 4 || argument_count == 5)) {
+        unsigned long parsed_tag = 0;
+        if (!parse_unsigned_long(arguments[3], parsed_tag) || parsed_tag == 0UL) {
+            return fail("invalid_tag", "Expected positive capture tag integer");
+        }
+        unsigned long parsed_steps = 0;
+        if (argument_count == 5) {
+            if (!parse_unsigned_long(arguments[4], parsed_steps) || parsed_steps == 0UL || parsed_steps > 2000UL) {
+                return fail("invalid_count", "Expected step frame count in [1, 2000]");
+            }
+        }
+        return capture_instance_frame(*matched_instance, static_cast<std::uint32_t>(parsed_tag), static_cast<std::int32_t>(parsed_steps));
+    }
+    if (command == L"step" && argument_count == 4) {
+        unsigned long parsed_count = 0;
+        if (!parse_unsigned_long(arguments[3], parsed_count) || parsed_count == 0UL || parsed_count > 2000UL) {
+            return fail("invalid_count", "Expected step frame count in [1, 2000]");
+        }
+        return step_instance_frames(*matched_instance, static_cast<std::int32_t>(parsed_count));
     }
     if (argument_count == 3 && (command == L"pause" || command == L"resume" || command == L"reset")) {
         const frame_warp_lab::ControlCommand operation = command == L"pause"

@@ -102,6 +102,7 @@ struct PresentRequest {
     float dlssg_dynamic_target_fps;
     float dlssg_object_motion_scale;
     bool discontinuity;
+    const wchar_t* capture_output_path = nullptr;
 };
 
 class Renderer {
@@ -127,6 +128,7 @@ public:
         bool selective_tiles_enabled,
         std::int32_t tile_budget_pct,
         TilePolicy tile_policy,
+        bool cache_sharpen_enabled,
         std::uint64_t frame_id,
         LatencyMonitor& latency_monitor,
         bool wait_for_completion);
@@ -272,6 +274,8 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Resource> reprojection_stats_zero_upload_;
     Microsoft::WRL::ComPtr<ID3D12Resource> reprojection_stats_readback_;
     const std::uint32_t* mapped_reprojection_stats_ = nullptr;
+    Microsoft::WRL::ComPtr<ID3D12Resource> capture_readback_buffer_;
+    UINT capture_readback_row_pitch_ = 0;
     std::array<std::uint64_t, swap_chain_buffer_count> buffer_fence_values_{};
     std::array<std::int64_t, swap_chain_buffer_count> buffer_display_frame_ids_{};
     std::array<std::int64_t, swap_chain_buffer_count> buffer_source_frame_ids_{};

@@ -235,4 +235,85 @@ private:
     std::int32_t window_frame_counter_ = 0;
 };
 
+class AutoTileBudgetController {
+public:
+    void reset() {
+        smoothed_scene_us_ = 0.0;
+        smoothed_present_us_ = 80.0;
+        has_sample_ = false;
+        last_source_frame_id_ = -1;
+        last_target_scene_budget_us_ = 0;
+        stable_low_streak_ = 0;
+    }
+
+    std::int64_t last_target_scene_budget_us() const { return last_target_scene_budget_us_; }
+
+    bool update(
+        std::int64_t target_period_us,
+        std::int32_t effective_divider,
+        std::int64_t source_frame_id,
+        std::int64_t scene_gpu_us,
+        std::int64_t present_gpu_us,
+        std::uint32_t total_tiles,
+        std::uint32_t shaded_tiles,
+        bool missed_deadline,
+        std::int32_t& in_out_budget_pct) {
+        const double period_us = static_cast<double>(std::max<std::int64_t>(target_period_us, 1000LL));
+        const double cadence = static_cast<double>(std::max<std::int32_t>(1, effective_divider));
+        if (present_gpu_us >= 0) {
+            smoothed_present_us_ = smoothed_present_us_ * 0.85 + static_cast<double>(present_gpu_us) * 0.15;
+        }
+        const double headroom_us = std::max(period_us * 0.25, smoothed_present_us_ * 2.5 + 750.0);
+        const double target_scene_us = std::max(450.0, period_us * cadence - smoothed_present_us_ - headroom_us);
+        last_target_scene_budget_us_ = static_cast<std::int64_t>(target_scene_us);
+
+        if (scene_gpu_us < 0 || source_frame_id == last_source_frame_id_ || total_tiles == 0U) {
+            return false;
+        }
+        last_source_frame_id_ = source_frame_id;
+        if (!has_sample_) {
+            smoothed_scene_us_ = static_cast<double>(scene_gpu_us);
+            has_sample_ = true;
+        } else {
+            smoothed_scene_us_ = smoothed_scene_us_ * 0.65 + static_cast<double>(scene_gpu_us) * 0.35;
+        }
+
+        const double actual_shaded_pct = std::clamp(
+            (100.0 * static_cast<double>(shaded_tiles)) / static_cast<double>(total_tiles),
+            5.0,
+            100.0);
+        const std::int32_t previous_budget = in_out_budget_pct;
+
+        if (smoothed_scene_us_ > target_scene_us * 0.90 || (missed_deadline && smoothed_scene_us_ > target_scene_us * 0.70)) {
+            stable_low_streak_ = 0;
+            const double scale = (target_scene_us * 0.78) / std::max(smoothed_scene_us_, 1.0);
+            const double anchor_pct = std::min(static_cast<double>(in_out_budget_pct), std::max(actual_shaded_pct, 8.0));
+            const auto tightened = std::clamp(static_cast<std::int32_t>(anchor_pct * scale), 5, 100);
+            in_out_budget_pct = (tightened < in_out_budget_pct) ? tightened : std::max(5, in_out_budget_pct - 2);
+            return in_out_budget_pct != previous_budget;
+        }
+
+        if (smoothed_scene_us_ < target_scene_us * 0.72 && in_out_budget_pct < 100) {
+            ++stable_low_streak_;
+            if (stable_low_streak_ >= 6) {
+                const std::int32_t step = smoothed_scene_us_ < target_scene_us * 0.48 ? 5 : 2;
+                in_out_budget_pct = std::min(100, in_out_budget_pct + step);
+                stable_low_streak_ = 0;
+                return in_out_budget_pct != previous_budget;
+            }
+        } else {
+            stable_low_streak_ = 0;
+        }
+        return false;
+    }
+
+private:
+    double smoothed_scene_us_ = 0.0;
+    double smoothed_present_us_ = 80.0;
+    bool has_sample_ = false;
+    std::int64_t last_source_frame_id_ = -1;
+    std::int64_t last_target_scene_budget_us_ = 0;
+    std::int32_t stable_low_streak_ = 0;
+};
+
 }

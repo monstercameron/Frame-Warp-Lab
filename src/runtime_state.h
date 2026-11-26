@@ -10,7 +10,7 @@
 namespace frame_warp_lab {
 
 inline constexpr wchar_t window_class_name[] = L"FrameWarpLabWindow";
-inline constexpr std::uint32_t runtime_state_version = 19;
+inline constexpr std::uint32_t runtime_state_version = 20;
 inline constexpr std::size_t runtime_event_capacity = 64;
 inline constexpr std::size_t runtime_frame_trace_capacity = 256;
 inline constexpr std::size_t hud_graph_sample_count = 128;
@@ -44,6 +44,11 @@ enum class ControlCommand : WPARAM {
     set_selective_tiles = 20,
     set_tile_budget_pct = 21,
     set_tile_policy = 22,
+    set_auto_tile_budget = 23,
+    set_cache_sharpen = 24,
+    set_fixed_dt_us = 25,
+    capture_frame = 26,
+    step_frames = 27,
 };
 
 enum class TilePolicy : std::int32_t {
@@ -161,6 +166,9 @@ enum class ConfigKey : std::int32_t {
     selective_tiles = 18,
     tile_budget_pct = 19,
     tile_policy = 20,
+    auto_tile_budget = 21,
+    cache_sharpen = 22,
+    fixed_dt_us = 23,
 };
 
 enum class RuntimeEventType : std::int32_t {
@@ -315,12 +323,20 @@ struct RuntimeState {
     std::int32_t selective_tiles_enabled;
     std::int32_t tile_budget_pct;
     std::int32_t tile_policy;
+    std::int32_t auto_tile_budget_enabled;
+    std::int32_t cache_sharpen_enabled;
+    std::int32_t fixed_dt_us;
+    std::int64_t last_target_scene_budget_us;
     std::uint32_t last_tile_total_count;
     std::uint32_t last_tile_cached_count;
     std::uint32_t last_tile_shaded_count;
     std::uint32_t last_tile_deferred_count;
     std::uint32_t last_tile_critical_total;
     std::uint32_t last_tile_critical_deferred;
+    std::uint32_t last_capture_tag;
+    std::int64_t last_capture_frame_id;
+    std::int64_t last_capture_scene_time_us;
+    std::int32_t pending_step_frames;
     std::int64_t trace_count;
     RuntimeEvent events[runtime_event_capacity];
     RuntimeFrameSample trace[runtime_frame_trace_capacity];
@@ -393,6 +409,9 @@ inline const char* config_key_name(std::int32_t key) {
         case ConfigKey::selective_tiles: return "selective_tiles";
         case ConfigKey::tile_budget_pct: return "tile_budget";
         case ConfigKey::tile_policy: return "tile_policy";
+        case ConfigKey::auto_tile_budget: return "auto_tile_budget";
+        case ConfigKey::cache_sharpen: return "cache_sharpen";
+        case ConfigKey::fixed_dt_us: return "fixed_dt_us";
         default: return "unknown";
     }
 }

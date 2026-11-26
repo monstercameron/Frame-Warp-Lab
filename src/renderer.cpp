@@ -549,6 +549,7 @@ bool Renderer::submit_scene_async(
     bool selective_tiles_enabled,
     std::int32_t tile_budget_pct,
     TilePolicy tile_policy,
+    bool cache_sharpen_enabled,
     std::uint64_t frame_id,
     LatencyMonitor& latency_monitor,
     bool wait_for_completion) {
@@ -627,7 +628,7 @@ bool Renderer::submit_scene_async(
         scene_constants->policy_params,
         tile_policy == TilePolicy::priority_stbn ? 1U : 0U,
         total_tiles,
-        0U,
+        cache_sharpen_enabled ? 1U : 0U,
         0U);
 
     latency_monitor.emit_marker(LatencyMarker::render_submit_start, frame_id);
@@ -1078,15 +1079,52 @@ FrameExecutionMetrics Renderer::present_from_source(const PresentRequest& reques
     present_command_list_->SetGraphicsRootDescriptorTable(5, tile_map_srv_gpu);
     present_command_list_->DrawInstanced(3, 1, 0, 0);
 
+    const bool do_capture = request.capture_output_path != nullptr && request.capture_output_path[0] != L'\0';
+    if (do_capture) {
+        const UINT row_pitch = (viewport_width_ * 4U + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1U) & ~(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1U);
+        const std::size_t required_bytes = static_cast<std::size_t>(row_pitch) * static_cast<std::size_t>(viewport_height_);
+        if (!capture_readback_buffer_ || capture_readback_row_pitch_ != row_pitch) {
+            capture_readback_buffer_ = create_buffer(
+                device_.Get(),
+                D3D12_HEAP_TYPE_READBACK,
+                required_bytes,
+                D3D12_RESOURCE_FLAG_NONE,
+                D3D12_RESOURCE_STATE_COPY_DEST,
+                "Create backbuffer capture readback buffer");
+            capture_readback_row_pitch_ = row_pitch;
+        }
+    }
+
     if (dlssg_active) {
         auto& dlss_slot = dlss_input_slots_[dlss_slot_index];
         const std::array<D3D12_RESOURCE_BARRIER, 4> after_draw = {
-            transition_barrier(render_targets_[buffer_index].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT),
+            transition_barrier(
+                render_targets_[buffer_index].Get(),
+                D3D12_RESOURCE_STATE_RENDER_TARGET,
+                do_capture ? D3D12_RESOURCE_STATE_COPY_SOURCE : D3D12_RESOURCE_STATE_PRESENT),
             transition_barrier(dlss_slot.hudless_target.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
             transition_barrier(dlss_slot.clip_depth_target.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
             transition_barrier(dlss_slot.motion_target.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
         };
         present_command_list_->ResourceBarrier(static_cast<UINT>(after_draw.size()), after_draw.data());
+        if (do_capture) {
+            D3D12_TEXTURE_COPY_LOCATION src_loc{};
+            src_loc.pResource = render_targets_[buffer_index].Get();
+            src_loc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            src_loc.SubresourceIndex = 0;
+            D3D12_TEXTURE_COPY_LOCATION dst_loc{};
+            dst_loc.pResource = capture_readback_buffer_.Get();
+            dst_loc.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            dst_loc.PlacedFootprint.Offset = 0;
+            dst_loc.PlacedFootprint.Footprint.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+            dst_loc.PlacedFootprint.Footprint.Width = viewport_width_;
+            dst_loc.PlacedFootprint.Footprint.Height = viewport_height_;
+            dst_loc.PlacedFootprint.Footprint.Depth = 1;
+            dst_loc.PlacedFootprint.Footprint.RowPitch = capture_readback_row_pitch_;
+            present_command_list_->CopyTextureRegion(&dst_loc, 0, 0, 0, &src_loc, nullptr);
+            const auto to_present = transition_barrier(render_targets_[buffer_index].Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_PRESENT);
+            present_command_list_->ResourceBarrier(1, &to_present);
+        }
         streamline_.tag_dlssg_resources(
             dlss_slot.clip_depth_target.Get(),
             D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
@@ -1097,6 +1135,25 @@ FrameExecutionMetrics Renderer::present_from_source(const PresentRequest& reques
             viewport_width_,
             viewport_height_,
             present_command_list_.Get());
+    } else if (do_capture) {
+        const auto to_copy = transition_barrier(render_targets_[buffer_index].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        present_command_list_->ResourceBarrier(1, &to_copy);
+        D3D12_TEXTURE_COPY_LOCATION src_loc{};
+        src_loc.pResource = render_targets_[buffer_index].Get();
+        src_loc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        src_loc.SubresourceIndex = 0;
+        D3D12_TEXTURE_COPY_LOCATION dst_loc{};
+        dst_loc.pResource = capture_readback_buffer_.Get();
+        dst_loc.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        dst_loc.PlacedFootprint.Offset = 0;
+        dst_loc.PlacedFootprint.Footprint.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        dst_loc.PlacedFootprint.Footprint.Width = viewport_width_;
+        dst_loc.PlacedFootprint.Footprint.Height = viewport_height_;
+        dst_loc.PlacedFootprint.Footprint.Depth = 1;
+        dst_loc.PlacedFootprint.Footprint.RowPitch = capture_readback_row_pitch_;
+        present_command_list_->CopyTextureRegion(&dst_loc, 0, 0, 0, &src_loc, nullptr);
+        const auto to_present = transition_barrier(render_targets_[buffer_index].Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_PRESENT);
+        present_command_list_->ResourceBarrier(1, &to_present);
     } else {
         const auto back_buffer_to_present = transition_barrier(render_targets_[buffer_index].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
         present_command_list_->ResourceBarrier(1, &back_buffer_to_present);
@@ -1180,6 +1237,36 @@ FrameExecutionMetrics Renderer::present_from_source(const PresentRequest& reques
 
     const auto fence_value = next_present_fence_value_++;
     check(present_queue_->Signal(present_fence_.Get(), fence_value), "Signal present fence");
+    if (do_capture && capture_readback_buffer_) {
+        wait_for_fence(present_fence_.Get(), present_fence_event_.get(), fence_value);
+        const std::size_t total_bytes = static_cast<std::size_t>(capture_readback_row_pitch_) * static_cast<std::size_t>(viewport_height_);
+        const D3D12_RANGE read_range{0, total_bytes};
+        const std::uint8_t* mapped_pixels = nullptr;
+        if (SUCCEEDED(capture_readback_buffer_->Map(0, &read_range, reinterpret_cast<void**>(const_cast<std::uint8_t**>(&mapped_pixels))))) {
+            std::filesystem::path output_path(request.capture_output_path);
+            std::error_code ec;
+            if (output_path.has_parent_path()) {
+                std::filesystem::create_directories(output_path.parent_path(), ec);
+            }
+            std::ofstream out_file(output_path, std::ios::binary | std::ios::trunc);
+            if (out_file) {
+                const std::string header = "P6\n" + std::to_string(viewport_width_) + " " + std::to_string(viewport_height_) + "\n255\n";
+                out_file.write(header.data(), static_cast<std::streamsize>(header.size()));
+                std::vector<std::uint8_t> row_rgb(static_cast<std::size_t>(viewport_width_) * 3U);
+                for (UINT y = 0; y < viewport_height_; ++y) {
+                    const std::uint8_t* src_row = mapped_pixels + static_cast<std::size_t>(y) * capture_readback_row_pitch_;
+                    for (UINT x = 0; x < viewport_width_; ++x) {
+                        row_rgb[static_cast<std::size_t>(x) * 3U + 0U] = src_row[static_cast<std::size_t>(x) * 4U + 0U];
+                        row_rgb[static_cast<std::size_t>(x) * 3U + 1U] = src_row[static_cast<std::size_t>(x) * 4U + 1U];
+                        row_rgb[static_cast<std::size_t>(x) * 3U + 2U] = src_row[static_cast<std::size_t>(x) * 4U + 2U];
+                    }
+                    out_file.write(reinterpret_cast<const char*>(row_rgb.data()), static_cast<std::streamsize>(row_rgb.size()));
+                }
+            }
+            const D3D12_RANGE write_range{0, 0};
+            capture_readback_buffer_->Unmap(0, &write_range);
+        }
+    }
     buffer_fence_values_[buffer_index] = fence_value;
     if (dlssg_active) {
         dlss_input_slots_[dlss_slot_index].last_present_fence = fence_value;
@@ -1241,6 +1328,8 @@ void Renderer::resize(UINT width, UINT height) {
     buffer_stats_enabled_.fill(false);
     buffer_total_pixels_.fill(0);
     vrs_image_.Reset();
+    capture_readback_buffer_.Reset();
+    capture_readback_row_pitch_ = 0;
     create_swap_chain_targets();
     create_dlss_input_targets();
     create_source_targets();
