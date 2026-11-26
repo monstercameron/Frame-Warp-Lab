@@ -58,6 +58,23 @@ Implement controls incrementally rather than assuming a finished automatic contr
 
 Very low real-frame rates limit the freshness of simulation, object motion and newly visible content. No synthesis mode can guarantee correct, responsive output for arbitrary load or GPU strength.
 
+### Additional techniques to investigate
+
+Keep these as individually measurable additions to the main combined frame-generation and asynchronous-reprojection experiment:
+
+1. **Late input sampling and camera updates:** sample input close to the warp deadline and compare with input sampled at full-frame start. Keep simulation and camera state consistent. Measure input latency and prediction error; a newer camera pose does not mean the rest of the world has updated.
+2. **GPU headroom and deadline-aware scheduling:** reserve capacity for generation and presentation, bound queues, and investigate shorter GPU workloads and scheduling under steady load and spikes. Measure actual GPU overlap and missed deadlines; separate threads or queues alone do not guarantee timely execution.
+3. **Dynamic resolution and quality:** adjust scene-rendering cost to protect a useful real-frame rate and leave synthesis headroom. Compare scaling softness and temporal artifacts as well as pacing and latency. Record every quality or resolution change.
+4. **Depth-aware reprojection confidence:** mark likely unreliable areas such as disocclusions, depth edges, fast-moving objects and transparency. Compare hole filling, conservative blending and presenting the last valid image. Record invalid-pixel coverage and visible artifacts.
+5. **Motion-vector-assisted object prediction:** use object motion data alongside camera motion to investigate independently moving objects. Test sudden reversals, occlusion and missing or incorrect vectors; predictions cannot reliably anticipate every change.
+6. **Separate UI and viewmodel treatment:** investigate late rendering or composition for reticles, menus, hands and weapons. Measure alignment with the world and actual game state: a responsive overlay over stale scene information can mislead.
+7. **Temporal image reuse:** evaluate a short history of color and depth to fill newly exposed regions. Use the occlusion gate to compare reduced holes against ghosting, stale geometry and extra GPU cost.
+8. **Adaptive generation policy:** select the amount and type of synthesis using frame age, motion, measured GPU headroom and deadline risk. Explain each decision through telemetry and compare with fixed policies; verify NVIDIA SDK pacing and ownership constraints before applying any policy to its path.
+
+Start with the combined generation-and-warp path and its single-technique controls, then add late input sampling and GPU headroom one at a time. Follow with dynamic resolution and confidence-based artifact handling. Keep workload, camera path and the verified monitor upper-bound target fixed when isolating each change; investigate further combinations after their individual effects are understood.
+
+Map a **quality envelope** across real-frame rates, workload and camera motion: identify where the combined system meets predefined display-pacing, latency and image-quality thresholds at the monitor's upper refresh bound, and where it fails. Define thresholds and measurement methods before evaluating results; report uncertainty, unsupported combinations and missing data.
+
 ### Controlled comparison
 
 Run the deterministic Motion Lab path in five modes: full-render baseline, lower-rate frame repetition, late camera reprojection, NVIDIA frame generation if supported, and the **combined frame-generation plus asynchronous-warp path** when a valid integration is established. The first four isolate contributions and provide references for the main combined experiment. If NVIDIA's presentation ownership prevents a documented combined integration, explicitly report that blocker and investigate supported integration or another frame-generation implementation; never silently substitute a single technique. Match workload, camera path, resolution and upper-bound display settings as closely as practical; benchmark modes independently because displaying multiple views can itself change GPU load. Where a high-rate reference is used for image comparisons, match scene state and timestamps. Record differences in configuration and feature availability.
