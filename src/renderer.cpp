@@ -620,6 +620,8 @@ bool Renderer::submit_scene_async(
     bool reactive_invalidation_enabled,
     bool shadow_delta_invalidation_enabled,
     bool forward_transparency_enabled,
+    bool split_diff_spec_enabled,
+    bool surface_cache_enabled,
     std::uint64_t frame_id,
     LatencyMonitor& latency_monitor,
     bool wait_for_completion,
@@ -708,7 +710,9 @@ bool Renderer::submit_scene_async(
         | (subtile_interleave_enabled ? 2U : 0U)
         | (reactive_invalidation_enabled ? 4U : 0U)
         | (shadow_delta_invalidation_enabled ? 8U : 0U)
-        | (forward_transparency_enabled ? 16U : 0U);
+        | (forward_transparency_enabled ? 16U : 0U)
+        | (split_diff_spec_enabled ? 32U : 0U)
+        | (surface_cache_enabled ? 64U : 0U);
     simd::store_uint4(
         scene_constants->policy_params,
         policy_flags,
@@ -862,6 +866,10 @@ bool Renderer::submit_scene_async(
             D3D12_GPU_DESCRIPTOR_HANDLE shared_uav_gpu{
                 heap_gpu_start.ptr + static_cast<UINT64>(source_slot_count * compute_descriptors_per_source_slot) * shader_resource_descriptor_stride_};
 
+            const bool run_split_composite = split_diff_spec_enabled && range_vis_composite_pipeline_;
+            D3D12_GPU_DESCRIPTOR_HANDLE curr_final_color_uav{
+                heap_gpu_start.ptr + (static_cast<UINT64>(slot_index) * compute_descriptors_per_source_slot + 8ULL) * shader_resource_descriptor_stride_};
+
             scene_command_list_->SetComputeRootSignature(range_vis_compute_root_signature_.Get());
             scene_command_list_->SetComputeRootConstantBufferView(0, scene_constant_buffer_->GetGPUVirtualAddress() + constant_offset);
             scene_command_list_->SetComputeRootDescriptorTable(1, prev_srv_gpu);
@@ -872,6 +880,8 @@ bool Renderer::submit_scene_async(
             scene_command_list_->SetComputeRootShaderResourceView(6, range_vertex_buffer_->GetGPUVirtualAddress());
             scene_command_list_->SetComputeRootShaderResourceView(7, range_index_buffer_->GetGPUVirtualAddress());
             scene_command_list_->SetComputeRootShaderResourceView(8, range_instance_buffer_->GetGPUVirtualAddress() + inst_offset);
+            scene_command_list_->SetComputeRootDescriptorTable(9, curr_final_color_uav);
+            scene_command_list_->SetComputeRootUnorderedAccessView(10, surface_cache_uav_->GetGPUVirtualAddress());
 
             scene_command_list_->SetPipelineState(range_vis_classify_pipeline_.Get());
             scene_command_list_->Dispatch(tiles_x, tiles_y, 1);
@@ -898,77 +908,134 @@ bool Renderer::submit_scene_async(
             scene_command_list_->SetPipelineState(range_vis_shade_pipeline_.Get());
             scene_command_list_->ExecuteIndirect(dispatch_command_signature_.Get(), 1, tile_indirect_args_uav_.Get(), 0, nullptr, 0);
 
-            const std::array<D3D12_RESOURCE_BARRIER, 7> after_vis_par = {
-                transition_barrier(slot.opaque_cache_target.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE),
-                transition_barrier(slot.color_target.Get(), source_slot_readable_state, D3D12_RESOURCE_STATE_COPY_DEST),
-                transition_barrier(slot.depth_target.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, source_slot_readable_state),
-                transition_barrier(slot.motion_target.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, source_slot_readable_state),
-                transition_barrier(slot.vis_target.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, source_slot_readable_state),
-                transition_barrier(slot.tile_map_target.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, source_slot_readable_state),
-                transition_barrier(tile_indirect_args_uav_.Get(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, D3D12_RESOURCE_STATE_COPY_SOURCE),
-            };
-            scene_command_list_->ResourceBarrier(static_cast<UINT>(after_vis_par.size()), after_vis_par.data());
-
-            scene_command_list_->CopyResource(slot.color_target.Get(), slot.opaque_cache_target.Get());
-            scene_command_list_->CopyBufferRegion(
-                tile_stats_readback_.Get(),
-                static_cast<UINT64>(slot_index) * tile_stats_readback_u32_count * sizeof(std::uint32_t),
-                tile_indirect_args_uav_.Get(),
-                0,
-                static_cast<UINT64>(tile_stats_readback_u32_count) * sizeof(std::uint32_t));
-
-            const auto& glass_sm = range_submeshes_[static_cast<std::size_t>(RangeMeshKind::transparent_glass)];
-            if ((shader_flags & 128U) != 0U && range_transparent_pipeline_ && range_transparent_root_signature_ && glass_sm.index_count > 0U) {
-                const std::array<D3D12_RESOURCE_BARRIER, 3> prep_trans = {
-                    transition_barrier(slot.color_target.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_RENDER_TARGET),
-                    transition_barrier(slot.opaque_cache_target.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, source_slot_readable_state),
-                    transition_barrier(tile_indirect_args_uav_.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
+            if (run_split_composite) {
+                const std::array<D3D12_RESOURCE_BARRIER, 3> prep_comp = {
+                    uav_barrier(slot.opaque_cache_target.Get()),
+                    uav_barrier(surface_cache_uav_.Get()),
+                    transition_barrier(slot.color_target.Get(), source_slot_readable_state, D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
                 };
-                scene_command_list_->ResourceBarrier(static_cast<UINT>(prep_trans.size()), prep_trans.data());
+                scene_command_list_->ResourceBarrier(static_cast<UINT>(prep_comp.size()), prep_comp.data());
 
-                auto color_rtv = render_target_heap_->GetCPUDescriptorHandleForHeapStart();
-                color_rtv.ptr += static_cast<SIZE_T>(
-                    swap_chain_buffer_count
-                    + dlss_input_slot_count * rtv_targets_per_dlss_slot
-                    + static_cast<UINT>(slot_index) * targets_per_source_slot) * render_target_descriptor_stride_;
-                D3D12_GPU_DESCRIPTOR_HANDLE curr_depth_srv{
-                    heap_gpu_start.ptr + (static_cast<UINT64>(slot_index) * compute_descriptors_per_source_slot + 1ULL) * shader_resource_descriptor_stride_};
-                scene_command_list_->OMSetRenderTargets(1, &color_rtv, TRUE, nullptr);
-                scene_command_list_->SetGraphicsRootSignature(range_transparent_root_signature_.Get());
-                scene_command_list_->SetPipelineState(range_transparent_pipeline_.Get());
-                scene_command_list_->SetGraphicsRootConstantBufferView(0, scene_constant_buffer_->GetGPUVirtualAddress() + constant_offset);
-                scene_command_list_->SetGraphicsRootShaderResourceView(2, range_instance_buffer_->GetGPUVirtualAddress() + inst_offset);
-                scene_command_list_->SetGraphicsRootDescriptorTable(3, range_pbr_srv_gpu);
-                scene_command_list_->SetGraphicsRootDescriptorTable(4, curr_depth_srv);
-                scene_command_list_->IASetVertexBuffers(0, 1, &range_vb_view_);
-                scene_command_list_->IASetIndexBuffer(&range_ib_view_);
-                const std::uint32_t glass_meta[4] = {0U, 0U, glass_sm.index_offset / 3U, 0U};
-                scene_command_list_->SetGraphicsRoot32BitConstants(1, 4, glass_meta, 0);
-                scene_command_list_->DrawIndexedInstanced(glass_sm.index_count, 1, glass_sm.index_offset, 0, 0);
+                scene_command_list_->SetPipelineState(range_vis_composite_pipeline_.Get());
+                scene_command_list_->Dispatch(tiles_x, tiles_y, 1);
 
-                if (!forward_transparency_enabled) {
-                    const std::array<D3D12_RESOURCE_BARRIER, 2> pollute_prep = {
-                        transition_barrier(slot.color_target.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE),
-                        transition_barrier(slot.opaque_cache_target.Get(), source_slot_readable_state, D3D12_RESOURCE_STATE_COPY_DEST),
-                    };
-                    scene_command_list_->ResourceBarrier(static_cast<UINT>(pollute_prep.size()), pollute_prep.data());
-                    scene_command_list_->CopyResource(slot.opaque_cache_target.Get(), slot.color_target.Get());
-                    const std::array<D3D12_RESOURCE_BARRIER, 2> pollute_done = {
-                        transition_barrier(slot.color_target.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, source_slot_readable_state),
-                        transition_barrier(slot.opaque_cache_target.Get(), D3D12_RESOURCE_STATE_COPY_DEST, source_slot_readable_state),
-                    };
-                    scene_command_list_->ResourceBarrier(static_cast<UINT>(pollute_done.size()), pollute_done.data());
-                } else {
-                    const auto color_to_srv = transition_barrier(slot.color_target.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, source_slot_readable_state);
-                    scene_command_list_->ResourceBarrier(1, &color_to_srv);
+                const std::array<D3D12_RESOURCE_BARRIER, 7> after_comp = {
+                    transition_barrier(slot.opaque_cache_target.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, source_slot_readable_state),
+                    transition_barrier(slot.color_target.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_RENDER_TARGET),
+                    transition_barrier(slot.depth_target.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, source_slot_readable_state),
+                    transition_barrier(slot.motion_target.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, source_slot_readable_state),
+                    transition_barrier(slot.vis_target.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, source_slot_readable_state),
+                    transition_barrier(slot.tile_map_target.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, source_slot_readable_state),
+                    transition_barrier(tile_indirect_args_uav_.Get(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, D3D12_RESOURCE_STATE_COPY_SOURCE),
+                };
+                scene_command_list_->ResourceBarrier(static_cast<UINT>(after_comp.size()), after_comp.data());
+
+                scene_command_list_->CopyBufferRegion(
+                    tile_stats_readback_.Get(),
+                    static_cast<UINT64>(slot_index) * tile_stats_readback_u32_count * sizeof(std::uint32_t),
+                    tile_indirect_args_uav_.Get(),
+                    0,
+                    static_cast<UINT64>(tile_stats_readback_u32_count) * sizeof(std::uint32_t));
+                const auto args_back = transition_barrier(tile_indirect_args_uav_.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                scene_command_list_->ResourceBarrier(1, &args_back);
+
+                const auto& glass_sm = range_submeshes_[static_cast<std::size_t>(RangeMeshKind::transparent_glass)];
+                if ((shader_flags & 128U) != 0U && range_transparent_pipeline_ && range_transparent_root_signature_ && glass_sm.index_count > 0U) {
+                    auto color_rtv = render_target_heap_->GetCPUDescriptorHandleForHeapStart();
+                    color_rtv.ptr += static_cast<SIZE_T>(
+                        swap_chain_buffer_count
+                        + dlss_input_slot_count * rtv_targets_per_dlss_slot
+                        + static_cast<UINT>(slot_index) * targets_per_source_slot) * render_target_descriptor_stride_;
+                    D3D12_GPU_DESCRIPTOR_HANDLE curr_depth_srv{
+                        heap_gpu_start.ptr + (static_cast<UINT64>(slot_index) * compute_descriptors_per_source_slot + 1ULL) * shader_resource_descriptor_stride_};
+                    scene_command_list_->OMSetRenderTargets(1, &color_rtv, TRUE, nullptr);
+                    scene_command_list_->SetGraphicsRootSignature(range_transparent_root_signature_.Get());
+                    scene_command_list_->SetPipelineState(range_transparent_pipeline_.Get());
+                    scene_command_list_->SetGraphicsRootConstantBufferView(0, scene_constant_buffer_->GetGPUVirtualAddress() + constant_offset);
+                    scene_command_list_->SetGraphicsRootShaderResourceView(2, range_instance_buffer_->GetGPUVirtualAddress() + inst_offset);
+                    scene_command_list_->SetGraphicsRootDescriptorTable(3, range_pbr_srv_gpu);
+                    scene_command_list_->SetGraphicsRootDescriptorTable(4, curr_depth_srv);
+                    scene_command_list_->IASetVertexBuffers(0, 1, &range_vb_view_);
+                    scene_command_list_->IASetIndexBuffer(&range_ib_view_);
+                    const std::uint32_t glass_meta[4] = {0U, 0U, glass_sm.index_offset / 3U, 0U};
+                    scene_command_list_->SetGraphicsRoot32BitConstants(1, 4, glass_meta, 0);
+                    scene_command_list_->DrawIndexedInstanced(glass_sm.index_count, 1, glass_sm.index_offset, 0, 0);
                 }
+                const auto color_done = transition_barrier(slot.color_target.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, source_slot_readable_state);
+                scene_command_list_->ResourceBarrier(1, &color_done);
             } else {
-                const std::array<D3D12_RESOURCE_BARRIER, 3> finish_vis = {
-                    transition_barrier(slot.color_target.Get(), D3D12_RESOURCE_STATE_COPY_DEST, source_slot_readable_state),
-                    transition_barrier(slot.opaque_cache_target.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, source_slot_readable_state),
-                    transition_barrier(tile_indirect_args_uav_.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
+                const std::array<D3D12_RESOURCE_BARRIER, 7> after_vis_par = {
+                    transition_barrier(slot.opaque_cache_target.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE),
+                    transition_barrier(slot.color_target.Get(), source_slot_readable_state, D3D12_RESOURCE_STATE_COPY_DEST),
+                    transition_barrier(slot.depth_target.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, source_slot_readable_state),
+                    transition_barrier(slot.motion_target.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, source_slot_readable_state),
+                    transition_barrier(slot.vis_target.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, source_slot_readable_state),
+                    transition_barrier(slot.tile_map_target.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, source_slot_readable_state),
+                    transition_barrier(tile_indirect_args_uav_.Get(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, D3D12_RESOURCE_STATE_COPY_SOURCE),
                 };
-                scene_command_list_->ResourceBarrier(static_cast<UINT>(finish_vis.size()), finish_vis.data());
+                scene_command_list_->ResourceBarrier(static_cast<UINT>(after_vis_par.size()), after_vis_par.data());
+
+                scene_command_list_->CopyResource(slot.color_target.Get(), slot.opaque_cache_target.Get());
+                scene_command_list_->CopyBufferRegion(
+                    tile_stats_readback_.Get(),
+                    static_cast<UINT64>(slot_index) * tile_stats_readback_u32_count * sizeof(std::uint32_t),
+                    tile_indirect_args_uav_.Get(),
+                    0,
+                    static_cast<UINT64>(tile_stats_readback_u32_count) * sizeof(std::uint32_t));
+
+                const auto& glass_sm = range_submeshes_[static_cast<std::size_t>(RangeMeshKind::transparent_glass)];
+                if ((shader_flags & 128U) != 0U && range_transparent_pipeline_ && range_transparent_root_signature_ && glass_sm.index_count > 0U) {
+                    const std::array<D3D12_RESOURCE_BARRIER, 3> prep_trans = {
+                        transition_barrier(slot.color_target.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_RENDER_TARGET),
+                        transition_barrier(slot.opaque_cache_target.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, source_slot_readable_state),
+                        transition_barrier(tile_indirect_args_uav_.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
+                    };
+                    scene_command_list_->ResourceBarrier(static_cast<UINT>(prep_trans.size()), prep_trans.data());
+
+                    auto color_rtv = render_target_heap_->GetCPUDescriptorHandleForHeapStart();
+                    color_rtv.ptr += static_cast<SIZE_T>(
+                        swap_chain_buffer_count
+                        + dlss_input_slot_count * rtv_targets_per_dlss_slot
+                        + static_cast<UINT>(slot_index) * targets_per_source_slot) * render_target_descriptor_stride_;
+                    D3D12_GPU_DESCRIPTOR_HANDLE curr_depth_srv{
+                        heap_gpu_start.ptr + (static_cast<UINT64>(slot_index) * compute_descriptors_per_source_slot + 1ULL) * shader_resource_descriptor_stride_};
+                    scene_command_list_->OMSetRenderTargets(1, &color_rtv, TRUE, nullptr);
+                    scene_command_list_->SetGraphicsRootSignature(range_transparent_root_signature_.Get());
+                    scene_command_list_->SetPipelineState(range_transparent_pipeline_.Get());
+                    scene_command_list_->SetGraphicsRootConstantBufferView(0, scene_constant_buffer_->GetGPUVirtualAddress() + constant_offset);
+                    scene_command_list_->SetGraphicsRootShaderResourceView(2, range_instance_buffer_->GetGPUVirtualAddress() + inst_offset);
+                    scene_command_list_->SetGraphicsRootDescriptorTable(3, range_pbr_srv_gpu);
+                    scene_command_list_->SetGraphicsRootDescriptorTable(4, curr_depth_srv);
+                    scene_command_list_->IASetVertexBuffers(0, 1, &range_vb_view_);
+                    scene_command_list_->IASetIndexBuffer(&range_ib_view_);
+                    const std::uint32_t glass_meta[4] = {0U, 0U, glass_sm.index_offset / 3U, 0U};
+                    scene_command_list_->SetGraphicsRoot32BitConstants(1, 4, glass_meta, 0);
+                    scene_command_list_->DrawIndexedInstanced(glass_sm.index_count, 1, glass_sm.index_offset, 0, 0);
+
+                    if (!forward_transparency_enabled) {
+                        const std::array<D3D12_RESOURCE_BARRIER, 2> pollute_prep = {
+                            transition_barrier(slot.color_target.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE),
+                            transition_barrier(slot.opaque_cache_target.Get(), source_slot_readable_state, D3D12_RESOURCE_STATE_COPY_DEST),
+                        };
+                        scene_command_list_->ResourceBarrier(static_cast<UINT>(pollute_prep.size()), pollute_prep.data());
+                        scene_command_list_->CopyResource(slot.opaque_cache_target.Get(), slot.color_target.Get());
+                        const std::array<D3D12_RESOURCE_BARRIER, 2> pollute_done = {
+                            transition_barrier(slot.color_target.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, source_slot_readable_state),
+                            transition_barrier(slot.opaque_cache_target.Get(), D3D12_RESOURCE_STATE_COPY_DEST, source_slot_readable_state),
+                        };
+                        scene_command_list_->ResourceBarrier(static_cast<UINT>(pollute_done.size()), pollute_done.data());
+                    } else {
+                        const auto color_to_srv = transition_barrier(slot.color_target.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, source_slot_readable_state);
+                        scene_command_list_->ResourceBarrier(1, &color_to_srv);
+                    }
+                } else {
+                    const std::array<D3D12_RESOURCE_BARRIER, 3> finish_vis = {
+                        transition_barrier(slot.color_target.Get(), D3D12_RESOURCE_STATE_COPY_DEST, source_slot_readable_state),
+                        transition_barrier(slot.opaque_cache_target.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, source_slot_readable_state),
+                        transition_barrier(tile_indirect_args_uav_.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
+                    };
+                    scene_command_list_->ResourceBarrier(static_cast<UINT>(finish_vis.size()), finish_vis.data());
+                }
             }
             slot.used_selective_tiles = true;
         } else {
@@ -2004,6 +2071,7 @@ void Renderer::create_pipelines() {
     const auto range_vis_classify_cs = load_shader_bytecode(shaders / L"range_vis_classify_cs.cso");
     const auto range_vis_admit_cs = load_shader_bytecode(shaders / L"range_vis_admit_cs.cso");
     const auto range_vis_shade_cs = load_shader_bytecode(shaders / L"range_vis_shade_cs.cso");
+    const auto range_vis_composite_cs = load_shader_bytecode(shaders / L"range_vis_composite_cs.cso");
 
     D3D12_DESCRIPTOR_RANGE scene_pbr_srv_range{};
     scene_pbr_srv_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
@@ -2391,7 +2459,13 @@ void Renderer::create_pipelines() {
     corr_trans_pso.RTVFormats[2] = DXGI_FORMAT_UNKNOWN;
     check(device_->CreateGraphicsPipelineState(&corr_trans_pso, IID_PPV_ARGS(&corridor_transparent_pipeline_)), "Create corridor transparent pipeline");
 
-    std::array<D3D12_ROOT_PARAMETER, 9> range_vis_params{};
+    D3D12_DESCRIPTOR_RANGE final_color_uav_range{};
+    final_color_uav_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+    final_color_uav_range.NumDescriptors = 1;
+    final_color_uav_range.BaseShaderRegister = 8;
+    final_color_uav_range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+    std::array<D3D12_ROOT_PARAMETER, 11> range_vis_params{};
     for (std::size_t i = 0; i < tile_compute_parameters.size(); ++i) {
         range_vis_params[i] = tile_compute_parameters[i];
     }
@@ -2404,6 +2478,13 @@ void Renderer::create_pipelines() {
     range_vis_params[8].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
     range_vis_params[8].Descriptor.ShaderRegister = 13;
     range_vis_params[8].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    range_vis_params[9].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    range_vis_params[9].DescriptorTable.NumDescriptorRanges = 1;
+    range_vis_params[9].DescriptorTable.pDescriptorRanges = &final_color_uav_range;
+    range_vis_params[9].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    range_vis_params[10].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+    range_vis_params[10].Descriptor.ShaderRegister = 9;
+    range_vis_params[10].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
     D3D12_ROOT_SIGNATURE_DESC range_vis_root_desc{};
     range_vis_root_desc.NumParameters = static_cast<UINT>(range_vis_params.size());
@@ -2425,6 +2506,8 @@ void Renderer::create_pipelines() {
     check(device_->CreateComputePipelineState(&rvis_cs_desc, IID_PPV_ARGS(&range_vis_admit_pipeline_)), "Create range VisBuffer admit pipeline");
     rvis_cs_desc.CS = {range_vis_shade_cs.data(), range_vis_shade_cs.size()};
     check(device_->CreateComputePipelineState(&rvis_cs_desc, IID_PPV_ARGS(&range_vis_shade_pipeline_)), "Create range VisBuffer shade pipeline");
+    rvis_cs_desc.CS = {range_vis_composite_cs.data(), range_vis_composite_cs.size()};
+    check(device_->CreateComputePipelineState(&rvis_cs_desc, IID_PPV_ARGS(&range_vis_composite_pipeline_)), "Create range VisBuffer composite pipeline");
 }
 
 void Renderer::create_constant_buffers() {
@@ -2539,6 +2622,13 @@ void Renderer::create_selective_tile_resources() {
         D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
         D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
         "Create tile indirect args UAV");
+    surface_cache_uav_ = create_buffer(
+        device_.Get(),
+        D3D12_HEAP_TYPE_DEFAULT,
+        static_cast<std::size_t>(surface_cache_cell_count) * 16U,
+        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+        "Create persistent surface-space cache UAV");
     tile_indirect_args_init_upload_ = create_buffer(
         device_.Get(),
         D3D12_HEAP_TYPE_UPLOAD,
@@ -2857,6 +2947,9 @@ void Renderer::create_source_targets() {
         compute_cpu.ptr += shader_resource_descriptor_stride_;
         uav_desc.Format = DXGI_FORMAT_R8_UINT;
         device_->CreateUnorderedAccessView(slot.tile_map_target.Get(), nullptr, &uav_desc, compute_cpu);
+        compute_cpu.ptr += shader_resource_descriptor_stride_;
+        uav_desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        device_->CreateUnorderedAccessView(slot.color_target.Get(), nullptr, &uav_desc, compute_cpu);
         compute_cpu.ptr += shader_resource_descriptor_stride_;
     }
 

@@ -222,6 +222,8 @@ public:
         bool reactive_invalidation_enabled,
         bool shadow_delta_invalidation_enabled,
         bool forward_transparency_enabled,
+        bool split_diff_spec_enabled,
+        bool surface_cache_enabled,
         bool par_bypass_active,
         std::int32_t smoothed_damage_pct,
         std::int32_t render_scale_pct,
@@ -249,6 +251,8 @@ public:
         std::atomic_ref<std::int32_t>(state_->reactive_invalidation_enabled).store(reactive_invalidation_enabled ? 1 : 0, std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->shadow_delta_invalidation_enabled).store(shadow_delta_invalidation_enabled ? 1 : 0, std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->forward_transparency_enabled).store(forward_transparency_enabled ? 1 : 0, std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->split_diff_spec_enabled).store(split_diff_spec_enabled ? 1 : 0, std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->surface_cache_enabled).store(surface_cache_enabled ? 1 : 0, std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->par_bypass_active).store(par_bypass_active ? 1 : 0, std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->smoothed_damage_pct).store(smoothed_damage_pct, std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->render_scale_pct).store(render_scale_pct, std::memory_order_release);
@@ -785,6 +789,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         bool reactive_invalidation_enabled = true;
         bool shadow_delta_invalidation_enabled = true;
         bool forward_transparency_enabled = true;
+        bool split_diff_spec_enabled = true;
+        bool surface_cache_enabled = true;
         std::int32_t render_scale_pct = 100;
         UINT render_override_width = 0;
         UINT render_override_height = 0;
@@ -886,6 +892,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 reactive_invalidation_enabled,
                 shadow_delta_invalidation_enabled,
                 forward_transparency_enabled,
+                split_diff_spec_enabled,
+                surface_cache_enabled,
                 auto_tile_budget_enabled && auto_tile_budget.par_bypass_active(),
                 auto_tile_budget.smoothed_damage_pct(),
                 render_scale_pct,
@@ -1061,6 +1069,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 forward_transparency_enabled = message_lparam != 0;
                 renderer.invalidate_source_history();
                 runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, forward_transparency_enabled ? 1 : 0, frame_warp_lab::ConfigKey::forward_transparency);
+            } else if (command == frame_warp_lab::ControlCommand::set_split_diff_spec) {
+                split_diff_spec_enabled = message_lparam != 0;
+                renderer.invalidate_source_history();
+                runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, split_diff_spec_enabled ? 1 : 0, frame_warp_lab::ConfigKey::split_diff_spec);
+            } else if (command == frame_warp_lab::ControlCommand::set_surface_cache) {
+                surface_cache_enabled = message_lparam != 0;
+                renderer.invalidate_source_history();
+                runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, surface_cache_enabled ? 1 : 0, frame_warp_lab::ConfigKey::surface_cache);
             } else if (command == frame_warp_lab::ControlCommand::set_shader_flags) {
                 shader_flags = static_cast<std::uint32_t>(message_lparam) & 0xFFU;
                 renderer.invalidate_source_history();
@@ -1578,6 +1594,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                     reactive_invalidation_enabled,
                     shadow_delta_invalidation_enabled,
                     forward_transparency_enabled,
+                    split_diff_spec_enabled,
+                    surface_cache_enabled,
                     frame_id_u64,
                     latency_monitor,
                     must_wait,
@@ -1909,6 +1927,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 reactive_invalidation_enabled,
                 shadow_delta_invalidation_enabled,
                 forward_transparency_enabled,
+                split_diff_spec_enabled,
+                surface_cache_enabled,
                 auto_tile_budget_enabled && auto_tile_budget.par_bypass_active(),
                 auto_tile_budget.smoothed_damage_pct(),
                 render_scale_pct,

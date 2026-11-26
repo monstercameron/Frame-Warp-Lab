@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(FrameWarpLab VERSION 0.33.0 LANGUAGES C CXX)
+project(FrameWarpLab VERSION 0.34.0 LANGUAGES C CXX)
 
 if(NOT WIN32)
     message(FATAL_ERROR "Frame Warp Lab currently requires Windows and Direct3D 12.")
@@ -160,6 +160,7 @@ add_dxc_shader(COMPILED_SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/motion_lab.
 add_dxc_shader(COMPILED_SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/range_vis_par.hlsl" range_vis_classify_main cs_6_0 range_vis_classify_cs.cso)
 add_dxc_shader(COMPILED_SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/range_vis_par.hlsl" range_vis_admit_main cs_6_0 range_vis_admit_cs.cso)
 add_dxc_shader(COMPILED_SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/range_vis_par.hlsl" range_vis_shade_main cs_6_0 range_vis_shade_cs.cso)
+add_dxc_shader(COMPILED_SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/range_vis_par.hlsl" range_vis_composite_main cs_6_0 range_vis_composite_cs.cso)
 
 add_custom_target(frame_warp_shaders ALL DEPENDS ${COMPILED_SHADERS})
 add_dependencies(frame_warp_lab frame_warp_shaders)

@@ -143,6 +143,8 @@ public:
         bool reactive_invalidation_enabled,
         bool shadow_delta_invalidation_enabled,
         bool forward_transparency_enabled,
+        bool split_diff_spec_enabled,
+        bool surface_cache_enabled,
         std::uint64_t frame_id,
         LatencyMonitor& latency_monitor,
         bool wait_for_completion,
@@ -179,8 +181,9 @@ private:
     static constexpr UINT rtv_targets_per_dlss_slot = 3;
     static constexpr UINT source_slot_count = 3;
     static constexpr UINT targets_per_source_slot = 3;
-    static constexpr UINT compute_descriptors_per_source_slot = 8;
+    static constexpr UINT compute_descriptors_per_source_slot = 9;
     static constexpr UINT pbr_srv_descriptor_count = 8;
+    static constexpr UINT surface_cache_cell_count = 262144;
     static constexpr UINT max_dirty_tile_capacity = 131072;
     static constexpr UINT tile_indirect_u32_count = 24;
     static constexpr UINT tile_stats_readback_u32_count = 16;
@@ -297,6 +300,8 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> range_vis_classify_pipeline_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> range_vis_admit_pipeline_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> range_vis_shade_pipeline_;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> range_vis_composite_pipeline_;
+    Microsoft::WRL::ComPtr<ID3D12Resource> surface_cache_uav_;
     Microsoft::WRL::ComPtr<ID3D12Resource> range_depth_buffer_;
     Microsoft::WRL::ComPtr<ID3D12Resource> range_vertex_buffer_;
     Microsoft::WRL::ComPtr<ID3D12Resource> range_index_buffer_;

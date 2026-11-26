@@ -341,6 +341,8 @@ int print_status(const WindowInstance& instance) {
     const std::int32_t reactive_invalidation_enabled = std::atomic_ref<std::int32_t>(state->reactive_invalidation_enabled).load(std::memory_order_acquire);
     const std::int32_t shadow_delta_invalidation_enabled = std::atomic_ref<std::int32_t>(state->shadow_delta_invalidation_enabled).load(std::memory_order_acquire);
     const std::int32_t forward_transparency_enabled = std::atomic_ref<std::int32_t>(state->forward_transparency_enabled).load(std::memory_order_acquire);
+    const std::int32_t split_diff_spec_enabled = std::atomic_ref<std::int32_t>(state->split_diff_spec_enabled).load(std::memory_order_acquire);
+    const std::int32_t surface_cache_enabled = std::atomic_ref<std::int32_t>(state->surface_cache_enabled).load(std::memory_order_acquire);
     const std::int32_t par_bypass_active = std::atomic_ref<std::int32_t>(state->par_bypass_active).load(std::memory_order_acquire);
     const std::int32_t smoothed_damage_pct = std::atomic_ref<std::int32_t>(state->smoothed_damage_pct).load(std::memory_order_acquire);
     const std::int32_t render_scale_pct = std::atomic_ref<std::int32_t>(state->render_scale_pct).load(std::memory_order_acquire);
@@ -517,6 +519,8 @@ int print_status(const WindowInstance& instance) {
               << ",\"reactive_invalidation_enabled\":" << (reactive_invalidation_enabled ? "true" : "false")
               << ",\"shadow_delta_invalidation_enabled\":" << (shadow_delta_invalidation_enabled ? "true" : "false")
               << ",\"forward_transparency_enabled\":" << (forward_transparency_enabled ? "true" : "false")
+              << ",\"split_diff_spec_enabled\":" << (split_diff_spec_enabled ? "true" : "false")
+              << ",\"surface_cache_enabled\":" << (surface_cache_enabled ? "true" : "false")
               << ",\"par_bypass_active\":" << (par_bypass_active ? "true" : "false")
               << ",\"smoothed_damage_pct\":" << smoothed_damage_pct
               << ",\"target_scene_budget_us\":" << target_scene_budget_us
@@ -937,6 +941,16 @@ int apply_setting(const WindowInstance& instance, const std::wstring& key, const
         if (value == L"on" || value == L"1" || value == L"true") parameter = 1;
         else if (value == L"off" || value == L"0" || value == L"false") parameter = 0;
         else return fail("invalid_value", "Expected forward_transparency in {on, off}");
+    } else if (key == L"split_diff_spec") {
+        command = frame_warp_lab::ControlCommand::set_split_diff_spec;
+        if (value == L"on" || value == L"1" || value == L"true") parameter = 1;
+        else if (value == L"off" || value == L"0" || value == L"false") parameter = 0;
+        else return fail("invalid_value", "Expected split_diff_spec in {on, off}");
+    } else if (key == L"surface_cache") {
+        command = frame_warp_lab::ControlCommand::set_surface_cache;
+        if (value == L"on" || value == L"1" || value == L"true") parameter = 1;
+        else if (value == L"off" || value == L"0" || value == L"false") parameter = 0;
+        else return fail("invalid_value", "Expected surface_cache in {on, off}");
     } else if (key == L"shader_feature") {
         command = frame_warp_lab::ControlCommand::set_shader_flags;
         unsigned long parsed = 0;

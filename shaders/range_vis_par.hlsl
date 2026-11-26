@@ -52,6 +52,8 @@ RWTexture2D<uint> out_tile_map_uav : register(u4);
 RWStructuredBuffer<uint> dirty_tile_list_uav : register(u5);
 RWStructuredBuffer<uint> tile_candidate_meta_uav : register(u6);
 RWByteAddressBuffer tile_indirect_args_uav : register(u7);
+RWTexture2D<float4> out_final_color_uav : register(u8);
+RWByteAddressBuffer surface_cache_uav : register(u9);
 
 SamplerState linear_clamp_sampler : register(s0);
 SamplerState point_clamp_sampler : register(s1);
@@ -142,12 +144,54 @@ float3 intersect_ray_triangle_bary(float3 ray_origin, float3 ray_dir, float3 wp0
     return float3(1.0 - u - v, u, v);
 }
 
+uint compute_surface_cache_key(uint inst_idx, float3 local_pos, float3 local_n, bool is_viewmodel, uint shader_flags, out uint out_slot0) {
+    float cell_size = is_viewmodel ? 0.014 : 0.060;
+    int3 q = (int3)floor(local_pos / cell_size);
+    uint oct = (local_n.x >= 0.0 ? 1u : 0u) | (local_n.y >= 0.0 ? 2u : 0u) | (local_n.z >= 0.0 ? 4u : 0u);
+    uint h1 = ((uint)q.x * 73856093u) ^ ((uint)q.y * 19349663u) ^ ((uint)q.z * 83492791u) ^ (inst_idx * 2654435761u) ^ (oct * 2246822519u) ^ (shader_flags * 3266489917u);
+    uint h2 = ((uint)q.x * 374761393u) ^ ((uint)q.y * 668265263u) ^ ((uint)q.z * 1274126177u) ^ (inst_idx * 97531u) ^ (oct * 17u) ^ (shader_flags * 65537u);
+    out_slot0 = h1 & 262143u;
+    uint key = h2 | 1u;
+    return key;
+}
+
+void write_surface_cache(uint key, uint slot0, float3 rgb, uint frame_id) {
+    uint rg = f32tof16(rgb.r) | (f32tof16(rgb.g) << 16u);
+    uint ba = f32tof16(rgb.b) | (1u << 16u);
+    uint4 packed = uint4(key, rg, ba, frame_id);
+    uint prev_k0 = surface_cache_uav.Load(slot0 * 16u);
+    uint target_slot = (prev_k0 == 0u || prev_k0 == key) ? slot0 : ((slot0 + 1u) & 262143u);
+    surface_cache_uav.Store4(target_slot * 16u, packed);
+}
+
+bool read_surface_cache(uint key, uint slot0, uint frame_id, uint max_age_frames, out float3 out_rgb, out uint out_age) {
+    [unroll]
+    for (uint probe = 0u; probe < 2u; ++probe) {
+        uint slot = (slot0 + probe) & 262143u;
+        uint4 c = surface_cache_uav.Load4(slot * 16u);
+        if (c.x == key && frame_id >= c.w && (frame_id - c.w) <= max_age_frames) {
+            out_rgb = float3(f16tof32(c.y & 0xFFFFu), f16tof32(c.y >> 16u), f16tof32(c.z & 0xFFFFu));
+            out_age = frame_id - c.w;
+            return true;
+        }
+    }
+    out_rgb = float3(0.0, 0.0, 0.0);
+    out_age = 255u;
+    return false;
+}
+
 void shade_vis_pixel(uint2 pixel_coord, uint width, uint height) {
     uint vis_word = out_vis_uav[pixel_coord];
     if (vis_word == 0u) {
         out_color_uav[pixel_coord] = float4(0.035, 0.050, 0.068, 0.0);
         return;
     }
+
+    bool use_split_diff_spec = (policy_params.x & 32u) != 0u;
+    bool use_surface_cache = (policy_params.x & 64u) != 0u;
+    uint shader_flags = (uint)(range_flags.w + 0.5);
+    float scene_time = previous_camera_forward_time.w;
+    uint frame_id = tile_params.w;
 
     uint inst_idx = (vis_word >> 25u) - 1u;
     bool is_viewmodel = ((vis_word >> 24u) & 1u) != 0u;
@@ -189,6 +233,8 @@ void shade_vis_pixel(uint2 pixel_coord, uint width, uint height) {
     float3 by = intersect_ray_triangle_bary(cam_pos, rd_y, wp0, e1, e2, s);
 
     float3 world_pos = wp0 * b.x + wp1 * b.y + wp2 * b.z;
+    float3 local_pos = v0.position * b.x + v1.position * b.y + v2.position * b.z;
+    float3 local_n = normalize(v0.normal * b.x + v1.normal * b.y + v2.normal * b.z);
     float3 wn0 = normalize(mul(inst.model, float4(v0.normal, 0.0)).xyz);
     float3 wn1 = normalize(mul(inst.model, float4(v1.normal, 0.0)).xyz);
     float3 wn2 = normalize(mul(inst.model, float4(v2.normal, 0.0)).xyz);
@@ -208,6 +254,27 @@ void shade_vis_pixel(uint2 pixel_coord, uint width, uint height) {
     float2 duv_dy = uv_y - uv;
     float em_w = v0.emissive_weight * b.x + v1.emissive_weight * b.y + v2.emissive_weight * b.z;
 
+    if (use_split_diff_spec) {
+        float3 mat_albedo, mat_n, mat_geo_n;
+        float mat_ao, mat_rough, mat_metal, mat_cc;
+        sample_range_pbr_material(
+            geo_n, geo_t, uv, duv_dx, duv_dy, geo_nx - geo_n, geo_ny - geo_n,
+            v0.material_id, inst.tint_emissive, is_viewmodel, range_flags.y > 0.5,
+            scene_time, shader_flags,
+            pbr_hero_albedo, pbr_hero_normal, pbr_hero_orm,
+            mat_albedo, mat_n, mat_geo_n, mat_ao, mat_rough, mat_metal, mat_cc);
+        float3 diff_irr = eval_range_diffuse_irradiance(
+            world_pos, mat_n, mat_ao, is_viewmodel, scene_time, shader_flags,
+            muzzle_light_pos_intensity, linear_clamp_sampler);
+        out_color_uav[pixel_coord] = float4(diff_irr, 0.0);
+        if (use_surface_cache) {
+            uint slot0 = 0u;
+            uint sc_key = compute_surface_cache_key(inst_idx, local_pos, local_n, is_viewmodel, shader_flags, slot0);
+            write_surface_cache(sc_key, slot0, diff_irr, frame_id);
+        }
+        return;
+    }
+
     float3 shaded = shade_range_surface_pbr(
         world_pos,
         geo_n,
@@ -222,8 +289,8 @@ void shade_vis_pixel(uint2 pixel_coord, uint width, uint height) {
         em_w,
         is_viewmodel,
         range_flags.y > 0.5,
-        previous_camera_forward_time.w,
-        (uint)(range_flags.w + 0.5),
+        scene_time,
+        shader_flags,
         camera_position_tan_y.xyz,
         camera_forward_rcp_height.xyz,
         muzzle_light_pos_intensity,
@@ -233,6 +300,11 @@ void shade_vis_pixel(uint2 pixel_coord, uint width, uint height) {
         linear_clamp_sampler);
 
     out_color_uav[pixel_coord] = float4(shaded, 0.0);
+    if (use_surface_cache) {
+        uint slot0 = 0u;
+        uint sc_key = compute_surface_cache_key(inst_idx, local_pos, local_n, is_viewmodel, shader_flags, slot0);
+        write_surface_cache(sc_key, slot0, shaded, frame_id);
+    }
 }
 
 [numthreads(16, 16, 1)]
@@ -251,6 +323,7 @@ void range_vis_classify_main(
     bool use_subtile_interleave = use_priority_stbn && ((policy_params.x & 2u) != 0u);
     bool use_reactive_invalidation = (policy_params.x & 4u) != 0u;
     bool use_shadow_delta_invalidation = (policy_params.x & 8u) != 0u;
+    bool use_surface_cache = (policy_params.x & 64u) != 0u;
     uint shader_flags = (uint)(range_flags.w + 0.5);
     float curr_scene_time = previous_camera_forward_time.w;
     float prev_scene_time = range_flags.z;
@@ -353,6 +426,34 @@ void range_vis_classify_main(
                         }
                         cache_valid = true;
                     }
+                }
+            }
+
+            if (!cache_valid && use_surface_cache && has_prev && !is_reactive_miss && !is_shadow_delta_miss) {
+                uint sc_tri = vis_word & 0xFFFFFFu;
+                uint sc_base = sc_tri * 3u;
+                RangeVertexGpu sv0 = range_vertices[range_indices[sc_base + 0u]];
+                RangeVertexGpu sv1 = range_vertices[range_indices[sc_base + 1u]];
+                RangeVertexGpu sv2 = range_vertices[range_indices[sc_base + 2u]];
+                InstanceData sc_inst = range_instances[inst_enc - 1u];
+                float3 swp0 = mul(sc_inst.model, float4(sv0.position, 1.0)).xyz;
+                float3 swp1 = mul(sc_inst.model, float4(sv1.position, 1.0)).xyz;
+                float3 swp2 = mul(sc_inst.model, float4(sv2.position, 1.0)).xyz;
+                float2 sc_ndc = float2(curr_uv.x * 2.0 - 1.0, 1.0 - curr_uv.y * 2.0);
+                float3 sc_rd = camera_right_tan_x.xyz * (sc_ndc.x * camera_right_tan_x.w)
+                    + camera_up_rcp_width.xyz * (sc_ndc.y * camera_position_tan_y.w)
+                    + camera_forward_rcp_height.xyz;
+                float3 sb = intersect_ray_triangle_bary(camera_position_tan_y.xyz, sc_rd, swp0, swp1 - swp0, swp2 - swp0, camera_position_tan_y.xyz - swp0);
+                float3 sc_local_p = sv0.position * sb.x + sv1.position * sb.y + sv2.position * sb.z;
+                float3 sc_local_n = normalize(sv0.normal * sb.x + sv1.normal * sb.y + sv2.normal * sb.z);
+                uint sc_slot0 = 0u;
+                uint sc_key = compute_surface_cache_key(inst_enc - 1u, sc_local_p, sc_local_n, is_vm, shader_flags, sc_slot0);
+                float3 sc_rgb;
+                uint sc_age;
+                if (read_surface_cache(sc_key, sc_slot0, frame_id, 24u, sc_rgb, sc_age)) {
+                    cached_rgb = sc_rgb;
+                    next_age = min(sc_age + 1u, 250u);
+                    cache_valid = true;
                 }
             }
 
@@ -588,4 +689,125 @@ void range_vis_shade_main(
     }
 
     shade_vis_pixel(pixel_coord, width, height);
+}
+
+[numthreads(16, 16, 1)]
+void range_vis_composite_main(uint3 dispatch_id : SV_DispatchThreadID) {
+    uint width = cache_params.z;
+    uint height = cache_params.w;
+    uint2 pixel_coord = dispatch_id.xy;
+    if (pixel_coord.x >= width || pixel_coord.y >= height) {
+        return;
+    }
+
+    uint vis_word = out_vis_uav[pixel_coord];
+    if (vis_word == 0u) {
+        out_final_color_uav[pixel_coord] = float4(0.035, 0.050, 0.068, 1.0);
+        return;
+    }
+
+    uint shader_flags = (uint)(range_flags.w + 0.5);
+    float scene_time = previous_camera_forward_time.w;
+    uint frame_id = tile_params.w;
+    bool use_surface_cache = (policy_params.x & 64u) != 0u;
+
+    uint inst_idx = (vis_word >> 25u) - 1u;
+    bool is_viewmodel = ((vis_word >> 24u) & 1u) != 0u;
+    uint tri_id = vis_word & 0xFFFFFFu;
+
+    uint base_i = tri_id * 3u;
+    RangeVertexGpu v0 = range_vertices[range_indices[base_i + 0u]];
+    RangeVertexGpu v1 = range_vertices[range_indices[base_i + 1u]];
+    RangeVertexGpu v2 = range_vertices[range_indices[base_i + 2u]];
+    InstanceData inst = range_instances[inst_idx];
+
+    float3 wp0 = mul(inst.model, float4(v0.position, 1.0)).xyz;
+    float3 wp1 = mul(inst.model, float4(v1.position, 1.0)).xyz;
+    float3 wp2 = mul(inst.model, float4(v2.position, 1.0)).xyz;
+
+    float2 curr_uv = (float2(pixel_coord) + 0.5) * float2(camera_up_rcp_width.w, camera_forward_rcp_height.w);
+    float2 p_ndc = float2(curr_uv.x * 2.0 - 1.0, 1.0 - curr_uv.y * 2.0);
+    float dx_ndc = 2.0 * camera_up_rcp_width.w;
+    float dy_ndc = -2.0 * camera_forward_rcp_height.w;
+
+    float3 cam_pos = camera_position_tan_y.xyz;
+    float3 cam_r = camera_right_tan_x.xyz * camera_right_tan_x.w;
+    float3 cam_u = camera_up_rcp_width.xyz * camera_position_tan_y.w;
+    float3 cam_f = camera_forward_rcp_height.xyz;
+
+    float3 rd = cam_r * p_ndc.x + cam_u * p_ndc.y + cam_f;
+    float3 rd_x = rd + cam_r * dx_ndc;
+    float3 rd_y = rd + cam_u * dy_ndc;
+
+    float3 e1 = wp1 - wp0;
+    float3 e2 = wp2 - wp0;
+    float3 s = cam_pos - wp0;
+    float3 b = intersect_ray_triangle_bary(cam_pos, rd, wp0, e1, e2, s);
+    float3 bx = intersect_ray_triangle_bary(cam_pos, rd_x, wp0, e1, e2, s);
+    float3 by = intersect_ray_triangle_bary(cam_pos, rd_y, wp0, e1, e2, s);
+
+    float3 world_pos = wp0 * b.x + wp1 * b.y + wp2 * b.z;
+    float3 wn0 = normalize(mul(inst.model, float4(v0.normal, 0.0)).xyz);
+    float3 wn1 = normalize(mul(inst.model, float4(v1.normal, 0.0)).xyz);
+    float3 wn2 = normalize(mul(inst.model, float4(v2.normal, 0.0)).xyz);
+    float3 wt0 = normalize(mul(inst.model, float4(v0.tangent, 0.0)).xyz);
+    float3 wt1 = normalize(mul(inst.model, float4(v1.tangent, 0.0)).xyz);
+    float3 wt2 = normalize(mul(inst.model, float4(v2.tangent, 0.0)).xyz);
+
+    float3 geo_n = normalize(wn0 * b.x + wn1 * b.y + wn2 * b.z);
+    float3 geo_nx = normalize(wn0 * bx.x + wn1 * bx.y + wn2 * bx.z);
+    float3 geo_ny = normalize(wn0 * by.x + wn1 * by.y + wn2 * by.z);
+    float3 geo_t = normalize(wt0 * b.x + wt1 * b.y + wt2 * b.z);
+
+    float2 uv = v0.uv * b.x + v1.uv * b.y + v2.uv * b.z;
+    float2 uv_x = v0.uv * bx.x + v1.uv * bx.y + v2.uv * bx.z;
+    float2 uv_y = v0.uv * by.x + v1.uv * by.y + v2.uv * by.z;
+    float em_w = v0.emissive_weight * b.x + v1.emissive_weight * b.y + v2.emissive_weight * b.z;
+
+    float3 mat_albedo, mat_n, mat_geo_n;
+    float mat_ao, mat_rough, mat_metal, mat_cc;
+    sample_range_pbr_material(
+        geo_n, geo_t, uv, uv_x - uv, uv_y - uv, geo_nx - geo_n, geo_ny - geo_n,
+        v0.material_id, inst.tint_emissive, is_viewmodel, range_flags.y > 0.5,
+        scene_time, shader_flags,
+        pbr_hero_albedo, pbr_hero_normal, pbr_hero_orm,
+        mat_albedo, mat_n, mat_geo_n, mat_ao, mat_rough, mat_metal, mat_cc);
+
+    float4 irr_age = out_color_uav[pixel_coord];
+    float3 cached_irr = irr_age.rgb;
+    if (use_surface_cache && irr_age.a >= 8.0) {
+        float3 local_pos = v0.position * b.x + v1.position * b.y + v2.position * b.z;
+        float3 local_n = normalize(v0.normal * b.x + v1.normal * b.y + v2.normal * b.z);
+        uint sc_slot0 = 0u;
+        uint sc_key = compute_surface_cache_key(inst_idx, local_pos, local_n, is_viewmodel, shader_flags, sc_slot0);
+        float3 sc_irr;
+        uint sc_age;
+        if (read_surface_cache(sc_key, sc_slot0, frame_id, 24u, sc_irr, sc_age) && (float)sc_age < irr_age.a) {
+            cached_irr = lerp(cached_irr, sc_irr, 0.35);
+        }
+    }
+
+    float3 final_rgb = eval_range_specular_and_composite(
+        world_pos,
+        cached_irr,
+        mat_albedo,
+        mat_n,
+        mat_geo_n,
+        uv,
+        mat_ao,
+        mat_rough,
+        mat_metal,
+        mat_cc,
+        v0.material_id,
+        inst.tint_emissive,
+        em_w,
+        is_viewmodel,
+        scene_time,
+        shader_flags,
+        cam_pos,
+        cam_f,
+        muzzle_light_pos_intensity,
+        linear_clamp_sampler);
+
+    out_final_color_uav[pixel_coord] = float4(final_rgb, 1.0);
 }

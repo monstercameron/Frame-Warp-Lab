@@ -1,5 +1,28 @@
 # Development log
 
+## v0.34.0 — Priorities 5 & 6: Separate Diffuse & Specular Cache Frequencies + Persistent 262K-Cell GPU Surface-Space Shading Cache
+
+- Eliminated view-dependent specular parallax lag (Priority 5) and screen-space resampling blur / disocclusion flashes (Priority 6) on the 14-light PBR Gun Range (`shaders/range_lighting.hlsl`, `shaders/range_vis_par.hlsl`, `src/renderer.h`, `src/renderer.cpp`, `src/runtime_state.h`, `src/main.cpp`, `src/cli.cpp`, `CMakeLists.txt`, `scripts/run_split_surface_cache_experiment.ps1`):
+  - **Priority 5 — Separate Diffuse & Specular Cache Frequencies (`range_vis_composite_cs.cso`)**:
+    - Decomposed `range_lighting.hlsl` into view-independent, albedo-free **diffuse irradiance** (`eval_range_diffuse_irradiance`, cached and refreshed at `15%` `PAR-3` budget in `slot.opaque_cache_target`) and a full-frequency 1×1 **specular + PBR albedo composite pass** (`eval_range_specular_and_composite`, writing directly to `slot.color_target` `u8` with zero intermediate `CopyResource`).
+    - Evaluates crisp 16× anisotropic PBR albedo/normals + full-frequency GGX specular/clearcoat/IBL across all 14 lights using the live frame's exact `view_dir` while amortizing smooth diffuse lighting across frames.
+  - **Priority 6 — Persistent GPU Surface-Space Shading Cache (`surface_cache_uav_`, `262,144` cells / `4 MiB`, `u9`)**:
+    - Implemented a lock-free 2-way probed object/local-space spatial hash cache keyed by `(instance_id, quantized_local_pos [6 cm world / 1.4 cm viewmodel], normal_octant, shader_flags)` storing half-float RGB (`f32tof16`) + `frame_id` stamp with automatic frame-age expiration.
+    - Populated automatically during `range_vis_shade_main` and queried on disoccluded pixels (`range_vis_classify_main`) and aged irradiance pixels (`range_vis_composite_main`), eliminating screen-space resampling accumulation and disocclusion lag.
+  - **Runtime & CLI Controls (`RuntimeState` v32)**:
+    - Added `set <pid> split_diff_spec on|off` and `set <pid> surface_cache on|off` (`policy_params.x` bits 5 & 6, exposed in `status.selective_tiles`) for clean 4-way ablation.
+- Verified zero code comments, ARM64 Release + Debug builds, Debug D3D12 Debug Layer (`split=True`, `surf=True`, `ok=True`, `0` errors), visual capture inspection (`p56_split_surfcache_15p.png` — crisp cyan pistol specular & sharp floor cracks restored), and `scripts/run_split_surface_cache_experiment.ps1` on **NVIDIA RTX Spark N1X** (`1280×720`, `15% PAR-3`):
+  - **`corridor_sway` (`Forward GT = 703 µs`, `VRS Tier 2 = 293 µs / SSIM 0.8776 / tRMSE 8.23`)**:
+    - `PAR-3 15% Unified`: `246 µs`, `PSNR 28.31 dB`, `SSIM 0.8759`, `tRMSE 8.57`, `P99 40.4`
+    - `+ P6 Surface Cache Only`: **`273 µs` (+27 µs!)**, `PSNR 28.84 dB`, **`SSIM 0.9330 (+0.0571!)`**, `tRMSE 7.32`, `P99 38.4`
+    - `+ P5 Split Diff/Spec`: `594 µs`, `PSNR 29.56 dB`, **`SSIM 0.9594`**, **`tRMSE 4.30`**, `P99 31.0`
+    - `+ P5 + P6 Split + Surface Cache`: `548 µs`, `PSNR 29.28 dB`, **`SSIM 0.9650 (+0.0891 over Unified, +0.0874 over VRS!)`**, **`tRMSE 3.59 (2.39× lower flicker!)`**, `P99 32.3`
+  - **`occlusion_sweep` (`Forward GT = 848 µs`, `VRS Tier 2 = 322 µs / 28.00 dB / SSIM 0.8767 / tRMSE 9.52`)**:
+    - `PAR-3 15% Unified`: `242 µs`, `PSNR 25.91 dB`, `SSIM 0.8608`, `tRMSE 10.60`, `P99 58.5`
+    - `+ P6 Surface Cache Only`: **`272 µs` (+30 µs!)**, `PSNR 26.96 dB (+1.05 dB)`, **`SSIM 0.9185 (+0.0577!)`**, `tRMSE 9.47`, `P99 53.3`
+    - `+ P5 + P6 Split + Surface Cache`: `566 µs`, **`PSNR 28.15 dB (+2.24 dB, beats VRS!)`**, **`SSIM 0.9628 (+0.1020!)`**, **`tRMSE 4.05 (2.62× lower!)`**, `P99 41.0 (-17.5!)`
+  - **Honest cost/quality tradeoff**: `P6 Surface Cache Only` costs `+27–30 µs` (`~3.1×` faster than Forward GT) for a massive `+0.058` SSIM jump, while adding `P5 Split Diff/Spec` raises SSIM to `0.965` and halves `tRMSE` at `~550 µs` — establishing a clean multi-tier quality-cost ladder for Priority 7's Unified Controller.
+
 ## v0.33.0 — Priority 4: Independent Forward Transparency Pass with Clean Opaque Temporal Cache Separation
 
 - Decoupled multilayer transparency from single-layer opaque temporal caching (`PAR-3`) via a dedicated per-slot `opaque_cache_target` and hardware alpha-blended post-opaque forward transparency passes (`src/range_mesh.cpp`, `src/tactical_range.h`, `shaders/range_mesh.hlsl`, `shaders/motion_lab.hlsl`, `shaders/pbr_materials.hlsl`, `shaders/selective_tiles.hlsl`, `src/renderer.h`, `src/renderer.cpp`, `src/runtime_state.h`, `src/main.cpp`, `src/cli.cpp`, `CMakeLists.txt`, `scripts/run_transparency_experiment.ps1`):
