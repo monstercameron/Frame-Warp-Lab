@@ -550,7 +550,16 @@ float3 composite_overlays(float2 pixel_pos, float2 viewport_size, float3 output_
     return output_color;
 }
 
+#if defined(PRESENT_OUTPUT_HUDLESS) && PRESENT_OUTPUT_HUDLESS
+struct PresentOutput {
+    float4 backbuffer : SV_Target0;
+    float4 hudless : SV_Target1;
+};
+
+PresentOutput pixel_main(VertexOutput input) {
+#else
 float4 pixel_main(VertexOutput input) : SV_Target {
+#endif
     float2 viewport_size = viewport_and_flags.xy;
     float2 texel_size = float2(source_camera_right_rcp_width.w, source_camera_up_rcp_height.w);
     float2 uv = input.position.xy * texel_size;
@@ -791,6 +800,13 @@ float4 pixel_main(VertexOutput input) : SV_Target {
         }
     }
 
+#if defined(PRESENT_OUTPUT_HUDLESS) && PRESENT_OUTPUT_HUDLESS
+    PresentOutput dual_out;
+    dual_out.backbuffer = float4(composite_overlays(input.position.xy, viewport_size, output_color), 1.0);
+    dual_out.hudless = float4(output_color, 1.0);
+    return dual_out;
+#else
     return float4(composite_overlays(input.position.xy, viewport_size, output_color), 1.0);
+#endif
 #endif
 }

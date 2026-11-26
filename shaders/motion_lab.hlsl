@@ -19,6 +19,7 @@ struct SceneOutput {
     float4 color : SV_Target0;
     float depth : SV_Target1;
     float2 motion : SV_Target2;
+    float clip_depth : SV_Target3;
 };
 
 VertexOutput vertex_main(uint vertex_id : SV_VertexID) {
@@ -171,9 +172,14 @@ SceneOutput pixel_main(VertexOutput input) {
         color += synthetic_stress_modulation(world_position, stress_level);
     }
 
+    float near_z = 0.05;
+    float far_z = 100.0;
+    float clip_z = saturate((far_z * (linear_view_depth - near_z)) / ((far_z - near_z) * max(linear_view_depth, near_z)));
+
     SceneOutput output;
     output.color = float4(max(color, 0.0), 1.0);
     output.depth = linear_view_depth;
     output.motion = motion_vector;
+    output.clip_depth = clip_z;
     return output;
 }

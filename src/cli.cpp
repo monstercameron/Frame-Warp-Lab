@@ -1,5 +1,6 @@
 #include "runtime_state.h"
 #include "simd_math.h"
+#include "streamline_backend.h"
 
 #include <windows.h>
 #include <d3d12.h>
@@ -276,11 +277,24 @@ int print_status(const WindowInstance& instance) {
     const std::int32_t camera_yaw_millideg = std::atomic_ref<std::int32_t>(state->camera_yaw_millideg).load(std::memory_order_acquire);
     const std::int32_t camera_pitch_millideg = std::atomic_ref<std::int32_t>(state->camera_pitch_millideg).load(std::memory_order_acquire);
     const std::int32_t gpu_timing_available = std::atomic_ref<std::int32_t>(state->gpu_timing_available).load(std::memory_order_acquire);
+    const std::int32_t streamline_initialized = std::atomic_ref<std::int32_t>(state->streamline_initialized).load(std::memory_order_acquire);
+    const std::int32_t dlssg_supported = std::atomic_ref<std::int32_t>(state->dlssg_supported).load(std::memory_order_acquire);
+    const std::int32_t dlss_sr_supported = std::atomic_ref<std::int32_t>(state->dlss_sr_supported).load(std::memory_order_acquire);
+    const std::int32_t reflex_supported = std::atomic_ref<std::int32_t>(state->reflex_supported).load(std::memory_order_acquire);
+    const std::int32_t dlssg_dynamic_mfg_supported = std::atomic_ref<std::int32_t>(state->dlssg_dynamic_mfg_supported).load(std::memory_order_acquire);
+    const std::int32_t dlssg_max_frames_to_generate = std::atomic_ref<std::int32_t>(state->dlssg_max_frames_to_generate).load(std::memory_order_acquire);
+    const std::int32_t dlssg_requested_multiplier = std::atomic_ref<std::int32_t>(state->dlssg_requested_multiplier).load(std::memory_order_acquire);
+    const std::int32_t dlssg_active = std::atomic_ref<std::int32_t>(state->dlssg_active).load(std::memory_order_acquire);
+    const std::uint32_t dlssg_status_flags = std::atomic_ref<std::uint32_t>(state->dlssg_status_flags).load(std::memory_order_acquire);
+    const std::uint32_t dlssg_last_frames_presented = std::atomic_ref<std::uint32_t>(state->dlssg_last_frames_presented).load(std::memory_order_acquire);
+    const std::int64_t dlssg_total_frames_presented = std::atomic_ref<std::int64_t>(state->dlssg_total_frames_presented).load(std::memory_order_acquire);
+    const std::int64_t dlssg_total_generated_frames = std::atomic_ref<std::int64_t>(state->dlssg_total_generated_frames).load(std::memory_order_acquire);
+    const std::int32_t window_focused = std::atomic_ref<std::int32_t>(state->window_focused).load(std::memory_order_acquire);
     const double smoothed_fps = smoothed_interval_us > 0 ? 1000000.0 / static_cast<double>(smoothed_interval_us) : 0.0;
 
     RECT client_rectangle{};
     const bool has_client_size = GetClientRect(instance.window, &client_rectangle) != 0;
-    std::cout << "{\"ok\":true,\"schema_version\":10,\"process_id\":" << instance.process_id
+    std::cout << "{\"ok\":true,\"schema_version\":11,\"process_id\":" << instance.process_id
               << ",\"running\":" << (running ? "true" : "false")
               << ",\"present_calls_completed\":" << present_count
               << ",\"display_frame_id\":" << display_frame_id
@@ -360,9 +374,25 @@ int print_status(const WindowInstance& instance) {
               << "\",\"reserved_headroom_us\":" << adaptive_reserved_headroom_us
               << ",\"gpu_budget_utilization\":" << std::fixed << std::setprecision(3) << (static_cast<double>(adaptive_utilization_permille) / 1000.0)
               << ",\"decision_count\":" << adaptive_decision_count << "}"
-              << ",\"features\":{\"scene\":\"cpu_camera_gbuffer\",\"hud\":\"2d_frametime_graph_and_readout\",\"async_gpu\":\"dual_queue_3slot_ring\",\"reprojection\":\"depth_camera_warp\",\"nvidia_pcl_markers\":\"etw_tracelogging_active\",\"frame_generation\":\"mv_extrapolation_and_temporal_history\",\"vrs\":\""
+              << ",\"dlss_g\":{\"streamline_initialized\":" << (streamline_initialized ? "true" : "false")
+              << ",\"supported\":" << (dlssg_supported ? "true" : "false")
+              << ",\"dlss_sr_supported\":" << (dlss_sr_supported ? "true" : "false")
+              << ",\"reflex_supported\":" << (reflex_supported ? "true" : "false")
+              << ",\"dynamic_mfg_supported\":" << (dlssg_dynamic_mfg_supported ? "true" : "false")
+              << ",\"max_frames_to_generate\":" << dlssg_max_frames_to_generate
+              << ",\"max_multiplier\":" << (dlssg_max_frames_to_generate > 0 ? dlssg_max_frames_to_generate + 1 : 0)
+              << ",\"requested_multiplier\":";
+    if (dlssg_requested_multiplier == 0) std::cout << "\"dynamic\"";
+    else std::cout << dlssg_requested_multiplier;
+    std::cout << ",\"active\":" << (dlssg_active ? "true" : "false")
+              << ",\"window_focused\":" << (window_focused ? "true" : "false")
+              << ",\"status_flags\":" << dlssg_status_flags
+              << ",\"last_frames_presented\":" << dlssg_last_frames_presented
+              << ",\"total_frames_presented\":" << dlssg_total_frames_presented
+              << ",\"total_generated_frames\":" << dlssg_total_generated_frames << "}"
+              << ",\"features\":{\"scene\":\"cpu_camera_gbuffer\",\"hud\":\"2d_frametime_graph_and_readout\",\"async_gpu\":\"dual_queue_3slot_ring\",\"reprojection\":\"depth_camera_warp\",\"nvidia_pcl_markers\":\"etw_and_streamline_pcl\",\"frame_generation\":\"mv_extrapolation_temporal_and_dlss_g\",\"vrs\":\""
               << (vrs_tier >= 2 ? "tier1_and_tier2_foveated_image" : vrs_tier == 1 ? "tier1_per_draw" : "unsupported")
-              << "\",\"adaptive_scheduler\":\"deadline_headroom_ladder\",\"ipc\":\"seqlock_v15\",\"shaders\":\"dxc_sm6_0_wave_specialized\"}}\n";
+              << "\",\"adaptive_scheduler\":\"deadline_headroom_ladder\",\"ipc\":\"seqlock_v16\",\"shaders\":\"dxc_sm6_0_wave_specialized\"}}\n";
     return 0;
 }
 
@@ -375,7 +405,7 @@ int print_events(const WindowInstance& instance) {
     const std::int32_t event_count = std::atomic_ref<std::int32_t>(state->event_count).load(std::memory_order_acquire);
     const std::int32_t first_sequence = event_count > static_cast<std::int32_t>(frame_warp_lab::runtime_event_capacity)
         ? event_count - static_cast<std::int32_t>(frame_warp_lab::runtime_event_capacity) + 1 : 1;
-    std::cout << "{\"ok\":true,\"schema_version\":10,\"process_id\":" << instance.process_id
+    std::cout << "{\"ok\":true,\"schema_version\":11,\"process_id\":" << instance.process_id
               << ",\"capacity\":" << frame_warp_lab::runtime_event_capacity << ",\"total_events\":" << event_count << ",\"events\":[";
     bool first_event = true;
     for (std::int32_t sequence = first_sequence; sequence <= event_count; ++sequence) {
@@ -426,9 +456,12 @@ int print_trace(const WindowInstance& instance, std::size_t max_samples, bool in
     std::int64_t warped_count = 0;
     std::int64_t generated_count = 0;
     std::int64_t combined_count = 0;
+    std::int64_t dlss_generated_count = 0;
+    std::int64_t dlss_warped_count = 0;
     std::int64_t fallback_count = 0;
     std::int64_t async_overlap_count = 0;
     std::int64_t missed_deadline_count = 0;
+    std::int64_t total_dlssg_presented = 0;
 
     for (std::int64_t sequence = first_sequence; sequence <= total_samples; ++sequence) {
         if (sequence <= 0) continue;
@@ -455,12 +488,15 @@ int print_trace(const WindowInstance& instance, std::size_t max_samples, bool in
             case frame_warp_lab::FrameKind::fallback: ++fallback_count; break;
             case frame_warp_lab::FrameKind::generated: ++generated_count; break;
             case frame_warp_lab::FrameKind::combined: ++combined_count; break;
+            case frame_warp_lab::FrameKind::dlss_generated: ++dlss_generated_count; break;
+            case frame_warp_lab::FrameKind::dlss_warped: ++dlss_warped_count; break;
         }
+        total_dlssg_presented += static_cast<std::int64_t>(copy.dlssg_frames_presented);
         if (copy.async_overlapped) ++async_overlap_count;
         if (copy.missed_deadline) ++missed_deadline_count;
     }
 
-    std::cout << "{\"ok\":true,\"schema_version\":10,\"process_id\":" << instance.process_id
+    std::cout << "{\"ok\":true,\"schema_version\":11,\"process_id\":" << instance.process_id
               << ",\"capacity\":" << frame_warp_lab::runtime_frame_trace_capacity
               << ",\"total_frames_recorded\":" << total_samples
               << ",\"sample_count\":" << captured.size()
@@ -471,8 +507,11 @@ int print_trace(const WindowInstance& instance, std::size_t max_samples, bool in
               << ",\"warped\":" << warped_count
               << ",\"generated\":" << generated_count
               << ",\"combined\":" << combined_count
+              << ",\"dlss_generated\":" << dlss_generated_count
+              << ",\"dlss_warped\":" << dlss_warped_count
               << ",\"fallback\":" << fallback_count
-              << "},\"async_overlaps\":" << async_overlap_count
+              << "},\"dlssg_frames_presented\":" << total_dlssg_presented
+              << ",\"async_overlaps\":" << async_overlap_count
               << ",\"missed_deadlines\":" << missed_deadline_count
               << ",\"cpu_present_interval_us\":";
     print_metric_summary(present_intervals);
@@ -535,6 +574,7 @@ int print_trace(const WindowInstance& instance, std::size_t max_samples, bool in
                       << "\",\"stress_level\":" << sample.stress_level
                       << ",\"vrs_mode\":\"" << frame_warp_lab::vrs_mode_name(sample.vrs_mode)
                       << "\",\"adaptive_tier\":" << sample.adaptive_tier
+                      << ",\"dlssg_frames_presented\":" << sample.dlssg_frames_presented
                       << ",\"discontinuity\":" << (sample.discontinuity ? "true" : "false") << "}";
         }
         std::cout << "]";
@@ -553,7 +593,20 @@ int apply_setting(const WindowInstance& instance, const std::wstring& key, const
         else if (value == L"reproject") parameter = static_cast<LPARAM>(frame_warp_lab::PresentationMode::reproject);
         else if (value == L"frame_gen") parameter = static_cast<LPARAM>(frame_warp_lab::PresentationMode::frame_gen);
         else if (value == L"combined") parameter = static_cast<LPARAM>(frame_warp_lab::PresentationMode::combined);
-        else return fail("invalid_value", "Expected mode in {full_render, repeat, reproject, frame_gen, combined}");
+        else if (value == L"dlss_g") parameter = static_cast<LPARAM>(frame_warp_lab::PresentationMode::dlss_g);
+        else if (value == L"dlss_g_warp") parameter = static_cast<LPARAM>(frame_warp_lab::PresentationMode::dlss_g_warp);
+        else return fail("invalid_value", "Expected mode in {full_render, repeat, reproject, frame_gen, combined, dlss_g, dlss_g_warp}");
+    } else if (key == L"dlssg_mult") {
+        command = frame_warp_lab::ControlCommand::set_dlssg_multiplier;
+        if (value == L"dynamic") {
+            parameter = 0;
+        } else {
+            unsigned long parsed = 0;
+            if (!parse_unsigned_long(value.c_str(), parsed) || parsed < 2 || parsed > 6) {
+                return fail("invalid_value", "Expected dlssg_mult in {2, 3, 4, 5, 6, dynamic}");
+            }
+            parameter = static_cast<LPARAM>(parsed);
+        }
     } else if (key == L"divider") {
         unsigned long parsed = 0;
         if (!parse_unsigned_long(value.c_str(), parsed) || parsed < 1 || parsed > static_cast<unsigned long>(frame_warp_lab::max_source_divider)) {
@@ -636,7 +689,7 @@ int apply_setting(const WindowInstance& instance, const std::wstring& key, const
         else if (value == L"diagnostic") parameter = static_cast<LPARAM>(frame_warp_lab::InstrumentationLevel::diagnostic);
         else return fail("invalid_value", "Expected instrumentation in {minimal, standard, diagnostic}");
     } else {
-        return fail("unknown_setting", "Supported settings are: mode, pacer, target_fps, async_gpu, vrs, adaptive, instrumentation, divider, vsync, view, path, stress, overlay, flash");
+        return fail("unknown_setting", "Supported settings are: mode, dlssg_mult, pacer, target_fps, async_gpu, vrs, adaptive, instrumentation, divider, vsync, view, path, stress, overlay, flash");
     }
 
     if (!PostMessageW(instance.window, frame_warp_lab::control_message, static_cast<WPARAM>(command), parameter)) {
@@ -695,11 +748,20 @@ void print_adapter(ID3D12Device* device, IDXGIFactory4* factory) {
 }
 
 int print_capabilities() {
+    frame_warp_lab::StreamlineBackend streamline;
+    streamline.initialize(true, true);
+
     ComPtr<IDXGIFactory4> factory;
     CreateDXGIFactory1(IID_PPV_ARGS(&factory));
     ComPtr<ID3D12Device> device;
     HRESULT result = D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device));
-    if (FAILED(result)) return fail("device_unavailable", "Could not create the default D3D12 device");
+    if (FAILED(result)) {
+        streamline.shutdown();
+        return fail("device_unavailable", "Could not create the default D3D12 device");
+    }
+    streamline.attach_device(device.Get());
+    const auto sl_caps = streamline.capabilities();
+
     BOOL allow_tearing = FALSE;
     bool tearing_query_available = false;
     ComPtr<IDXGIFactory5> factory5;
@@ -717,7 +779,7 @@ int print_capabilities() {
     const bool presentmon_arm64_present = file_exists(L"C:\\Program Files\\NVIDIA Corporation\\FrameViewSDK\\bin\\PresentMon_arm64.exe");
     const bool nvrla_present = file_exists(L"C:\\Program Files\\NVIDIA Corporation\\FrameViewSDK\\bin\\nvrla.exe");
 
-    std::cout << "{\"ok\":true,\"schema_version\":6,\"scope\":\"new_default_d3d12_device_not_runtime_instance\",\"simd_backend\":\""
+    std::cout << "{\"ok\":true,\"schema_version\":7,\"scope\":\"new_default_d3d12_device_not_runtime_instance\",\"simd_backend\":\""
               << frame_warp_lab::simd::backend_name() << "\",\"adapter\":";
     print_adapter(device.Get(), factory.Get());
     std::cout << ",\"presentation\":{\"allow_tearing_query_available\":" << (tearing_query_available ? "true" : "false")
@@ -731,7 +793,23 @@ int print_capabilities() {
               << ",\"frameview_sdk_arm64_present\":" << (frameview_sdk_arm64_present ? "true" : "false")
               << ",\"presentmon_arm64_present\":" << (presentmon_arm64_present ? "true" : "false")
               << ",\"reflex_latency_analyzer_cli_present\":" << (nvrla_present ? "true" : "false")
-              << "},\"dlss_frame_generation\":\"not_queried\"}\n";
+              << "},\"dlss_frame_generation\":{\"compiled_with_sdk\":" << (sl_caps.compiled_with_sdk ? "true" : "false")
+              << ",\"streamline_initialized\":" << (sl_caps.initialized ? "true" : "false")
+              << ",\"sl_version\":\"" << sl_caps.sl_version_major << "." << sl_caps.sl_version_minor << "." << sl_caps.sl_version_build << "\""
+              << ",\"ngx_version\":\"" << sl_caps.ngx_version_major << "." << sl_caps.ngx_version_minor << "." << sl_caps.ngx_version_build << "\""
+              << ",\"supported\":" << (sl_caps.dlssg_supported ? "true" : "false")
+              << ",\"support_result_code\":" << sl_caps.dlssg_support_result
+              << ",\"dlss_sr_supported\":" << (sl_caps.dlss_sr_supported ? "true" : "false")
+              << ",\"dlss_sr_result_code\":" << sl_caps.dlss_sr_support_result
+              << ",\"reflex_supported\":" << (sl_caps.reflex_supported ? "true" : "false")
+              << ",\"max_frames_to_generate\":" << sl_caps.max_frames_to_generate
+              << ",\"max_multiplier\":" << (sl_caps.max_frames_to_generate > 0U ? sl_caps.max_frames_to_generate + 1U : 0U)
+              << ",\"dynamic_mfg_supported\":" << (sl_caps.dynamic_mfg_supported ? "true" : "false")
+              << ",\"vsync_supported\":" << (sl_caps.vsync_supported ? "true" : "false")
+              << ",\"min_width_or_height\":" << sl_caps.min_width_or_height
+              << ",\"estimated_vram_mb\":" << (sl_caps.estimated_vram_bytes / (1024ULL * 1024ULL))
+              << ",\"last_error\":" << json_escape_utf8(sl_caps.last_error) << "}}\n";
+    streamline.shutdown();
     return 0;
 }
 
@@ -739,14 +817,14 @@ int print_capabilities() {
 
 int wmain(int argument_count, wchar_t** arguments) {
     if (argument_count == 2 && std::wstring(arguments[1]) == L"help") {
-        std::cout << "{\"ok\":true,\"schema_version\":10,\"commands\":[\"help\",\"start\",\"instances\",\"status <pid>\",\"events <pid>\",\"trace <pid> [limit] [summary]\",\"set <pid> <key> <value>\",\"pause <pid>\",\"resume <pid>\",\"reset <pid>\",\"stop <pid>\",\"capabilities\"],\"settings\":{\"mode\":[\"full_render\",\"repeat\",\"reproject\",\"frame_gen\",\"combined\"],\"pacer\":[\"deadline\",\"vsync_only\",\"unlocked\"],\"target_fps\":\"0 or 30..500\",\"async_gpu\":[\"on\",\"off\"],\"vrs\":[\"off\",\"uniform_2x2\",\"foveated\"],\"adaptive\":[\"on\",\"off\"],\"instrumentation\":[\"minimal\",\"standard\",\"diagnostic\"],\"divider\":\"1..8\",\"vsync\":[\"on\",\"off\"],\"view\":[\"final\",\"depth\",\"motion\",\"holes\",\"vrs\"],\"path\":[\"corridor_sway\",\"fast_pan\",\"occlusion_sweep\",\"camera_cut\",\"manual\",\"pure_rotation\"],\"stress\":\"0..64\",\"overlay\":[\"on\",\"off\"],\"flash\":[\"on\",\"off\"]}}\n";
+        std::cout << "{\"ok\":true,\"schema_version\":11,\"commands\":[\"help\",\"start\",\"instances\",\"status <pid>\",\"events <pid>\",\"trace <pid> [limit] [summary]\",\"set <pid> <key> <value>\",\"pause <pid>\",\"resume <pid>\",\"reset <pid>\",\"stop <pid>\",\"capabilities\"],\"settings\":{\"mode\":[\"full_render\",\"repeat\",\"reproject\",\"frame_gen\",\"combined\",\"dlss_g\",\"dlss_g_warp\"],\"dlssg_mult\":[\"2\",\"3\",\"4\",\"5\",\"6\",\"dynamic\"],\"pacer\":[\"deadline\",\"vsync_only\",\"unlocked\"],\"target_fps\":\"0 or 30..500\",\"async_gpu\":[\"on\",\"off\"],\"vrs\":[\"off\",\"uniform_2x2\",\"foveated\"],\"adaptive\":[\"on\",\"off\"],\"instrumentation\":[\"minimal\",\"standard\",\"diagnostic\"],\"divider\":\"1..8\",\"vsync\":[\"on\",\"off\"],\"view\":[\"final\",\"depth\",\"motion\",\"holes\",\"vrs\"],\"path\":[\"corridor_sway\",\"fast_pan\",\"occlusion_sweep\",\"camera_cut\",\"manual\",\"pure_rotation\"],\"stress\":\"0..64\",\"overlay\":[\"on\",\"off\"],\"flash\":[\"on\",\"off\"]}}\n";
         return 0;
     }
     if (argument_count == 2 && std::wstring(arguments[1]) == L"capabilities") return print_capabilities();
     if (argument_count == 2 && std::wstring(arguments[1]) == L"start") return start_instance();
     const auto instances = find_instances();
     if (argument_count == 2 && std::wstring(arguments[1]) == L"instances") {
-        std::cout << "{\"ok\":true,\"schema_version\":10,\"instances\":[";
+        std::cout << "{\"ok\":true,\"schema_version\":11,\"instances\":[";
         for (std::size_t index = 0; index < instances.size(); ++index) {
             if (index) std::cout << ',';
             std::cout << "{\"process_id\":" << instances[index].process_id << "}";

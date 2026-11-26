@@ -10,7 +10,7 @@
 namespace frame_warp_lab {
 
 inline constexpr wchar_t window_class_name[] = L"FrameWarpLabWindow";
-inline constexpr std::uint32_t runtime_state_version = 15;
+inline constexpr std::uint32_t runtime_state_version = 16;
 inline constexpr std::size_t runtime_event_capacity = 64;
 inline constexpr std::size_t runtime_frame_trace_capacity = 256;
 inline constexpr std::size_t hud_graph_sample_count = 128;
@@ -38,6 +38,7 @@ enum class ControlCommand : WPARAM {
     set_vrs_mode = 15,
     set_adaptive_scheduler = 16,
     set_instrumentation_level = 17,
+    set_dlssg_multiplier = 18,
 };
 
 enum class InstrumentationLevel : std::int32_t {
@@ -72,6 +73,8 @@ enum class PresentationMode : std::int32_t {
     reproject = 2,
     frame_gen = 3,
     combined = 4,
+    dlss_g = 5,
+    dlss_g_warp = 6,
 };
 
 enum class DiagnosticView : std::int32_t {
@@ -106,6 +109,8 @@ enum class FrameKind : std::int32_t {
     fallback = 3,
     generated = 4,
     combined = 5,
+    dlss_generated = 6,
+    dlss_warped = 7,
 };
 
 enum class FallbackReason : std::int32_t {
@@ -132,6 +137,7 @@ enum class ConfigKey : std::int32_t {
     adaptive_scheduler = 13,
     instrumentation_level = 14,
     hotkey = 15,
+    dlssg_multiplier = 16,
 };
 
 enum class RuntimeEventType : std::int32_t {
@@ -188,6 +194,7 @@ struct RuntimeFrameSample {
     std::int32_t async_overlapped;
     std::int32_t missed_deadline;
     std::int32_t discontinuity;
+    std::uint32_t dlssg_frames_presented;
 };
 
 struct RuntimeState {
@@ -256,8 +263,20 @@ struct RuntimeState {
     std::int32_t camera_yaw_millideg;
     std::int32_t camera_pitch_millideg;
     std::int32_t gpu_timing_available;
+    std::int32_t streamline_initialized;
+    std::int32_t dlssg_supported;
+    std::int32_t dlss_sr_supported;
+    std::int32_t reflex_supported;
+    std::int32_t dlssg_dynamic_mfg_supported;
+    std::int32_t dlssg_max_frames_to_generate;
+    std::int32_t dlssg_requested_multiplier;
+    std::int32_t dlssg_active;
+    std::uint32_t dlssg_status_flags;
+    std::uint32_t dlssg_last_frames_presented;
+    std::int64_t dlssg_total_frames_presented;
+    std::int64_t dlssg_total_generated_frames;
     std::int32_t event_count;
-    std::int32_t reserved;
+    std::int32_t window_focused;
     std::int64_t trace_count;
     RuntimeEvent events[runtime_event_capacity];
     RuntimeFrameSample trace[runtime_frame_trace_capacity];
@@ -325,6 +344,7 @@ inline const char* config_key_name(std::int32_t key) {
         case ConfigKey::adaptive_scheduler: return "adaptive";
         case ConfigKey::instrumentation_level: return "instrumentation";
         case ConfigKey::hotkey: return "hotkey";
+        case ConfigKey::dlssg_multiplier: return "dlssg_mult";
         default: return "unknown";
     }
 }
@@ -371,6 +391,8 @@ inline const char* presentation_mode_name(std::int32_t mode) {
         case PresentationMode::reproject: return "reproject";
         case PresentationMode::frame_gen: return "frame_gen";
         case PresentationMode::combined: return "combined";
+        case PresentationMode::dlss_g: return "dlss_g";
+        case PresentationMode::dlss_g_warp: return "dlss_g_warp";
         default: return "unknown";
     }
 }
@@ -383,6 +405,8 @@ inline const char* frame_kind_name(std::int32_t kind) {
         case FrameKind::fallback: return "fallback";
         case FrameKind::generated: return "generated";
         case FrameKind::combined: return "combined";
+        case FrameKind::dlss_generated: return "dlss_generated";
+        case FrameKind::dlss_warped: return "dlss_warped";
         default: return "unknown";
     }
 }

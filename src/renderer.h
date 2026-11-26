@@ -4,6 +4,7 @@
 #include "latency_monitor.h"
 #include "runtime_state.h"
 #include "simulation.h"
+#include "streamline_backend.h"
 
 #include <windows.h>
 #include <d3d12.h>
@@ -64,6 +65,7 @@ struct FrameExecutionMetrics {
     bool async_overlapped;
     bool missed_deadline;
     bool gpu_timing_available;
+    StreamlineFrameState dlssg_state;
 };
 
 struct PresentRequest {
@@ -84,6 +86,10 @@ struct PresentRequest {
     bool flash_indicator_enabled;
     bool flash_triggered;
     bool vsync_enabled;
+    bool dlssg_requested;
+    std::int32_t dlssg_multiplier;
+    float dlssg_dynamic_target_fps;
+    bool discontinuity;
 };
 
 class Renderer {
@@ -121,11 +127,15 @@ public:
     std::int32_t vrs_tile_size_px() const { return vrs_tile_size_px_; }
     bool vrs_additional_rates_supported() const { return vrs_additional_rates_supported_; }
     VrsMode resolve_effective_vrs_mode(VrsMode requested) const;
+    const StreamlineCapabilities& streamline_capabilities() const { return streamline_.capabilities(); }
+    void begin_streamline_frame(std::uint64_t frame_id, bool reflex_enabled, std::uint32_t frame_limit_us);
+    void emit_streamline_pcl_marker(StreamlinePclMarker marker);
 
 private:
     static constexpr UINT swap_chain_buffer_count = 2;
     static constexpr UINT source_slot_count = 3;
-    static constexpr UINT targets_per_source_slot = 3;
+    static constexpr UINT rtv_targets_per_source_slot = 4;
+    static constexpr UINT srv_targets_per_source_slot = 3;
     static constexpr UINT timestamps_per_pass = 2;
     static constexpr std::size_t scene_constant_buffer_stride = 256;
     static constexpr std::size_t present_constant_buffer_stride = 512;
@@ -146,11 +156,14 @@ private:
         Microsoft::WRL::ComPtr<ID3D12Resource> color_target;
         Microsoft::WRL::ComPtr<ID3D12Resource> depth_target;
         Microsoft::WRL::ComPtr<ID3D12Resource> motion_target;
+        Microsoft::WRL::ComPtr<ID3D12Resource> clip_depth_target;
         Microsoft::WRL::ComPtr<ID3D12CommandAllocator> command_allocator;
         SceneSnapshot snapshot{};
         std::chrono::steady_clock::time_point capture_time{};
         std::uint64_t scene_fence_value = 0;
         std::uint64_t last_read_present_fence = 0;
+        ID3D12Fence* dlssg_inputs_fence = nullptr;
+        std::uint64_t dlssg_inputs_fence_value = 0;
         std::int64_t scene_gpu_us = -1;
         bool in_flight = false;
         bool valid = false;
@@ -170,6 +183,7 @@ private:
     OsHandle present_fence_event_;
     OsHandle scene_fence_event_;
     HANDLE frame_latency_waitable_object_ = nullptr;
+    StreamlineBackend streamline_;
     Microsoft::WRL::ComPtr<IDXGIFactory4> factory_;
     Microsoft::WRL::ComPtr<ID3D12Device> device_;
     Microsoft::WRL::ComPtr<ID3D12CommandQueue> present_queue_;
@@ -178,6 +192,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> render_target_heap_;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> shader_resource_heap_;
     std::array<Microsoft::WRL::ComPtr<ID3D12Resource>, swap_chain_buffer_count> render_targets_;
+    Microsoft::WRL::ComPtr<ID3D12Resource> hudless_target_;
     std::array<Microsoft::WRL::ComPtr<ID3D12CommandAllocator>, swap_chain_buffer_count> present_command_allocators_;
     Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> present_command_list_;
     Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> scene_command_list_;
@@ -190,6 +205,9 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> scene_pipeline_;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> present_root_signature_;
     std::array<Microsoft::WRL::ComPtr<ID3D12PipelineState>, 5> present_pipelines_;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> present_dlss_hudless_pipeline_;
+    CameraBasis previous_presented_camera_{};
+    bool has_previous_presented_camera_ = false;
     Microsoft::WRL::ComPtr<ID3D12Resource> scene_constant_buffer_;
     Microsoft::WRL::ComPtr<ID3D12Resource> present_constant_buffer_;
     Microsoft::WRL::ComPtr<ID3D12Resource> hud_constant_buffer_;

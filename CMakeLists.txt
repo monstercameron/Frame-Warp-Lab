@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(FrameWarpLab VERSION 0.16.2 LANGUAGES CXX)
+project(FrameWarpLab VERSION 0.17.0 LANGUAGES CXX)
 
 if(NOT WIN32)
     message(FATAL_ERROR "Frame Warp Lab currently requires Windows and Direct3D 12.")
@@ -17,18 +17,52 @@ if(NOT DXC_EXECUTABLE)
     message(FATAL_ERROR "Could not locate Windows SDK dxc.exe for Shader Model 6.0 compilation.")
 endif()
 
+set(STREAMLINE_SDK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/streamline")
+set(STREAMLINE_INCLUDE_DIR "${STREAMLINE_SDK_DIR}/include")
+if(CMAKE_GENERATOR_PLATFORM MATCHES "ARM64" OR CMAKE_SYSTEM_PROCESSOR MATCHES "ARM64|aarch64")
+    set(STREAMLINE_ARCH_DIR "arm64")
+else()
+    set(STREAMLINE_ARCH_DIR "x64")
+endif()
+set(STREAMLINE_LIB_FILE "${STREAMLINE_SDK_DIR}/lib/${STREAMLINE_ARCH_DIR}/sl.interposer.lib")
+set(STREAMLINE_BIN_DIR "${STREAMLINE_SDK_DIR}/bin/${STREAMLINE_ARCH_DIR}")
+set(FRAME_WARP_HAS_STREAMLINE OFF)
+if(EXISTS "${STREAMLINE_INCLUDE_DIR}/sl.h" AND EXISTS "${STREAMLINE_LIB_FILE}" AND EXISTS "${STREAMLINE_BIN_DIR}/sl.interposer.dll")
+    set(FRAME_WARP_HAS_STREAMLINE ON)
+    message(STATUS "NVIDIA Streamline SDK found (${STREAMLINE_ARCH_DIR}): ${STREAMLINE_SDK_DIR}")
+else()
+    message(STATUS "NVIDIA Streamline SDK not found in third_party/streamline; building without DLSS-G backend")
+endif()
+
 add_executable(frame_warp_lab WIN32
     src/main.cpp
     src/renderer.cpp
     src/latency_monitor.cpp
+    src/streamline_backend.cpp
 )
-add_executable(frame_warp_cli src/cli.cpp)
+add_executable(frame_warp_cli
+    src/cli.cpp
+    src/streamline_backend.cpp
+)
 target_compile_features(frame_warp_lab PRIVATE cxx_std_20)
 target_compile_features(frame_warp_cli PRIVATE cxx_std_20)
 target_compile_definitions(frame_warp_lab PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_compile_definitions(frame_warp_cli PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_link_libraries(frame_warp_lab PRIVATE d3d12 dxgi dxguid advapi32 dwmapi)
-target_link_libraries(frame_warp_cli PRIVATE d3d12 dxgi dxguid)
+
+if(FRAME_WARP_HAS_STREAMLINE)
+    target_compile_definitions(frame_warp_lab PRIVATE FRAME_WARP_HAS_STREAMLINE=1)
+    target_compile_definitions(frame_warp_cli PRIVATE FRAME_WARP_HAS_STREAMLINE=1)
+    target_include_directories(frame_warp_lab SYSTEM PRIVATE "${STREAMLINE_INCLUDE_DIR}")
+    target_include_directories(frame_warp_cli SYSTEM PRIVATE "${STREAMLINE_INCLUDE_DIR}")
+    target_link_libraries(frame_warp_lab PRIVATE "${STREAMLINE_LIB_FILE}" dxguid advapi32 dwmapi)
+    target_link_libraries(frame_warp_cli PRIVATE "${STREAMLINE_LIB_FILE}" dxguid)
+else()
+    target_compile_definitions(frame_warp_lab PRIVATE FRAME_WARP_HAS_STREAMLINE=0)
+    target_compile_definitions(frame_warp_cli PRIVATE FRAME_WARP_HAS_STREAMLINE=0)
+    target_link_libraries(frame_warp_lab PRIVATE d3d12 dxgi dxguid advapi32 dwmapi)
+    target_link_libraries(frame_warp_cli PRIVATE d3d12 dxgi dxguid)
+endif()
+
 if(MSVC)
     target_compile_options(frame_warp_lab PRIVATE /W4 /permissive- /EHsc)
     target_compile_options(frame_warp_cli PRIVATE /W4 /permissive- /EHsc)
@@ -60,6 +94,7 @@ add_dxc_shader(COMPILED_SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/present.hls
 add_dxc_shader(COMPILED_SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/present.hlsl" pixel_main ps_6_0 present_depth_fast_ps.cso -DPRESENT_VARIANT=2)
 add_dxc_shader(COMPILED_SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/present.hlsl" pixel_main ps_6_0 present_depth_full_ps.cso -DPRESENT_VARIANT=3)
 add_dxc_shader(COMPILED_SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/present.hlsl" pixel_main ps_6_0 present_synthesis_ps.cso -DPRESENT_VARIANT=4)
+add_dxc_shader(COMPILED_SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/present.hlsl" pixel_main ps_6_0 present_dlss_hudless_ps.cso -DPRESENT_VARIANT=4 -DPRESENT_OUTPUT_HUDLESS=1)
 
 add_custom_target(frame_warp_shaders ALL DEPENDS ${COMPILED_SHADERS})
 add_dependencies(frame_warp_lab frame_warp_shaders)
@@ -68,3 +103,22 @@ add_custom_command(TARGET frame_warp_lab POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:frame_warp_lab>/shaders"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${COMPILED_SHADERS} "$<TARGET_FILE_DIR:frame_warp_lab>/shaders/"
 )
+
+if(FRAME_WARP_HAS_STREAMLINE)
+    set(STREAMLINE_RUNTIME_DLLS
+        "${STREAMLINE_BIN_DIR}/sl.interposer.dll"
+        "${STREAMLINE_BIN_DIR}/sl.common.dll"
+        "${STREAMLINE_BIN_DIR}/sl.pcl.dll"
+        "${STREAMLINE_BIN_DIR}/sl.reflex.dll"
+        "${STREAMLINE_BIN_DIR}/sl.dlss.dll"
+        "${STREAMLINE_BIN_DIR}/sl.dlss_g.dll"
+        "${STREAMLINE_BIN_DIR}/nvngx_dlss.dll"
+        "${STREAMLINE_BIN_DIR}/nvngx_dlssg.dll"
+    )
+    add_custom_command(TARGET frame_warp_lab POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${STREAMLINE_RUNTIME_DLLS} "$<TARGET_FILE_DIR:frame_warp_lab>/"
+    )
+    add_custom_command(TARGET frame_warp_cli POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${STREAMLINE_RUNTIME_DLLS} "$<TARGET_FILE_DIR:frame_warp_cli>/"
+    )
+endif()
