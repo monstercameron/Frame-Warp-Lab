@@ -1,5 +1,14 @@
 # Development log
 
+## v0.5.0 — CPU camera simulation, offscreen G-buffer targets, GPU timing, and trace CLI
+
+- Split rendering into cohesive modules (`src/simulation.h`, `src/renderer.h`, `src/renderer.cpp`) and moved camera basis, deterministic Motion Lab paths (`corridor_sway`, `fast_pan`, `occlusion_sweep`, `camera_cut`), moving-ball kinematics, and discontinuity flags to the CPU.
+- Updated `shaders/motion_lab.hlsl` to render into three offscreen targets (`R16G16B16A16_FLOAT` linear color, `R32_FLOAT` linear view-space depth, `R16G16_FLOAT` analytical 2D screen-space motion vectors) with a controllable synthetic shading stress loop (`stress_level` 0..64). Added `shaders/present.hlsl` to tone-map or visualize depth/motion buffers and composite a toggleable late center reticle.
+- Added D3D12 timestamp queries (`D3D12_QUERY_HEAP_TYPE_TIMESTAMP` + readback buffer) measuring non-stalling per-slot GPU durations (`scene_gpu_us` and `present_gpu_us`) alongside a bounded 256-sample frame trace ring in shared memory (`runtime_state_version = 5`).
+- Added CLI `set <pid> <key> <value>` (`view`, `path`, `stress`, `overlay`) and `trace <pid> [limit]` with min/median/p95/max summaries; bumped CLI JSON `schema_version` to 2.
+- Verified ARM64 Debug build with zero `/W4` warnings and live CLI run on the RTX Spark N1X (`1264x681`, `\\.\DISPLAY6` nominal 120 Hz): at `stress=0`, median `scene_gpu_us` was 661 µs and `present_gpu_us` was 29 µs (`cpu_present_interval_us` median 8401 µs); at `stress=12`, median `scene_gpu_us` rose to 1201 µs while `present_gpu_us` remained 29 µs. These measurements cover GPU pass cost and CPU Present cadence only, not physical display scanout timing or image quality.
+- Repeat control mode, depth-based camera reprojection, tearing/waitable swap chain control, manual camera input, VRS rendering, and NVIDIA DLSS-G investigation remain to be built.
+
 ## v0.4.1 — Harden shared-state ordering, GPU shutdown, and capability reporting
 
 - Replaced raw `volatile` IPC accesses with C++20 `std::atomic_ref` acquire/release operations and explicit acquire fences around event-journal reads so lock-free snapshots are ordered safely on Windows ARM64. Widened `scene_time_ms` to 64-bit integer milliseconds and bumped `runtime_state_version` to 4.
