@@ -57,6 +57,13 @@ struct EcsLuaTelemetry {
     std::uint64_t events_dispatched = 0;
     std::uint32_t event_subscriptions = 0;
     bool hero_pistol_gltf_loaded = false;
+    std::uint32_t mt_worker_threads = 0;
+    std::uint32_t mt_jolt_threads = 0;
+    std::uint64_t mt_jobs_executed = 0;
+    std::int64_t mt_physics_step_us = 0;
+    std::int64_t mt_ecs_sync_us = 0;
+    float current_spread_mrad = 0.0f;
+    float last_shot_offset_mrad = 0.0f;
 };
 
 struct TacticalHudSnapshot {

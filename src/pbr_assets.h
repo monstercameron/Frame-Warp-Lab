@@ -17,6 +17,7 @@ struct PbrAssetBundle {
     Microsoft::WRL::ComPtr<ID3D12Resource> hero_normal;
     Microsoft::WRL::ComPtr<ID3D12Resource> hero_orm;
     bool hero_textures_loaded = false;
+    std::int64_t build_time_ms = 0;
 };
 
 PbrAssetBundle create_and_upload_pbr_assets(

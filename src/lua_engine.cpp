@@ -218,6 +218,11 @@ struct LuaScriptEngine::Impl {
         set_f("crosshair_bloom", w->crosshair_bloom);
         set_f("muzzle_flash_timer", w->muzzle_flash_timer);
         set_f("muzzle_flash_spin", w->muzzle_flash_spin);
+        set_f("move_speed", w->move_speed);
+        set_f("spread_heat", w->spread_heat);
+        set_f("current_spread_rad", w->current_spread_rad);
+        set_f("last_shot_offset_rad", w->last_shot_offset_rad);
+        set_i("spread_rng_state", w->spread_rng_state);
         return 1;
     }
 
@@ -251,6 +256,11 @@ struct LuaScriptEngine::Impl {
         read_table_number(state, 2, "crosshair_bloom", w->crosshair_bloom);
         read_table_number(state, 2, "muzzle_flash_timer", w->muzzle_flash_timer);
         read_table_number(state, 2, "muzzle_flash_spin", w->muzzle_flash_spin);
+        read_table_number(state, 2, "move_speed", w->move_speed);
+        read_table_number(state, 2, "spread_heat", w->spread_heat);
+        read_table_number(state, 2, "current_spread_rad", w->current_spread_rad);
+        read_table_number(state, 2, "last_shot_offset_rad", w->last_shot_offset_rad);
+        read_table_int(state, 2, "spread_rng_state", w->spread_rng_state);
         lua_pushboolean(state, 1);
         return 1;
     }

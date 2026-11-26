@@ -84,6 +84,11 @@ struct WeaponComponent {
     float crosshair_bloom = 0.0f;
     float muzzle_flash_timer = 0.0f;
     float muzzle_flash_spin = 0.0f;
+    float move_speed = 0.0f;
+    float spread_heat = 0.0f;
+    float current_spread_rad = 0.011f;
+    float last_shot_offset_rad = 0.0f;
+    std::int32_t spread_rng_state = 1234567;
 };
 
 struct TargetComponent {

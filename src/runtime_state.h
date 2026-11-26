@@ -10,7 +10,7 @@
 namespace frame_warp_lab {
 
 inline constexpr wchar_t window_class_name[] = L"FrameWarpLabWindow";
-inline constexpr std::uint32_t runtime_state_version = 28;
+inline constexpr std::uint32_t runtime_state_version = 29;
 inline constexpr std::size_t runtime_event_capacity = 64;
 inline constexpr std::size_t runtime_frame_trace_capacity = 256;
 inline constexpr std::size_t hud_graph_sample_count = 128;
@@ -366,6 +366,14 @@ struct RuntimeState {
     std::uint32_t event_subscriptions;
     std::int32_t hero_pistol_gltf_loaded;
     std::int32_t hero_pbr_textures_loaded;
+    std::uint32_t mt_worker_threads;
+    std::uint32_t mt_jolt_threads;
+    std::uint64_t mt_jobs_executed;
+    std::int64_t mt_physics_step_us;
+    std::int64_t mt_ecs_sync_us;
+    std::int64_t mt_pbr_build_ms;
+    std::int32_t tactical_spread_mrad_x100;
+    std::int32_t tactical_shot_offset_mrad_x100;
     std::int32_t overlay_enabled;
     std::int32_t flash_indicator_enabled;
     std::int32_t raw_input_enabled;

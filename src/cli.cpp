@@ -295,6 +295,14 @@ int print_status(const WindowInstance& instance) {
     const std::uint32_t event_subscriptions = std::atomic_ref<std::uint32_t>(state->event_subscriptions).load(std::memory_order_acquire);
     const std::int32_t hero_pistol_gltf_loaded = std::atomic_ref<std::int32_t>(state->hero_pistol_gltf_loaded).load(std::memory_order_acquire);
     const std::int32_t hero_pbr_textures_loaded = std::atomic_ref<std::int32_t>(state->hero_pbr_textures_loaded).load(std::memory_order_acquire);
+    const std::uint32_t mt_worker_threads = std::atomic_ref<std::uint32_t>(state->mt_worker_threads).load(std::memory_order_acquire);
+    const std::uint32_t mt_jolt_threads = std::atomic_ref<std::uint32_t>(state->mt_jolt_threads).load(std::memory_order_acquire);
+    const std::uint64_t mt_jobs_executed = std::atomic_ref<std::uint64_t>(state->mt_jobs_executed).load(std::memory_order_acquire);
+    const std::int64_t mt_physics_step_us = std::atomic_ref<std::int64_t>(state->mt_physics_step_us).load(std::memory_order_acquire);
+    const std::int64_t mt_ecs_sync_us = std::atomic_ref<std::int64_t>(state->mt_ecs_sync_us).load(std::memory_order_acquire);
+    const std::int64_t mt_pbr_build_ms = std::atomic_ref<std::int64_t>(state->mt_pbr_build_ms).load(std::memory_order_acquire);
+    const std::int32_t tactical_spread_mrad_x100 = std::atomic_ref<std::int32_t>(state->tactical_spread_mrad_x100).load(std::memory_order_acquire);
+    const std::int32_t tactical_shot_offset_mrad_x100 = std::atomic_ref<std::int32_t>(state->tactical_shot_offset_mrad_x100).load(std::memory_order_acquire);
     const std::int32_t overlay_enabled = std::atomic_ref<std::int32_t>(state->overlay_enabled).load(std::memory_order_acquire);
     const std::int32_t flash_indicator_enabled = std::atomic_ref<std::int32_t>(state->flash_indicator_enabled).load(std::memory_order_acquire);
     const std::int32_t raw_input_enabled = std::atomic_ref<std::int32_t>(state->raw_input_enabled).load(std::memory_order_acquire);
@@ -446,6 +454,8 @@ int print_status(const WindowInstance& instance) {
               << ",\"ads_active\":" << (tactical_ads_active ? "true" : "false")
               << ",\"hero_pistol_gltf_loaded\":" << (hero_pistol_gltf_loaded ? "true" : "false")
               << ",\"hero_pbr_textures_loaded\":" << (hero_pbr_textures_loaded ? "true" : "false")
+              << ",\"spread_mrad\":" << std::fixed << std::setprecision(2) << (static_cast<double>(tactical_spread_mrad_x100) / 100.0)
+              << ",\"last_shot_offset_mrad\":" << (static_cast<double>(tactical_shot_offset_mrad_x100) / 100.0)
               << "},\"ecs\":{\"entities\":" << ecs_entity_count
               << ",\"renderables\":" << ecs_renderable_count
               << ",\"physics_bodies\":" << ecs_physics_count
@@ -456,6 +466,12 @@ int print_status(const WindowInstance& instance) {
               << ",\"last_step_us\":" << lua_last_step_us
               << "},\"events\":{\"dispatched\":" << events_dispatched
               << ",\"subscriptions\":" << event_subscriptions
+              << "},\"multithreading\":{\"worker_threads\":" << mt_worker_threads
+              << ",\"jolt_threads\":" << mt_jolt_threads
+              << ",\"jobs_executed\":" << mt_jobs_executed
+              << ",\"physics_step_us\":" << mt_physics_step_us
+              << ",\"ecs_sync_us\":" << mt_ecs_sync_us
+              << ",\"pbr_build_ms\":" << mt_pbr_build_ms
               << "},\"vrs\":{\"tier\":" << vrs_tier
               << ",\"tile_size_px\":" << vrs_tile_size_px
               << ",\"additional_rates_supported\":" << (vrs_additional_rates ? "true" : "false")

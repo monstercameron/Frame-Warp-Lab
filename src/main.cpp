@@ -135,7 +135,8 @@ public:
     void update_tactical_range(
         const frame_warp_lab::TacticalHudSnapshot& h,
         const frame_warp_lab::EcsLuaTelemetry& t,
-        bool hero_pbr_textures_loaded) {
+        bool hero_pbr_textures_loaded,
+        std::int64_t pbr_build_ms) {
         std::atomic_ref<std::int32_t>(state_->tactical_hp).store(h.hp, std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->tactical_armor).store(h.armor, std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->tactical_ammo_in_mag).store(h.ammo_in_mag, std::memory_order_release);
@@ -158,6 +159,14 @@ public:
         std::atomic_ref<std::uint32_t>(state_->event_subscriptions).store(t.event_subscriptions, std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->hero_pistol_gltf_loaded).store(t.hero_pistol_gltf_loaded ? 1 : 0, std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->hero_pbr_textures_loaded).store(hero_pbr_textures_loaded ? 1 : 0, std::memory_order_release);
+        std::atomic_ref<std::uint32_t>(state_->mt_worker_threads).store(t.mt_worker_threads, std::memory_order_release);
+        std::atomic_ref<std::uint32_t>(state_->mt_jolt_threads).store(t.mt_jolt_threads, std::memory_order_release);
+        std::atomic_ref<std::uint64_t>(state_->mt_jobs_executed).store(t.mt_jobs_executed, std::memory_order_release);
+        std::atomic_ref<std::int64_t>(state_->mt_physics_step_us).store(t.mt_physics_step_us, std::memory_order_release);
+        std::atomic_ref<std::int64_t>(state_->mt_ecs_sync_us).store(t.mt_ecs_sync_us, std::memory_order_release);
+        std::atomic_ref<std::int64_t>(state_->mt_pbr_build_ms).store(pbr_build_ms, std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->tactical_spread_mrad_x100).store(static_cast<std::int32_t>(t.current_spread_mrad * 100.0f), std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->tactical_shot_offset_mrad_x100).store(static_cast<std::int32_t>(t.last_shot_offset_mrad * 100.0f), std::memory_order_release);
     }
 
     void update_dlssg(
@@ -1493,7 +1502,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 runtime_state.update_tactical_range(
                     hud_state.tactical_hud,
                     tactical_range.ecs_lua_telemetry(),
-                    renderer.hero_pbr_textures_loaded());
+                    renderer.hero_pbr_textures_loaded(),
+                    renderer.pbr_build_time_ms());
             } else {
                 hud_state.tactical_hud_enabled = false;
             }

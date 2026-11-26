@@ -1,13 +1,14 @@
 #include "tactical_range.h"
 #include "ecs.h"
 #include "event_bus.h"
+#include "job_system.h"
 #include "lua_engine.h"
 
 #include <Jolt/Jolt.h>
 #include <Jolt/RegisterTypes.h>
 #include <Jolt/Core/Factory.h>
 #include <Jolt/Core/TempAllocator.h>
-#include <Jolt/Core/JobSystemSingleThreaded.h>
+#include <Jolt/Core/JobSystemThreadPool.h>
 #include <Jolt/Physics/PhysicsSettings.h>
 #include <Jolt/Physics/PhysicsSystem.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
@@ -20,9 +21,11 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <string>
+#include <thread>
 
 namespace frame_warp_lab {
 
@@ -260,6 +263,11 @@ constexpr std::array<Float3, k_range_target_count> k_target_bases = {{
     { 2.6f, 0.14f, 22.8f},
 }};
 
+std::uint32_t choose_jolt_worker_count() {
+    const std::uint32_t hw = std::max(1U, std::thread::hardware_concurrency());
+    return std::clamp<std::uint32_t>(hw / 2U, 2U, 6U);
+}
+
 }
 
 struct JoltRuntimeGuard {
@@ -274,7 +282,8 @@ struct TacticalRangeSimulation::Impl {
     ObjectVsBroadPhaseLayerFilterImpl obj_vs_bp_filter;
     ObjectLayerPairFilterImpl obj_pair_filter;
     JPH::TempAllocatorImpl temp_allocator{4U * 1024U * 1024U};
-    JPH::JobSystemSingleThreaded job_system{JPH::cMaxPhysicsJobs};
+    std::uint32_t jolt_worker_count = choose_jolt_worker_count();
+    JPH::JobSystemThreadPool job_system{JPH::cMaxPhysicsJobs, JPH::cMaxPhysicsBarriers, static_cast<int>(jolt_worker_count)};
     JPH::PhysicsSystem physics;
 
     EcsWorld ecs;
@@ -316,6 +325,8 @@ struct TacticalRangeSimulation::Impl {
     std::int32_t score = 0;
 
     CameraBasis active_camera{};
+    Float3 prev_camera_pos{0.0f, 1.55f, 1.4f};
+    bool has_prev_camera_pos = false;
     Float3 muzzle_world_pos{0.0f, 1.4f, 2.0f};
     float tracer_timer = 0.0f;
     Float3 tracer_start{};
@@ -325,6 +336,8 @@ struct TacticalRangeSimulation::Impl {
     bool impact_was_target = false;
     float hit_marker_timer = 0.0f;
     bool hit_marker_headshot = false;
+    std::int64_t last_physics_step_us = 0;
+    std::int64_t last_ecs_sync_us = 0;
 
     Impl() {
         ensure_jolt_initialized();
@@ -584,10 +597,8 @@ struct TacticalRangeSimulation::Impl {
             const Mat4x4 gun_world = mul_mat4(cam_world, compute_pistol_root_local(*w));
             muzzle_world_pos = transform_point(gun_world, pistol_muzzle_offset);
 
-            const auto shot = static_cast<float>(payload.get_int("shot", 1));
-            const auto spread_angle = static_cast<float>(payload.get_number("spread", 0.0));
-            const float sx = std::sin(shot * 12.9898f) * spread_angle;
-            const float sy = std::cos(shot * 78.233f) * spread_angle;
+            const auto sx = static_cast<float>(payload.get_number("spread_x", 0.0));
+            const auto sy = static_cast<float>(payload.get_number("spread_y", 0.0));
             Float3 ray_dir{
                 active_camera.forward.x + active_camera.right.x * sx + active_camera.up.x * sy,
                 active_camera.forward.y + active_camera.right.y * sx + active_camera.up.y * sy,
@@ -742,6 +753,19 @@ struct TacticalRangeSimulation::Impl {
         const float dt = static_cast<float>(std::min(delta_seconds, 0.05));
         range_time += dt;
 
+        if (auto* w = ecs.weapons().try_get(weapon_entity)) {
+            if (has_prev_camera_pos && dt > 1e-5f) {
+                const float dx = camera.position.x - prev_camera_pos.x;
+                const float dz = camera.position.z - prev_camera_pos.z;
+                const float inst_speed = std::sqrt(dx * dx + dz * dz) / dt;
+                w->move_speed += (std::min(inst_speed, 8.0f) - w->move_speed) * (1.0f - std::exp(-dt * 16.0f));
+            } else {
+                w->move_speed = 0.0f;
+            }
+        }
+        prev_camera_pos = camera.position;
+        has_prev_camera_pos = true;
+
         if (tracer_timer > 0.0f) tracer_timer = std::max(0.0f, tracer_timer - dt);
         if (impact_timer > 0.0f) impact_timer = std::max(0.0f, impact_timer - dt);
         if (hit_marker_timer > 0.0f) hit_marker_timer = std::max(0.0f, hit_marker_timer - dt);
@@ -750,6 +774,7 @@ struct TacticalRangeSimulation::Impl {
         lua.step(static_cast<double>(dt));
         events.flush();
 
+        const auto phys_t0 = std::chrono::steady_clock::now();
         constexpr double fixed_step = 1.0 / 240.0;
         phys_accum = std::min(phys_accum + static_cast<double>(dt), fixed_step * 6.0);
         int substeps = 0;
@@ -758,6 +783,8 @@ struct TacticalRangeSimulation::Impl {
             phys_accum -= fixed_step;
             ++substeps;
         }
+        const auto phys_t1 = std::chrono::steady_clock::now();
+        last_physics_step_us = std::chrono::duration_cast<std::chrono::microseconds>(phys_t1 - phys_t0).count();
     }
 
     void sync_ecs_render_transforms(const CameraBasis& camera, const CameraBasis& previous_camera) {
@@ -776,36 +803,43 @@ struct TacticalRangeSimulation::Impl {
         const Mat4x4 id = identity_mat4();
         update_entity_xform(range_world_entity, id, true, id);
 
+        const auto sync_t0 = std::chrono::steady_clock::now();
         const auto& bi = physics.GetBodyInterface();
-        for (std::uint32_t i = 0; i < k_range_target_count; ++i) {
-            const TargetPhysicsBinding& binding = targets[i];
-            const TargetComponent* tc = ecs.targets().try_get(binding.entity);
-            const Mat4x4 plate_world = mul_mat4(
-                from_jolt_mat44(bi.GetWorldTransform(binding.plate_id)),
-                make_translation_mat4(0.0f, -0.72f, 0.0f));
-            update_entity_xform(binding.entity, plate_world, false, plate_world);
-            if (auto* r = ecs.renderables().try_get(binding.entity)) {
-                const float flash = tc != nullptr ? tc->hit_flash : 0.0f;
-                r->tint = {1.0f, 1.0f - 0.35f * flash, 1.0f - 0.45f * flash};
-                r->emissive = flash * 1.4f;
-                r->visible = true;
+        const std::size_t dynamic_total = static_cast<std::size_t>(k_range_target_count) + static_cast<std::size_t>(k_range_casing_count);
+        EngineJobSystem::global().parallel_for(dynamic_total, 4U, [&](std::size_t begin, std::size_t end) {
+            for (std::size_t idx = begin; idx < end; ++idx) {
+                if (idx < k_range_target_count) {
+                    const TargetPhysicsBinding& binding = targets[idx];
+                    const TargetComponent* tc = ecs.targets().try_get(binding.entity);
+                    const Mat4x4 plate_world = mul_mat4(
+                        from_jolt_mat44(bi.GetWorldTransform(binding.plate_id)),
+                        make_translation_mat4(0.0f, -0.72f, 0.0f));
+                    update_entity_xform(binding.entity, plate_world, false, plate_world);
+                    if (auto* r = ecs.renderables().try_get(binding.entity)) {
+                        const float flash = tc != nullptr ? tc->hit_flash : 0.0f;
+                        r->tint = {1.0f, 1.0f - 0.35f * flash, 1.0f - 0.45f * flash};
+                        r->emissive = flash * 1.4f;
+                        r->visible = true;
+                    }
+                } else {
+                    const std::size_t ci = idx - k_range_target_count;
+                    const CasingPhysicsBinding& binding = casings[ci];
+                    const CasingComponent* cc = ecs.casings().try_get(binding.entity);
+                    const bool active = cc != nullptr && cc->active;
+                    if (auto* r = ecs.renderables().try_get(binding.entity)) {
+                        r->visible = active;
+                        r->tint = {1.0f, 0.92f, 0.72f};
+                        r->emissive = 0.0f;
+                    }
+                    if (active) {
+                        const Mat4x4 cw = from_jolt_mat44(bi.GetWorldTransform(binding.body_id));
+                        update_entity_xform(binding.entity, cw, false, cw);
+                    }
+                }
             }
-        }
-
-        for (std::uint32_t i = 0; i < k_range_casing_count; ++i) {
-            const CasingPhysicsBinding& binding = casings[i];
-            const CasingComponent* cc = ecs.casings().try_get(binding.entity);
-            const bool active = cc != nullptr && cc->active;
-            if (auto* r = ecs.renderables().try_get(binding.entity)) {
-                r->visible = active;
-                r->tint = {1.0f, 0.92f, 0.72f};
-                r->emissive = 0.0f;
-            }
-            if (active) {
-                const Mat4x4 cw = from_jolt_mat44(bi.GetWorldTransform(binding.body_id));
-                update_entity_xform(binding.entity, cw, false, cw);
-            }
-        }
+        });
+        const auto sync_t1 = std::chrono::steady_clock::now();
+        last_ecs_sync_us = std::chrono::duration_cast<std::chrono::microseconds>(sync_t1 - sync_t0).count();
 
         if (auto* tr_r = ecs.renderables().try_get(tracer_entity)) {
             tr_r->visible = tracer_timer > 0.0f;
@@ -992,9 +1026,9 @@ TacticalHudSnapshot TacticalRangeSimulation::hud_snapshot(const CameraBasis& cam
     h.headshots = impl_->headshots;
     h.score = impl_->score;
     const float ads_alpha = w != nullptr ? w->ads_alpha : 0.0f;
-    const float bloom = w != nullptr ? w->crosshair_bloom : 0.0f;
+    const float spread_rad = w != nullptr ? w->current_spread_rad : 0.011f;
     h.ads_alpha = ads_alpha;
-    h.crosshair_spread = std::clamp(0.18f * (1.0f - 0.72f * ads_alpha) + bloom * 0.55f, 0.05f, 1.5f);
+    h.crosshair_spread = std::clamp(spread_rad * 28.0f, 0.06f, 1.85f);
     h.hit_marker_alpha = std::clamp(impl_->hit_marker_timer / 0.22f, 0.0f, 1.0f);
     h.hit_marker_headshot = impl_->hit_marker_headshot ? 1.0f : 0.0f;
     h.reload_progress = (w != nullptr && w->reloading)
@@ -1022,6 +1056,7 @@ TacticalHudSnapshot TacticalRangeSimulation::hud_snapshot(const CameraBasis& cam
 EcsLuaTelemetry TacticalRangeSimulation::ecs_lua_telemetry() const {
     const EcsWorldStats es = impl_->ecs.stats();
     const LuaEngineStats ls = impl_->lua.stats();
+    const WeaponComponent* w = impl_->ecs.weapons().try_get(impl_->weapon_entity);
     return EcsLuaTelemetry{
         es.entity_count,
         es.renderable_count,
@@ -1034,6 +1069,13 @@ EcsLuaTelemetry TacticalRangeSimulation::ecs_lua_telemetry() const {
         impl_->events.dispatched_count(),
         impl_->events.subscription_count(),
         impl_->hero_pistol_gltf_loaded,
+        EngineJobSystem::global().worker_count(),
+        impl_->jolt_worker_count,
+        EngineJobSystem::global().jobs_executed(),
+        impl_->last_physics_step_us,
+        impl_->last_ecs_sync_us,
+        w != nullptr ? w->current_spread_rad * 1000.0f : 0.0f,
+        w != nullptr ? w->last_shot_offset_rad * 1000.0f : 0.0f,
     };
 }
 

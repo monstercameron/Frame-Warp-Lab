@@ -75,12 +75,14 @@ try {
     $c1 = (& $cli capture $fpid $tag 8 | ConvertFrom-Json)
     $tempPpms += $c1.path
     [RangeImgTools]::PpmToPng($c1.path, (Join-Path $reportDir 'range_hipfire.png'))
+    $stHip = (& $cli status $fpid | ConvertFrom-Json)
 
     & $cli set $fpid ads on | Out-Null
     $tag++
     $c2 = (& $cli capture $fpid $tag 60 | ConvertFrom-Json)
     $tempPpms += $c2.path
     [RangeImgTools]::PpmToPng($c2.path, (Join-Path $reportDir 'range_ads.png'))
+    $stAds = (& $cli status $fpid | ConvertFrom-Json)
 
     & $cli fire $fpid | Out-Null
     $tag++
@@ -104,6 +106,17 @@ try {
         $stHit.ecs.entities, $stHit.ecs.renderables, $stHit.ecs.physics_bodies, $stHit.ecs.scripts, `
         $stHit.lua.loaded_scripts, $stHit.lua.error_count, $stHit.lua.last_step_us, `
         $stHit.events.dispatched, $stHit.events.subscriptions)
+    Write-Host ("  MT: workers={0} jolt_threads={1} jobs={2} phys={3}us ecs_sync={4}us pbr512_build={5}ms | Spread: hip={6}mrad ads={7}mrad post_fire={8}mrad shot_dev={9}mrad" -f `
+        $stHit.multithreading.worker_threads, $stHit.multithreading.jolt_threads, $stHit.multithreading.jobs_executed, `
+        $stHit.multithreading.physics_step_us, $stHit.multithreading.ecs_sync_us, $stHit.multithreading.pbr_build_ms, `
+        $stHip.tactical_range.spread_mrad, $stAds.tactical_range.spread_mrad, $stHit.tactical_range.spread_mrad, $stHit.tactical_range.last_shot_offset_mrad)
+
+    if ($stHit.multithreading.worker_threads -lt 2 -or $stHit.multithreading.jolt_threads -lt 2 -or $stHit.multithreading.jobs_executed -lt 10) {
+        throw "Expected active multi-threaded worker pool and Jolt ThreadPool!"
+    }
+    if ($stHip.tactical_range.spread_mrad -le $stAds.tactical_range.spread_mrad -or $stHit.tactical_range.spread_mrad -le $stAds.tactical_range.spread_mrad) {
+        throw "Expected hip spread > ADS spread and post-fire bloom > ADS spread!"
+    }
 
     if (-not $stHit.tactical_range.hero_pistol_gltf_loaded -or -not $stHit.tactical_range.hero_pbr_textures_loaded) {
         throw "Expected Poly Haven Service Pistol glTF + 1K PBR textures to load!"

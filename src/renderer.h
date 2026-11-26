@@ -168,6 +168,7 @@ public:
     void emit_streamline_pcl_marker(StreamlinePclMarker marker);
     const RangeGeometryPackage& range_geometry_meta() const { return range_geometry_meta_; }
     bool hero_pbr_textures_loaded() const { return pbr_assets_.hero_textures_loaded; }
+    std::int64_t pbr_build_time_ms() const { return pbr_assets_.build_time_ms; }
 
 private:
     static constexpr UINT swap_chain_buffer_count = 2;

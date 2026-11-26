@@ -1,5 +1,30 @@
 # Development log
 
+## v0.30.0 — Indoor Tactical Gun Range Overhaul: 512×512 Cracked/Polished Concrete, Wood & Metal PBR, Analytical Area/Spot/Colored Lights, Gaussian Bullet Spread, and Multi-Threaded ECS/Jolt/Asset Pipeline
+
+- Transformed the Tactical Aim Range into a high-contrast indoor shooting facility with upgraded PBR materials, physically-based multi-light shading, a Counter-Strike style dynamic bullet-spread model, and full multi-threading across assets, physics, and ECS (`src/job_system.h`, `src/job_system.cpp`, `src/pbr_assets.h`, `src/pbr_assets.cpp`, `src/range_mesh.cpp`, `shaders/range_mesh.hlsl`, `src/ecs.h`, `src/lua_engine.cpp`, `assets/scripts/pistol_behavior.lua`, `src/tactical_range.h`, `src/tactical_range.cpp`, `src/renderer.h`, `src/runtime_state.h`, `src/main.cpp`, `src/cli.cpp`, `CMakeLists.txt`, `scripts/run_tactical_range_verify.ps1`):
+  - **Indoor Gun Range Architecture (`src/range_mesh.cpp`)**:
+    - Built tactical shooting bays with steel-framed ballistic & acoustic-wedge-foam stall dividers, satin-lacquered wood firing bench, rubber shooting mat, ammo can, brass box, glowing shot-timer prop, 5 angled overhead ballistic steel baffles, 3 full-length overhead target-trolley I-beam rails, concrete lane markings, acoustic wall baffle bays, colored beacon housings, and an angled AR500 steel bullet-trap berm backstop.
+  - **Upgraded `512×512 × 10`-Mip PBR Materials (`src/pbr_assets.cpp`)**:
+    - Doubled procedural PBR atlas resolution (`256×256 → 512×512 × 10` mips, `16×` anisotropic filtering, Toksvig normal-variance roughness mips):
+      - **Concrete Floor (`slice 6`)**: warped Voronoi branching cracks etched into height/normals/AO, troweled polished concrete sheen zones (`roughness 0.15–0.24`, `clearcoat 0.52`), matte raw aggregate, oil stains, scuff blemishes, and expansion joints.
+      - **Multi-Layered Wood (`slice 8`)**: warped grain fibers, growth rings, localized dark wood knots, beveled plank seams, satin clearcoat lacquer, and `metallic=0.95` steel corner straps with raised hex bolts.
+      - **Brushed Aluminum & Ballistic Gunmetal (`slices 1, 10`)**: fine directional brushing, micro-scratches, chamfered seams, rivets, oil patina, and impact scuffs; plus concrete-block range walls (`slice 7`) and wedge acoustic foam (`slice 11`).
+  - **Physically-Based Area Lights, Cone Spot Lights & Colored Accent Lights (`shaders/range_mesh.hlsl`)**:
+    - Implemented Karis/Frostbite **Most Representative Point (MRP) Rectangular Area Lights** with GGX roughness-widening energy normalization for all 5 overhead LED bay fixtures (`cool 5600K` near firing line → `warm 4200K` downrange).
+    - Added **physically-based directional Cone Spot Lights** with smooth inner/outer penumbra: 3 angled downrange target-bay spotlights, 2 crimson `"RANGE HOT"` tactical beacons, and 2 warm amber backstop work spotlights, plus 2 cool tactical cyan-blue firing-line cove lights and dynamic muzzle flash.
+  - **Multi-Factor Gaussian Bullet Spread Algorithm (`assets/scripts/pistol_behavior.lua`, `src/ecs.h`, `src/tactical_range.cpp`)**:
+    - Combines stance base spread (`11.00 mrad` hip vs `1.10 mrad` ADS), live player movement inaccuracy (`move_speed`), and rapid-fire dynamic `spread_heat` with exponential decay, sampled via a deterministic Box-Muller 2D Gaussian disk distribution and synced directly to HUD crosshair bloom and CLI telemetry (`spread_mrad`, `last_shot_offset_mrad`).
+  - **Multi-Threaded Engine (`src/job_system.h/.cpp`, `src/pbr_assets.cpp`, `src/tactical_range.cpp`, `RuntimeState` v29)**:
+    - Added persistent `EngineJobSystem` worker thread pool (`8` workers on Spark N1X, leaving cores free for Present/display latency) parallelizing `512×512` PBR atlas + 1K hero mip + DFG LUT + HDR cubemap generation (**`252 ms`** wall-clock!) and per-frame ECS physics-to-transform sync (`14 µs`).
+    - Upgraded Jolt Physics from `JobSystemSingleThreaded` to **`JPH::JobSystemThreadPool`** (`6` physics worker threads, `93 µs` physics step).
+- Verified zero code comments, ARM64 Release + Debug builds, Debug D3D12 Debug Layer validation (`workers=8`, `jolt=6`, `lua_err=0`, `0` D3D12 errors), visual capture inspection, and `scripts/run_tactical_range_verify.ps1` on **NVIDIA RTX Spark N1X**:
+  - **Multi-Threading & Spread Proof**: `workers=8` · `jolt_threads=6` · `jobs=810` · `pbr512_build=252 ms` · `phys=93 µs` · `ecs_sync=14 µs` · `Lua=69 µs` (`0` err, hot-reload `1`) · Spread: `hip=11.00 mrad`, `ads=1.20 mrad`, `post_fire=4.56 mrad`, `shot_dev=0.35 mrad` (headshot `+250`, Jolt knockback `7/8` → flip-up `8/8`).
+  - **Full 14-Light PBR Pacing (`scene=range`, `512×512` + `1024×1024` PBR + 5 Rect Area Lights + 7 Spot Lights + 2 Cyan Lights + Muzzle Light, `0` missed deadlines)**:
+    - `1080p` (`1920×1080`): **`1,836 µs`** scene GPU · `60 µs` present · `1,017.3 FPS` · **`0` missed**
+    - `1440p` (`2560×1440`): **`3,891 µs`** scene GPU · `94 µs` present · `943.4 FPS` · **`0` missed**
+    - `4K` (`3840×2160`): **`7,391 µs`** scene GPU · `196 µs` present · `936.3 FPS` · **`0` missed**
+
 ## v0.29.0 — Poly Haven CC0 Service Pistol (glTF 2.0 + 1K PBR), Sparse-Set ECS & ECS API, Event Bus, and Lua 5.4.7 Scripting Engine
 
 - Upgraded the Tactical Aim Range from procedural pistol geometry and monolithic C++ logic to a full **asset-driven ECS + Event Bus + Lua 5.4.7 scripting architecture** with a photorealistic open-license 3D weapon model (`src/gltf_loader.h`, `src/gltf_loader.cpp`, `src/ecs.h`, `src/ecs.cpp`, `src/event_bus.h`, `src/event_bus.cpp`, `src/lua_engine.h`, `src/lua_engine.cpp`, `src/pbr_assets.h`, `src/pbr_assets.cpp`, `src/range_mesh.h`, `src/range_mesh.cpp`, `src/tactical_range.h`, `src/tactical_range.cpp`, `shaders/range_mesh.hlsl`, `src/renderer.h`, `src/renderer.cpp`, `src/runtime_state.h`, `src/main.cpp`, `src/cli.cpp`, `CMakeLists.txt`, `assets/models/service_pistol/*`, `assets/scripts/*.lua`, `scripts/run_tactical_range_verify.ps1`):
