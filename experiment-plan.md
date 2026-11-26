@@ -95,14 +95,14 @@ Track the following frameless/perceptual rendering items as explicit, independen
 
 Execute and gate the following 10 pre-complex-shader validation experiments before investing in full triangle-mesh / complex PBR shader scenes:
 
-| Priority | Experiment | Passing criterion | Current status (`v0.23.0`) |
+| Priority | Experiment | Passing criterion | Current status (`v0.25.0`) |
 | :---: | :--- | :--- | :--- |
-| 1 | **PAR-3 sub-tile interleaving** | Better temporal quality at equivalent painting cost | Planned |
-| 2 | **PAR-5 history firewall** | No unbounded recursive degradation | Partial (authoritative `SourceSlot` cache vs. read-only synthesis enforced `v0.19.0`–`v0.23.0`; explicit long-run drift audit & fg/bg separation pending) |
-| 3 | **Damage-rate-aware scheduler** | No sustained repair backlog under feasible load | Partial (`AutoTileBudgetController` deadline loop + `age=255` provenance + `4×4` coarse fallback proven `v0.21.0`–`v0.22.0`; explicit disocclusion damage-rate floor & camera-cut burst boost pending) |
+| 1 | **PAR-3 sub-tile interleaving** | Better temporal quality at equivalent painting cost | Proven (`v0.25.0`: 4-quadrant 100%-SIMD interleaved `4×4` background refresh beat `16×16` blocks across all 4 30-frame sequences by `+0.08–0.22 dB`, higher SSIM, lower `tRMSE` flicker at matched GPU cost; `29%` less flicker than VRS Tier 2) |
+| 2 | **PAR-5 history firewall** | No unbounded recursive degradation | Proven (`v0.25.0`: 500-frame `fast_pan` audit showed non-negative drift slope `+0.13 dB/100f` standalone PAR-3 and `+0.37 dB/100f` with `reproject /4`; fg/bg 2-layer LDI remains optional upgrade) |
+| 3 | **Damage-rate-aware scheduler** | No sustained repair backlog under feasible load | Proven (`v0.25.0`: damage-rate floor + 4-frame camera-cut burst + `stress=0` auto-bypass dropped `1080p` idle cost `1,113 → 437 µs` and held `100.0%` critical coverage / `0` misses under `stress=64`) |
 | 4 | **Independent update frequencies** | Stable output with reduced visibility and shading frequencies | Partial (camera/HUD vs. scene decoupled via `reproject`/`combined` divider; decoupled visibility vs. shading vs. lighting rates pending) |
 | 5 | **Multi-resolution scaling** | Predictable performance at 1080p, 1440p and 4K | Proven (`v0.23.0`–`v0.24.0` zero-allocation per-frame DRS up/down + offscreen `1080p` `7.25×`, `1440p` `4.98×`, `4K` `4.82×` PAR / `12.24×` stacked `4K` DRS+PAR with `0` reallocations & live PAR cache survival) |
-| 6 | **Temporal video quality harness** | Quality measured across entire motion sequences | Planned (single-frame + cut-burst PSNR/SSIM/Sharpness harness exists; full multi-second sequence & FovVideoVDP harness pending) |
+| 6 | **Temporal video quality harness** | Quality measured across entire motion sequences | Proven (`v0.25.0`: zero-paused-contamination sequence stepping + automated multi-frame PSNR/SSIM/P99/`tRMSE` flicker/drift harness in `scripts/run_temporal_and_firewall_suite.ps1`; optional offline `pyfvvdp` remains bonus) |
 | 7 | **Physical display measurements** | Verified displayed cadence and input latency | Planned (requires interactive `WinSta0\Default` run with FrameView / PresentMon `MsBetweenDisplayChange`, `MsUntilDisplayed`, `MsPCLatency`) |
 | 8 | **Foreground DLSS-G validation** | Actual generated frames with acceptable quality | Partial (Streamline ARM64 `6×` MFG + Clean-Feed PAR verified with `api_error_count=0`, `0.000%` holes; interactive focused `numFramesActuallyPresented >= 2` + quality check pending) |
 | 9 | **Post-synthesis painting** | Measurable improvement over uncorrected synthesis | Planned (repairing residual holes/disocclusions after warp/synthesis rather than only pre-synthesis) |

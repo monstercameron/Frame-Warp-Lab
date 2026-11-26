@@ -170,6 +170,9 @@ public:
         bool auto_budget_enabled,
         bool cache_sharpen_enabled,
         bool coarse_fallback_enabled,
+        bool subtile_interleave_enabled,
+        bool par_bypass_active,
+        std::int32_t smoothed_damage_pct,
         std::int32_t render_scale_pct,
         std::int32_t render_width,
         std::int32_t render_height,
@@ -191,6 +194,9 @@ public:
         std::atomic_ref<std::int32_t>(state_->auto_tile_budget_enabled).store(auto_budget_enabled ? 1 : 0, std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->cache_sharpen_enabled).store(cache_sharpen_enabled ? 1 : 0, std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->coarse_fallback_enabled).store(coarse_fallback_enabled ? 1 : 0, std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->subtile_interleave_enabled).store(subtile_interleave_enabled ? 1 : 0, std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->par_bypass_active).store(par_bypass_active ? 1 : 0, std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->smoothed_damage_pct).store(smoothed_damage_pct, std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->render_scale_pct).store(render_scale_pct, std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->render_width).store(render_width, std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->render_height).store(render_height, std::memory_order_release);
@@ -699,6 +705,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         bool auto_tile_budget_enabled = false;
         bool cache_sharpen_enabled = false;
         bool coarse_fallback_enabled = false;
+        bool subtile_interleave_enabled = false;
         std::int32_t render_scale_pct = 100;
         UINT render_override_width = 0;
         UINT render_override_height = 0;
@@ -771,6 +778,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 auto_tile_budget_enabled,
                 cache_sharpen_enabled,
                 coarse_fallback_enabled,
+                subtile_interleave_enabled,
+                auto_tile_budget_enabled && auto_tile_budget.par_bypass_active(),
+                auto_tile_budget.smoothed_damage_pct(),
                 render_scale_pct,
                 static_cast<std::int32_t>(renderer.render_width()),
                 static_cast<std::int32_t>(renderer.render_height()),
@@ -1087,6 +1097,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                     } else if (command == frame_warp_lab::ControlCommand::set_coarse_fallback) {
                         coarse_fallback_enabled = message.lParam != 0;
                         runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, coarse_fallback_enabled ? 1 : 0, frame_warp_lab::ConfigKey::coarse_fallback);
+                    } else if (command == frame_warp_lab::ControlCommand::set_subtile_interleave) {
+                        subtile_interleave_enabled = message.lParam != 0;
+                        runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, subtile_interleave_enabled ? 1 : 0, frame_warp_lab::ConfigKey::subtile_interleave);
                     } else if (command == frame_warp_lab::ControlCommand::set_render_scale) {
                         drs_mode = frame_warp_lab::DrsMode::off;
                         render_scale_pct = std::clamp(static_cast<std::int32_t>(message.lParam), 25, 200);
@@ -1277,12 +1290,16 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
             renderer.poll_completed_scenes();
             const std::int32_t effective_divider = (presentation_mode == frame_warp_lab::PresentationMode::full_render
                 || presentation_mode == frame_warp_lab::PresentationMode::dlss_g) ? 1 : source_divider;
+            const bool frozen_deterministic_pause = scene_paused && !stepping_now && fixed_dt_us > 0;
             const bool need_initial_source = !renderer.has_completed_source();
-            const bool cadence_requests_scene = need_initial_source || (cadence_counter % effective_divider == 0);
-            ++cadence_counter;
+            const bool cadence_requests_scene = need_initial_source || (!frozen_deterministic_pause && (cadence_counter % effective_divider == 0));
+            if (!frozen_deterministic_pause) {
+                ++cadence_counter;
+            }
 
             const frame_warp_lab::VrsMode active_vrs_mode = renderer.resolve_effective_vrs_mode(vrs_mode);
             const bool scene_overran_cadence = cadence_requests_scene && async_gpu_enabled && renderer.has_scene_in_flight() && !need_initial_source;
+            const bool effective_selective_tiles = selective_tiles_enabled && !(auto_tile_budget_enabled && auto_tile_budget.par_bypass_active());
             bool scene_submitted_this_frame = false;
             if (cadence_requests_scene && (!renderer.has_scene_in_flight() || !async_gpu_enabled || need_initial_source)) {
                 ++source_frame_id;
@@ -1294,11 +1311,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                     capture_time,
                     stress_level,
                     vrs_mode,
-                    selective_tiles_enabled,
+                    effective_selective_tiles,
                     tile_budget_pct,
                     tile_policy,
                     cache_sharpen_enabled,
                     coarse_fallback_enabled,
+                    subtile_interleave_enabled,
                     frame_id_u64,
                     latency_monitor,
                     must_wait);
@@ -1573,7 +1591,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                     : (pacer.mode() == frame_warp_lab::PacerMode::vsync_only
                         ? frame_warp_lab::PacingOwner::dxgi_vsync
                         : frame_warp_lab::PacingOwner::unlocked));
-            if (auto_tile_budget_enabled && selective_tiles_enabled && active_source.valid) {
+            if (auto_tile_budget_enabled && selective_tiles_enabled && active_source.valid && !frozen_deterministic_pause) {
                 if (auto_tile_budget.update(
                         pacer.target_period_us(),
                         effective_divider,
@@ -1582,12 +1600,15 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                         last_present_gpu_us,
                         active_source.tile_stats.total_tiles,
                         active_source.tile_stats.shaded_tiles,
+                        active_source.tile_stats.critical_total_tiles,
+                        active_source.tile_stats.critical_deferred_tiles,
+                        frame_discontinuity,
                         gpu_metrics.missed_deadline,
                         tile_budget_pct)) {
                     hud_text_dirty = true;
                 }
             }
-            if (drs_mode != frame_warp_lab::DrsMode::off) {
+            if (drs_mode != frame_warp_lab::DrsMode::off && !frozen_deterministic_pause) {
                 bool drs_changed = false;
                 if (drs_mode == frame_warp_lab::DrsMode::sweep) {
                     drs_changed = auto_drs.update_sweep(drs_min_pct, drs_max_pct, render_scale_pct);
@@ -1622,6 +1643,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 auto_tile_budget_enabled,
                 cache_sharpen_enabled,
                 coarse_fallback_enabled,
+                subtile_interleave_enabled,
+                auto_tile_budget_enabled && auto_tile_budget.par_bypass_active(),
+                auto_tile_budget.smoothed_damage_pct(),
                 render_scale_pct,
                 static_cast<std::int32_t>(renderer.render_width()),
                 static_cast<std::int32_t>(renderer.render_height()),

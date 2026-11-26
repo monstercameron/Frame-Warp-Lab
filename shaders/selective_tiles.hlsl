@@ -441,12 +441,14 @@ void vis_classify_main(
         if (group_id.x < tiles_x && group_id.y < tiles_y) {
             uint frame_index = tile_params.w;
             uint refresh_period = max(cache_params.y, 4u);
-            bool use_priority_stbn = policy_params.x != 0u;
+            bool use_priority_stbn = (policy_params.x & 1u) != 0u;
+            bool use_subtile_interleave = (policy_params.x & 2u) != 0u;
             bool has_dirty = g_dirty_pixel_count > 0u;
             uint tile_phase = use_priority_stbn
                 ? ((lookup_stbn_phase(group_id.x, group_id.y) + frame_index) & 15u)
                 : ((group_id.x * 7u + group_id.y * 13u + frame_index) % refresh_period);
-            bool periodic_refresh = (!has_dirty) && (tile_phase == 0u || g_max_age_in_tile >= refresh_period);
+            bool periodic_trigger = use_subtile_interleave ? ((tile_phase & 3u) == 0u) : (tile_phase == 0u);
+            bool periodic_refresh = (!has_dirty) && (periodic_trigger || g_max_age_in_tile >= refresh_period);
 
             float disoccl_frac = float(g_disoccluded_count) * (1.0 / 256.0);
             float moving_frac = float(g_moving_count) * (1.0 / 256.0);
@@ -509,18 +511,39 @@ void tile_admit_main(uint3 dispatch_thread_id : SV_DispatchThreadID) {
     uint tiles_x = tile_params.x;
     uint total_tiles = policy_params.y;
     uint tile_budget = tile_params.z;
-    bool use_priority_stbn = policy_params.x != 0u;
+    bool use_priority_stbn = (policy_params.x & 1u) != 0u;
+    bool use_subtile_interleave = use_priority_stbn && ((policy_params.x & 2u) != 0u);
 
-    if (dispatch_thread_id.x == 0u) {
-        uint total_candidates = 0u;
-        [unroll]
-        for (uint b = 0u; b < 8u; ++b) {
-            total_candidates += tile_indirect_args_uav.Load(32u + b * 4u);
-        }
-        tile_indirect_args_uav.Store(0, min(total_candidates, tile_budget));
+    uint full_candidates = 0u;
+    uint inter_candidates = 0u;
+    [unroll]
+    for (uint b = 0u; b < 4u; ++b) {
+        full_candidates += tile_indirect_args_uav.Load(32u + b * 4u);
+    }
+    [unroll]
+    for (uint b2 = 4u; b2 < 8u; ++b2) {
+        inter_candidates += tile_indirect_args_uav.Load(32u + b2 * 4u);
     }
 
+    uint full_admitted = min(full_candidates, tile_budget);
+    uint rem_groups = (tile_budget > full_admitted) ? (tile_budget - full_admitted) : 0u;
+    uint inter_admitted = use_subtile_interleave ? min(inter_candidates, rem_groups * 4u) : 0u;
+    uint inter_groups = use_subtile_interleave ? ((inter_admitted + 3u) >> 2u) : 0u;
+
     uint tile_id = dispatch_thread_id.x;
+    if (tile_id == 0u) {
+        if (use_subtile_interleave) {
+            tile_indirect_args_uav.Store(0, full_admitted + inter_groups);
+            tile_candidate_meta_uav[total_tiles] = inter_admitted;
+        } else {
+            tile_indirect_args_uav.Store(0, min(full_candidates + inter_candidates, tile_budget));
+            tile_candidate_meta_uav[total_tiles] = 0u;
+        }
+    }
+    if (use_subtile_interleave && tile_id < inter_groups) {
+        dirty_tile_list_uav[full_admitted + tile_id] = 0x80000000u | tile_id;
+    }
+
     if (tile_id >= total_tiles) {
         return;
     }
@@ -536,13 +559,40 @@ void tile_admit_main(uint3 dispatch_thread_id : SV_DispatchThreadID) {
     uint tile_y = tile_id / tiles_x;
     uint tile_x = tile_id - tile_y * tiles_x;
 
+    if (use_subtile_interleave && bucket >= 4u) {
+        uint inter_bucket_start = 0u;
+        [unroll]
+        for (uint ib = 4u; ib < 8u; ++ib) {
+            if (ib < bucket) {
+                inter_bucket_start += tile_indirect_args_uav.Load(32u + ib * 4u);
+            }
+        }
+        uint inter_slot = inter_admitted;
+        if (inter_bucket_start < inter_admitted) {
+            uint local_slot = 0u;
+            tile_indirect_args_uav.InterlockedAdd(64u + bucket * 4u, 1u, local_slot);
+            inter_slot = inter_bucket_start + local_slot;
+        }
+        if (inter_slot < inter_admitted) {
+            dirty_tile_list_uav[65536u + inter_slot] = (tile_x & 0x7FFFu) | ((tile_y & 0x7FFFu) << 15u);
+            out_tile_map_uav[uint2(tile_x, tile_y)] = (state_kind & 3u) | (prio_6bit << 2u);
+            uint unused_sched;
+            tile_indirect_args_uav.InterlockedAdd(20, 1u, unused_sched);
+        } else {
+            out_tile_map_uav[uint2(tile_x, tile_y)] = 3u | (prio_6bit << 2u);
+            uint unused_def;
+            tile_indirect_args_uav.InterlockedAdd(24, 1u, unused_def);
+        }
+        return;
+    }
+
     uint global_slot = tile_budget;
     if (use_priority_stbn) {
         uint bucket_start = 0u;
         [unroll]
-        for (uint b = 0u; b < 8u; ++b) {
-            if (b < bucket) {
-                bucket_start += tile_indirect_args_uav.Load(32u + b * 4u);
+        for (uint b3 = 0u; b3 < 8u; ++b3) {
+            if (b3 < bucket) {
+                bucket_start += tile_indirect_args_uav.Load(32u + b3 * 4u);
             }
         }
         if (bucket_start < tile_budget) {
@@ -555,7 +605,7 @@ void tile_admit_main(uint3 dispatch_thread_id : SV_DispatchThreadID) {
     }
 
     if (global_slot < tile_budget) {
-        dirty_tile_list_uav[global_slot] = (tile_x & 65535u) | ((tile_y & 65535u) << 16u);
+        dirty_tile_list_uav[global_slot] = (tile_x & 0x7FFFu) | ((tile_y & 0x7FFFu) << 15u);
         out_tile_map_uav[uint2(tile_x, tile_y)] = (state_kind & 3u) | (prio_6bit << 2u);
         uint unused_sched;
         tile_indirect_args_uav.InterlockedAdd(20, 1u, unused_sched);
@@ -574,10 +624,33 @@ void tile_admit_main(uint3 dispatch_thread_id : SV_DispatchThreadID) {
 void tile_shade_main(
     uint3 group_id : SV_GroupID,
     uint3 group_thread_id : SV_GroupThreadID) {
-    uint packed_tile = dirty_tile_list_uav[group_id.x];
-    uint tile_x = packed_tile & 65535u;
-    uint tile_y = (packed_tile >> 16u) & 65535u;
-    uint2 pixel_coord = uint2(tile_x * 16u + group_thread_id.x, tile_y * 16u + group_thread_id.y);
+    uint cmd = dirty_tile_list_uav[group_id.x];
+    uint tile_x = 0u;
+    uint tile_y = 0u;
+    uint2 pixel_coord = uint2(0u, 0u);
+    if ((cmd & 0x80000000u) != 0u) {
+        uint inter_group = cmd & 0x7FFFFFFFu;
+        uint total_tiles = policy_params.y;
+        uint inter_count = tile_candidate_meta_uav[total_tiles];
+        uint quad_id = ((group_thread_id.y >> 3u) << 1u) | (group_thread_id.x >> 3u);
+        uint inter_idx = inter_group * 4u + quad_id;
+        if (inter_idx >= inter_count) {
+            return;
+        }
+        uint packed = dirty_tile_list_uav[65536u + inter_idx];
+        tile_x = packed & 0x7FFFu;
+        tile_y = (packed >> 15u) & 0x7FFFu;
+        uint sub_phase = (tile_params.w + lookup_stbn_phase(tile_x, tile_y)) & 3u;
+        uint px_off = (sub_phase == 1u || sub_phase == 2u) ? 1u : 0u;
+        uint py_off = (sub_phase == 1u || sub_phase == 3u) ? 1u : 0u;
+        pixel_coord = uint2(
+            tile_x * 16u + (group_thread_id.x & 7u) * 2u + px_off,
+            tile_y * 16u + (group_thread_id.y & 7u) * 2u + py_off);
+    } else {
+        tile_x = cmd & 0x7FFFu;
+        tile_y = (cmd >> 15u) & 0x7FFFu;
+        pixel_coord = uint2(tile_x * 16u + group_thread_id.x, tile_y * 16u + group_thread_id.y);
+    }
 
     uint viewport_width = cache_params.z;
     uint viewport_height = cache_params.w;

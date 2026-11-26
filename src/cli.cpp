@@ -303,6 +303,9 @@ int print_status(const WindowInstance& instance) {
     const std::int32_t auto_tile_budget_enabled = std::atomic_ref<std::int32_t>(state->auto_tile_budget_enabled).load(std::memory_order_acquire);
     const std::int32_t cache_sharpen_enabled = std::atomic_ref<std::int32_t>(state->cache_sharpen_enabled).load(std::memory_order_acquire);
     const std::int32_t coarse_fallback_enabled = std::atomic_ref<std::int32_t>(state->coarse_fallback_enabled).load(std::memory_order_acquire);
+    const std::int32_t subtile_interleave_enabled = std::atomic_ref<std::int32_t>(state->subtile_interleave_enabled).load(std::memory_order_acquire);
+    const std::int32_t par_bypass_active = std::atomic_ref<std::int32_t>(state->par_bypass_active).load(std::memory_order_acquire);
+    const std::int32_t smoothed_damage_pct = std::atomic_ref<std::int32_t>(state->smoothed_damage_pct).load(std::memory_order_acquire);
     const std::int32_t render_scale_pct = std::atomic_ref<std::int32_t>(state->render_scale_pct).load(std::memory_order_acquire);
     const std::int32_t render_width = std::atomic_ref<std::int32_t>(state->render_width).load(std::memory_order_acquire);
     const std::int32_t render_height = std::atomic_ref<std::int32_t>(state->render_height).load(std::memory_order_acquire);
@@ -328,7 +331,7 @@ int print_status(const WindowInstance& instance) {
 
     RECT client_rectangle{};
     const bool has_client_size = GetClientRect(instance.window, &client_rectangle) != 0;
-    std::cout << "{\"ok\":true,\"schema_version\":18,\"process_id\":" << instance.process_id
+    std::cout << "{\"ok\":true,\"schema_version\":19,\"process_id\":" << instance.process_id
               << ",\"running\":" << (running ? "true" : "false")
               << ",\"present_calls_completed\":" << present_count
               << ",\"display_frame_id\":" << display_frame_id
@@ -438,6 +441,9 @@ int print_status(const WindowInstance& instance) {
               << ",\"auto_budget_enabled\":" << (auto_tile_budget_enabled ? "true" : "false")
               << ",\"cache_sharpen_enabled\":" << (cache_sharpen_enabled ? "true" : "false")
               << ",\"coarse_fallback_enabled\":" << (coarse_fallback_enabled ? "true" : "false")
+              << ",\"subtile_interleave_enabled\":" << (subtile_interleave_enabled ? "true" : "false")
+              << ",\"par_bypass_active\":" << (par_bypass_active ? "true" : "false")
+              << ",\"smoothed_damage_pct\":" << smoothed_damage_pct
               << ",\"target_scene_budget_us\":" << target_scene_budget_us
               << ",\"tile_size_px\":16"
               << ",\"budget_pct\":" << tile_budget_pct
@@ -464,9 +470,9 @@ int print_status(const WindowInstance& instance) {
               << ",\"scale_changes\":" << drs_scale_changes
               << ",\"reallocations\":" << drs_reallocations
               << ",\"target_scene_budget_us\":" << drs_target_scene_budget_us << "}"
-              << ",\"features\":{\"scene\":\"cpu_camera_gbuffer\",\"offscreen_upscaling\":\"zero_alloc_per_frame_drs_subrect_bilinear_catmull_cas_nearest\",\"selective_tiles\":\"par_priority_stbn_auto_budget_trm_coarse_16x16\",\"hud\":\"2d_frametime_graph_and_readout\",\"async_gpu\":\"dual_queue_3slot_ring\",\"reprojection\":\"depth_camera_warp\",\"nvidia_pcl_markers\":\"etw_and_streamline_pcl\",\"frame_generation\":\"mv_extrapolation_temporal_and_dlss_g\",\"dlss_g_inputs\":\"3slot_aligned_hudless_clipdepth_motion\",\"vrs\":\""
+              << ",\"features\":{\"scene\":\"cpu_camera_gbuffer\",\"offscreen_upscaling\":\"zero_alloc_per_frame_drs_subrect_bilinear_catmull_cas_nearest\",\"selective_tiles\":\"par3_subtile_interleave_damage_aware_bypass_trm_coarse\",\"hud\":\"2d_frametime_graph_and_readout\",\"async_gpu\":\"dual_queue_3slot_ring\",\"reprojection\":\"depth_camera_warp\",\"nvidia_pcl_markers\":\"etw_and_streamline_pcl\",\"frame_generation\":\"mv_extrapolation_temporal_and_dlss_g\",\"dlss_g_inputs\":\"3slot_aligned_hudless_clipdepth_motion\",\"vrs\":\""
               << (vrs_tier >= 2 ? "tier1_and_tier2_foveated_image" : vrs_tier == 1 ? "tier1_per_draw" : "unsupported")
-              << "\",\"adaptive_scheduler\":\"unified_vrs_dlss_warp_ladder\",\"ipc\":\"seqlock_v23\",\"shaders\":\"dxc_sm6_0_wave_specialized\"}}\n";
+              << "\",\"adaptive_scheduler\":\"unified_vrs_dlss_warp_ladder\",\"ipc\":\"seqlock_v24\",\"shaders\":\"dxc_sm6_0_wave_specialized\"}}\n";
     return 0;
 }
 
@@ -479,7 +485,7 @@ int print_events(const WindowInstance& instance) {
     const std::int32_t event_count = std::atomic_ref<std::int32_t>(state->event_count).load(std::memory_order_acquire);
     const std::int32_t first_sequence = event_count > static_cast<std::int32_t>(frame_warp_lab::runtime_event_capacity)
         ? event_count - static_cast<std::int32_t>(frame_warp_lab::runtime_event_capacity) + 1 : 1;
-    std::cout << "{\"ok\":true,\"schema_version\":18,\"process_id\":" << instance.process_id
+    std::cout << "{\"ok\":true,\"schema_version\":19,\"process_id\":" << instance.process_id
               << ",\"capacity\":" << frame_warp_lab::runtime_event_capacity << ",\"total_events\":" << event_count << ",\"events\":[";
     bool first_event = true;
     for (std::int32_t sequence = first_sequence; sequence <= event_count; ++sequence) {
@@ -582,7 +588,7 @@ int print_trace(const WindowInstance& instance, std::size_t max_samples, bool in
         if (copy.missed_deadline) ++missed_deadline_count;
     }
 
-    std::cout << "{\"ok\":true,\"schema_version\":18,\"process_id\":" << instance.process_id
+    std::cout << "{\"ok\":true,\"schema_version\":19,\"process_id\":" << instance.process_id
               << ",\"capacity\":" << frame_warp_lab::runtime_frame_trace_capacity
               << ",\"total_frames_recorded\":" << total_samples
               << ",\"sample_count\":" << captured.size()
@@ -836,6 +842,11 @@ int apply_setting(const WindowInstance& instance, const std::wstring& key, const
         if (value == L"on" || value == L"1" || value == L"true") parameter = 1;
         else if (value == L"off" || value == L"0" || value == L"false") parameter = 0;
         else return fail("invalid_value", "Expected coarse_fallback in {on, off}");
+    } else if (key == L"subtile_interleave") {
+        command = frame_warp_lab::ControlCommand::set_subtile_interleave;
+        if (value == L"on" || value == L"1" || value == L"true") parameter = 1;
+        else if (value == L"off" || value == L"0" || value == L"false") parameter = 0;
+        else return fail("invalid_value", "Expected subtile_interleave in {on, off}");
     } else if (key == L"render_scale") {
         unsigned long parsed = 0;
         if (!parse_unsigned_long(value.c_str(), parsed) || parsed < 25UL || parsed > 200UL) {
@@ -878,7 +889,7 @@ int apply_setting(const WindowInstance& instance, const std::wstring& key, const
         command = frame_warp_lab::ControlCommand::set_fixed_dt_us;
         parameter = static_cast<LPARAM>(parsed);
     } else {
-        return fail("unknown_setting", "Supported settings are: mode, dlssg_mult, pacer, target_fps, async_gpu, vrs, selective_tiles, tile_budget, tile_policy, auto_tile_budget, cache_sharpen, coarse_fallback, render_scale, upscale_filter, drs, drs_min, drs_max, fixed_dt_us, adaptive, adaptive_dlssg, instrumentation, divider, vsync, view, path, stress, overlay, flash");
+        return fail("unknown_setting", "Supported settings are: mode, dlssg_mult, pacer, target_fps, async_gpu, vrs, selective_tiles, tile_budget, tile_policy, auto_tile_budget, cache_sharpen, coarse_fallback, subtile_interleave, render_scale, upscale_filter, drs, drs_min, drs_max, fixed_dt_us, adaptive, adaptive_dlssg, instrumentation, divider, vsync, view, path, stress, overlay, flash");
     }
 
     if (!PostMessageW(instance.window, frame_warp_lab::control_message, static_cast<WPARAM>(command), parameter)) {
@@ -1131,14 +1142,14 @@ int set_instance_render_size(const WindowInstance& instance, std::uint32_t width
 
 int wmain(int argument_count, wchar_t** arguments) {
     if (argument_count == 2 && std::wstring(arguments[1]) == L"help") {
-        std::cout << "{\"ok\":true,\"schema_version\":18,\"commands\":[\"help\",\"start\",\"instances\",\"status <pid>\",\"events <pid>\",\"trace <pid> [limit] [summary]\",\"set <pid> <key> <value>\",\"resize <pid> <width> <height>\",\"render_size <pid> <width> <height>\",\"step <pid> <frames>\",\"capture <pid> <tag> [step_frames]\",\"pause <pid>\",\"resume <pid>\",\"reset <pid>\",\"stop <pid>\",\"capabilities\"],\"settings\":{\"mode\":[\"full_render\",\"repeat\",\"reproject\",\"frame_gen\",\"combined\",\"dlss_g\",\"dlss_g_warp\"],\"dlssg_mult\":[\"2\",\"3\",\"4\",\"5\",\"6\",\"dynamic\"],\"pacer\":[\"deadline\",\"vsync_only\",\"unlocked\"],\"target_fps\":\"0 or 30..500\",\"async_gpu\":[\"on\",\"off\"],\"vrs\":[\"off\",\"uniform_2x2\",\"foveated\"],\"selective_tiles\":[\"on\",\"off\"],\"tile_budget\":\"5..100\",\"tile_policy\":[\"fifo\",\"priority_stbn\"],\"auto_tile_budget\":[\"on\",\"off\"],\"cache_sharpen\":[\"on\",\"off\"],\"coarse_fallback\":[\"on\",\"off\"],\"render_scale\":\"25..200\",\"upscale_filter\":[\"bilinear\",\"catmull_rom\",\"cas\",\"nearest\"],\"drs\":[\"off\",\"auto\",\"sweep\"],\"drs_min\":\"25..200\",\"drs_max\":\"25..200\",\"fixed_dt_us\":\"0..100000\",\"adaptive\":[\"on\",\"off\"],\"adaptive_dlssg\":[\"on\",\"off\"],\"instrumentation\":[\"minimal\",\"standard\",\"diagnostic\"],\"divider\":\"1..8\",\"vsync\":[\"on\",\"off\"],\"view\":[\"final\",\"depth\",\"motion\",\"holes\",\"vrs\",\"tiles\",\"priority\"],\"path\":[\"corridor_sway\",\"fast_pan\",\"occlusion_sweep\",\"camera_cut\",\"manual\",\"pure_rotation\"],\"stress\":\"0..64\",\"overlay\":[\"on\",\"off\"],\"flash\":[\"on\",\"off\"]}}\n";
+        std::cout << "{\"ok\":true,\"schema_version\":19,\"commands\":[\"help\",\"start\",\"instances\",\"status <pid>\",\"events <pid>\",\"trace <pid> [limit] [summary]\",\"set <pid> <key> <value>\",\"resize <pid> <width> <height>\",\"render_size <pid> <width> <height>\",\"step <pid> <frames>\",\"capture <pid> <tag> [step_frames]\",\"pause <pid>\",\"resume <pid>\",\"reset <pid>\",\"stop <pid>\",\"capabilities\"],\"settings\":{\"mode\":[\"full_render\",\"repeat\",\"reproject\",\"frame_gen\",\"combined\",\"dlss_g\",\"dlss_g_warp\"],\"dlssg_mult\":[\"2\",\"3\",\"4\",\"5\",\"6\",\"dynamic\"],\"pacer\":[\"deadline\",\"vsync_only\",\"unlocked\"],\"target_fps\":\"0 or 30..500\",\"async_gpu\":[\"on\",\"off\"],\"vrs\":[\"off\",\"uniform_2x2\",\"foveated\"],\"selective_tiles\":[\"on\",\"off\"],\"tile_budget\":\"5..100\",\"tile_policy\":[\"fifo\",\"priority_stbn\"],\"auto_tile_budget\":[\"on\",\"off\"],\"cache_sharpen\":[\"on\",\"off\"],\"coarse_fallback\":[\"on\",\"off\"],\"subtile_interleave\":[\"on\",\"off\"],\"render_scale\":\"25..200\",\"upscale_filter\":[\"bilinear\",\"catmull_rom\",\"cas\",\"nearest\"],\"drs\":[\"off\",\"auto\",\"sweep\"],\"drs_min\":\"25..200\",\"drs_max\":\"25..200\",\"fixed_dt_us\":\"0..100000\",\"adaptive\":[\"on\",\"off\"],\"adaptive_dlssg\":[\"on\",\"off\"],\"instrumentation\":[\"minimal\",\"standard\",\"diagnostic\"],\"divider\":\"1..8\",\"vsync\":[\"on\",\"off\"],\"view\":[\"final\",\"depth\",\"motion\",\"holes\",\"vrs\",\"tiles\",\"priority\"],\"path\":[\"corridor_sway\",\"fast_pan\",\"occlusion_sweep\",\"camera_cut\",\"manual\",\"pure_rotation\"],\"stress\":\"0..64\",\"overlay\":[\"on\",\"off\"],\"flash\":[\"on\",\"off\"]}}\n";
         return 0;
     }
     if (argument_count == 2 && std::wstring(arguments[1]) == L"capabilities") return print_capabilities();
     if (argument_count == 2 && std::wstring(arguments[1]) == L"start") return start_instance();
     const auto instances = find_instances();
     if (argument_count == 2 && std::wstring(arguments[1]) == L"instances") {
-        std::cout << "{\"ok\":true,\"schema_version\":18,\"instances\":[";
+        std::cout << "{\"ok\":true,\"schema_version\":19,\"instances\":[";
         for (std::size_t index = 0; index < instances.size(); ++index) {
             if (index) std::cout << ',';
             std::cout << "{\"process_id\":" << instances[index].process_id << "}";

@@ -241,13 +241,19 @@ public:
     void reset() {
         smoothed_scene_us_ = 0.0;
         smoothed_present_us_ = 80.0;
+        smoothed_damage_pct_ = 0.0;
         has_sample_ = false;
         last_source_frame_id_ = -1;
         last_target_scene_budget_us_ = 0;
         stable_low_streak_ = 0;
+        bypass_low_streak_ = 0;
+        cut_burst_frames_ = 0;
+        par_bypass_active_ = false;
     }
 
     std::int64_t last_target_scene_budget_us() const { return last_target_scene_budget_us_; }
+    bool par_bypass_active() const { return par_bypass_active_; }
+    std::int32_t smoothed_damage_pct() const { return static_cast<std::int32_t>(std::lround(smoothed_damage_pct_)); }
 
     bool update(
         std::int64_t target_period_us,
@@ -257,6 +263,9 @@ public:
         std::int64_t present_gpu_us,
         std::uint32_t total_tiles,
         std::uint32_t shaded_tiles,
+        std::uint32_t critical_total_tiles,
+        std::uint32_t critical_deferred_tiles,
+        bool discontinuity,
         bool missed_deadline,
         std::int32_t& in_out_budget_pct) {
         const double period_us = static_cast<double>(std::max<std::int64_t>(target_period_us, 1000LL));
@@ -268,7 +277,10 @@ public:
         const double target_scene_us = std::max(450.0, period_us * cadence - smoothed_present_us_ - headroom_us);
         last_target_scene_budget_us_ = static_cast<std::int64_t>(target_scene_us);
 
-        if (scene_gpu_us < 0 || source_frame_id == last_source_frame_id_ || total_tiles == 0U) {
+        if (discontinuity) {
+            cut_burst_frames_ = 4;
+        }
+        if (scene_gpu_us < 0 || source_frame_id == last_source_frame_id_) {
             return false;
         }
         last_source_frame_id_ = source_frame_id;
@@ -279,6 +291,27 @@ public:
             smoothed_scene_us_ = smoothed_scene_us_ * 0.65 + static_cast<double>(scene_gpu_us) * 0.35;
         }
 
+        if (par_bypass_active_) {
+            if (static_cast<double>(scene_gpu_us) > target_scene_us * 0.55 || smoothed_scene_us_ > target_scene_us * 0.45 || missed_deadline) {
+                par_bypass_active_ = false;
+                bypass_low_streak_ = 0;
+                const double scale = (target_scene_us * 0.72) / std::max(static_cast<double>(scene_gpu_us), 1.0);
+                in_out_budget_pct = std::clamp(static_cast<std::int32_t>(100.0 * scale), 10, 100);
+                return true;
+            }
+            return false;
+        }
+
+        if (total_tiles == 0U) {
+            return false;
+        }
+
+        const double instant_damage_pct = std::clamp(
+            (100.0 * static_cast<double>(critical_total_tiles)) / static_cast<double>(total_tiles),
+            0.0,
+            100.0);
+        smoothed_damage_pct_ = smoothed_damage_pct_ * 0.70 + instant_damage_pct * 0.30;
+
         const double actual_shaded_pct = std::clamp(
             (100.0 * static_cast<double>(shaded_tiles)) / static_cast<double>(total_tiles),
             5.0,
@@ -287,6 +320,7 @@ public:
 
         if (smoothed_scene_us_ > target_scene_us * 0.90 || (missed_deadline && smoothed_scene_us_ > target_scene_us * 0.70)) {
             stable_low_streak_ = 0;
+            bypass_low_streak_ = 0;
             const double scale = (target_scene_us * 0.78) / std::max(smoothed_scene_us_, 1.0);
             const double anchor_pct = std::min(static_cast<double>(in_out_budget_pct), std::max(actual_shaded_pct, 8.0));
             const auto tightened = std::clamp(static_cast<std::int32_t>(anchor_pct * scale), 5, 100);
@@ -294,16 +328,42 @@ public:
             return in_out_budget_pct != previous_budget;
         }
 
+        const std::int32_t damage_floor = std::clamp(static_cast<std::int32_t>(std::ceil(smoothed_damage_pct_)) + 2, 5, 100);
+        if (cut_burst_frames_ > 0) {
+            --cut_burst_frames_;
+            const std::int32_t burst_floor = std::max(damage_floor, 25);
+            if (in_out_budget_pct < burst_floor && smoothed_scene_us_ < target_scene_us * 0.85) {
+                in_out_budget_pct = burst_floor;
+                return in_out_budget_pct != previous_budget;
+            }
+        }
+
+        if (critical_deferred_tiles > 0U && in_out_budget_pct < damage_floor && smoothed_scene_us_ < target_scene_us * 0.82) {
+            in_out_budget_pct = std::min(100, std::max(in_out_budget_pct + 4, damage_floor));
+            stable_low_streak_ = 0;
+            bypass_low_streak_ = 0;
+            return in_out_budget_pct != previous_budget;
+        }
+
         if (smoothed_scene_us_ < target_scene_us * 0.72 && in_out_budget_pct < 100) {
             ++stable_low_streak_;
+            bypass_low_streak_ = 0;
             if (stable_low_streak_ >= 6) {
                 const std::int32_t step = smoothed_scene_us_ < target_scene_us * 0.48 ? 5 : 2;
                 in_out_budget_pct = std::min(100, in_out_budget_pct + step);
                 stable_low_streak_ = 0;
                 return in_out_budget_pct != previous_budget;
             }
+        } else if (in_out_budget_pct >= 100 && smoothed_scene_us_ < target_scene_us * 0.25 && static_cast<double>(scene_gpu_us) < 1500.0) {
+            ++bypass_low_streak_;
+            if (bypass_low_streak_ >= 14) {
+                par_bypass_active_ = true;
+                bypass_low_streak_ = 0;
+                return true;
+            }
         } else {
             stable_low_streak_ = 0;
+            bypass_low_streak_ = 0;
         }
         return false;
     }
@@ -311,10 +371,14 @@ public:
 private:
     double smoothed_scene_us_ = 0.0;
     double smoothed_present_us_ = 80.0;
+    double smoothed_damage_pct_ = 0.0;
     bool has_sample_ = false;
     std::int64_t last_source_frame_id_ = -1;
     std::int64_t last_target_scene_budget_us_ = 0;
     std::int32_t stable_low_streak_ = 0;
+    std::int32_t bypass_low_streak_ = 0;
+    std::int32_t cut_burst_frames_ = 0;
+    bool par_bypass_active_ = false;
 };
 
 class AutoDrsController {

@@ -131,6 +131,7 @@ public:
         TilePolicy tile_policy,
         bool cache_sharpen_enabled,
         bool coarse_fallback_enabled,
+        bool subtile_interleave_enabled,
         std::uint64_t frame_id,
         LatencyMonitor& latency_monitor,
         bool wait_for_completion);
@@ -164,7 +165,7 @@ private:
     static constexpr UINT source_slot_count = 3;
     static constexpr UINT targets_per_source_slot = 3;
     static constexpr UINT compute_descriptors_per_source_slot = 8;
-    static constexpr UINT max_dirty_tile_capacity = 65536;
+    static constexpr UINT max_dirty_tile_capacity = 131072;
     static constexpr UINT tile_indirect_u32_count = 24;
     static constexpr UINT tile_stats_readback_u32_count = 16;
     static constexpr UINT timestamps_per_pass = 2;

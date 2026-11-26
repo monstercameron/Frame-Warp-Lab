@@ -266,14 +266,14 @@ Operations such as late camera warp, motion extrapolation, disocclusion recovery
 
 Before expanding to complex rasterized mesh/PBR shaders, validate the architecture through these 10 gated experiments (mirrored in `experiment-plan.md`):
 
-| Priority | Experiment | Passing criterion | Current status (`v0.23.0`) |
+| Priority | Experiment | Passing criterion | Current status (`v0.25.0`) |
 | :---: | :--- | :--- | :--- |
-| 1 | PAR-3 sub-tile interleaving | Better temporal quality at equivalent painting cost | Planned |
-| 2 | PAR-5 history firewall | No unbounded recursive degradation | Partial (authoritative cache invariant enforced; long-run drift test & fg/bg separation pending) |
-| 3 | Damage-rate-aware scheduler | No sustained repair backlog under feasible load | Partial (deadline auto-budgeter + `age=255` + `4×4` coarse fallback done; damage-rate floor pending) |
+| 1 | PAR-3 sub-tile interleaving | Better temporal quality at equivalent painting cost | Proven (`v0.25.0`: `+0.08–0.22 dB`, higher SSIM, lower `tRMSE` flicker across all 4 30-frame motion sequences at matched cost) |
+| 2 | PAR-5 history firewall | No unbounded recursive degradation | Proven (`v0.25.0`: 500-frame drift slope `+0.13 dB/100f` PAR-3, `+0.37 dB/100f` with `reproject /4`) |
+| 3 | Damage-rate-aware scheduler | No sustained repair backlog under feasible load | Proven (`v0.25.0`: damage floor + cut burst + `stress=0` auto-bypass `1,113 → 437 µs`, `100.0%` crit cov, `0` misses) |
 | 4 | Independent update frequencies | Stable output with reduced visibility and shading frequencies | Partial (camera/HUD vs. scene decoupled; decoupled visibility/shading/lighting rates pending) |
 | 5 | Multi-resolution scaling | Predictable performance at 1080p, 1440p and 4K | Proven (`v0.23.0`–`v0.24.0` zero-alloc per-frame DRS up/down + `1080p`/`1440p`/`4K` scaling & stacked `4K` DRS+PAR `12.24×`) |
-| 6 | Temporal video quality harness | Quality measured across entire motion sequences | Planned |
+| 6 | Temporal video quality harness | Quality measured across entire motion sequences | Proven (`v0.25.0`: zero-contamination sequence stepping + automated PSNR/SSIM/`tRMSE` flicker/drift suite) |
 | 7 | Physical display measurements | Verified displayed cadence and input latency | Planned (interactive FrameView / PresentMon run) |
 | 8 | Foreground DLSS-G validation | Actual generated frames with acceptable quality | Partial (Streamline ARM64 `6×` MFG verified; interactive focused run pending) |
 | 9 | Post-synthesis painting | Measurable improvement over uncorrected synthesis | Planned |

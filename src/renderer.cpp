@@ -557,6 +557,7 @@ bool Renderer::submit_scene_async(
     TilePolicy tile_policy,
     bool cache_sharpen_enabled,
     bool coarse_fallback_enabled,
+    bool subtile_interleave_enabled,
     std::uint64_t frame_id,
     LatencyMonitor& latency_monitor,
     bool wait_for_completion) {
@@ -637,9 +638,11 @@ bool Renderer::submit_scene_async(
     const UINT prev_active_h = can_use_prev_cache && source_slots_[static_cast<std::size_t>(prev_slot_index)].active_height > 0U
         ? source_slots_[static_cast<std::size_t>(prev_slot_index)].active_height
         : render_height_;
+    const std::uint32_t policy_flags = (tile_policy == TilePolicy::priority_stbn ? 1U : 0U)
+        | (subtile_interleave_enabled ? 2U : 0U);
     simd::store_uint4(
         scene_constants->policy_params,
-        tile_policy == TilePolicy::priority_stbn ? 1U : 0U,
+        policy_flags,
         total_tiles,
         cache_sharpen_enabled ? 1U : 0U,
         coarse_fallback_enabled ? 1U : 0U);
@@ -712,8 +715,9 @@ bool Renderer::submit_scene_async(
         scene_command_list_->SetPipelineState(tile_admit_pipeline_.Get());
         scene_command_list_->Dispatch((total_tiles + 255U) / 256U, 1, 1);
 
-        const std::array<D3D12_RESOURCE_BARRIER, 6> mid_barriers = {
+        const std::array<D3D12_RESOURCE_BARRIER, 7> mid_barriers = {
             uav_barrier(dirty_tile_list_uav_.Get()),
+            uav_barrier(tile_candidate_meta_uav_.Get()),
             uav_barrier(slot.color_target.Get()),
             uav_barrier(slot.depth_target.Get()),
             uav_barrier(slot.vis_target.Get()),
