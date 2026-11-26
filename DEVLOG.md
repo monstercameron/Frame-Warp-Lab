@@ -1,5 +1,10 @@
 # Development log
 
+## v0.10.1 — Record 10-step prioritized experiment roadmap
+
+- Added the 10-step prioritized experiment sequence (from physical display timing instrumentation and independent render/warp scheduling through motion-vector extrapolation, temporal history, guard bands, independent frame generation, VRS/dynamic resolution, adaptive scheduling, resolution scaling benchmarks, and complex game-like workloads) to `research.md` and `experiment-plan.md`.
+- Documentation-only change; verified with `git diff --check`. No code or binaries were modified.
+
 ## v0.10.0 — ARM64 NEON SIMD hot paths and HLSL shader optimization pass
 
 - Added `src/simd_math.h` providing native ARM64 NEON (`<arm64_neon.h>`, reported as `simd_backend: "arm64_neon"` in CLI `capabilities`) with portable scalar fallback:

@@ -98,6 +98,23 @@ Record separately: full scene FPS and frame-time distribution; actual displayed 
 
 PresentMon can capture Windows CPU, GPU and display-related metrics, but documents limitations including GPU timing accuracy with hardware-accelerated GPU scheduling. NVIDIA recommends FrameView's displayed-change metric for DLSS-G pacing because present-call timing alone can be misleading.
 
+## Prioritized experiment roadmap
+
+Execute the following ten experiments in priority order, validating each step with controlled measurements and recording limitations before advancing:
+
+| Priority | Experiment | Purpose |
+| :--- | :--- | :--- |
+| 1 | Physical display timing instrumentation | Establish whether every refresh actually contains a useful update. |
+| 2 | Independent rendering and warp scheduling | Prove that reprojection survives render workload spikes. |
+| 3 | Motion-vector extrapolation | Update moving objects independently of camera movement. |
+| 4 | Temporal color and depth history | Recover disoccluded surfaces. |
+| 5 | Oversized render guard bands | Reduce missing information during fast camera rotations. |
+| 6 | Independent frame-generation implementation | Retain control over synthesis and presentation ordering. |
+| 7 | VRS and dynamic resolution | Protect rendering and warp deadlines. |
+| 8 | Adaptive deadline-aware scheduler | Select rendering, generation, warp or fallback dynamically. |
+| 9 | 1080p, 1440p and 4K benchmarks | Establish scaling characteristics. |
+| 10 | Complex game-like workloads | Validate practical viability. |
+
 ## Machine observation
 
 On 26 November 2026, `nvidia-smi` and the D3D12 capability query reported an `NVIDIA RTX Spark N1X (6144-core Blackwell RTX GPU)` in WDDM mode (driver `621.40`, `98290 MiB` dedicated VRAM), `DXGI_FEATURE_PRESENT_ALLOW_TEARING` supported, and D3D12 Variable Rate Shading **Tier 2** (`additional_shading_rates_supported: true`, `tile_size_px: 16`). Native ARM64 NVIDIA binaries are present on this machine: `C:\Windows\System32\nvapia64.dll`, `C:\Program Files\NVIDIA Corporation\FrameViewSDK\bin\FvSDK_arm64.dll` (and `SDK\Public_Release\ARM64\FvSDK_ARM64.lib`), `PresentMon_arm64.exe`, and `nvrla.exe`; NVIDIA Streamline `v2.14.16` also publishes official `streamline-sdk-v2.14.16-aarch64.zip` and `arm64ec` releases (DLSS-G runtime plugin behavior on this GPU remains to be tested). Active Windows display mode on `\\.\DISPLAY6` enumerated as `2880x1800` at nominal `120 Hz` (enumerated max `120 Hz` at active resolution; physical monitor upper bound and displayed scanout timing remain unverified). Local Python is ARM64. Initial `v0.6.0`–`v0.8.0` Motion Lab runs measured depth-based camera reprojection GPU cost at ~43–129 µs (`1264x681`), invalid/disoccluded pixel ratios scaling from ~0.08% (`occlusion_sweep`, 60->120 Hz) to ~1.95% median / ~3.99% max (`fast_pan`, 30->120 Hz), and wait-before-input loop ordering reducing `cpu_source_age_us` median from 8,330 µs to 985 µs.

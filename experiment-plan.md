@@ -43,6 +43,21 @@ NVIDIA Streamline/DLSS-G can control its own swap chain, pacing and generated fr
 - Test VRS at full-rate and controlled coarse rates or masks where supported. Inspect shading-rate boundaries, fine edges, motion and the effect on generated or warped frames. Compare dynamic resolution at matched pacing and workload.
 - Preserve pacing first and the chosen latency criteria second. Rank quality changes using predefined metrics and visual inspection. Report the workload and conditions where the tradeoff stops meeting the criteria.
 
+## Prioritized experiment sequence
+
+| Priority | Experiment | Purpose |
+| :--- | :--- | :--- |
+| 1 | Physical display timing instrumentation | Establish whether every refresh actually contains a useful update. |
+| 2 | Independent rendering and warp scheduling | Prove that reprojection survives render workload spikes. |
+| 3 | Motion-vector extrapolation | Update moving objects independently of camera movement. |
+| 4 | Temporal color and depth history | Recover disoccluded surfaces. |
+| 5 | Oversized render guard bands | Reduce missing information during fast camera rotations. |
+| 6 | Independent frame-generation implementation | Retain control over synthesis and presentation ordering. |
+| 7 | VRS and dynamic resolution | Protect rendering and warp deadlines. |
+| 8 | Adaptive deadline-aware scheduler | Select rendering, generation, warp or fallback dynamically. |
+| 9 | 1080p, 1440p and 4K benchmarks | Establish scaling characteristics. |
+| 10 | Complex game-like workloads | Validate practical viability. |
+
 ## Experiment progression and CLI
 
 1. Build agent-accessible, structured logging and CLI inspection/control alongside the baseline. Expose supported and unavailable capabilities, display target, configuration, run lifecycle, per-frame correlation and bounded trace capture. See `AGENTS.md` for the full interface requirements.
