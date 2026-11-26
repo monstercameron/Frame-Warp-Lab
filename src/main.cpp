@@ -4,9 +4,12 @@
 #include <dxgi1_6.h>
 #include <wrl/client.h>
 
+#include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <stdexcept>
 #include <string>
@@ -26,8 +29,8 @@ void check(HRESULT result, const char* operation) {
 
 class Handle {
 public:
-    explicit Handle(HANDLE value) : value_(value) {
-        if (!value_) throw std::system_error(static_cast<int>(GetLastError()), std::system_category(), "CreateEvent");
+    Handle(HANDLE value, const char* operation) : value_(value) {
+        if (!value_) throw std::system_error(static_cast<int>(GetLastError()), std::system_category(), operation);
     }
     ~Handle() { CloseHandle(value_); }
     Handle(const Handle&) = delete;
@@ -41,44 +44,50 @@ class RuntimeStatePublisher {
 public:
     RuntimeStatePublisher()
         : mapping_(CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0,
-                                     sizeof(frame_warp_lab::RuntimeState),
-                                     frame_warp_lab::runtime_mapping_name(GetCurrentProcessId()).c_str())) {
+                                      sizeof(frame_warp_lab::RuntimeState),
+                                      frame_warp_lab::runtime_mapping_name(GetCurrentProcessId()).c_str()),
+                   "Create runtime state mapping") {
         state_ = static_cast<frame_warp_lab::RuntimeState*>(MapViewOfFile(mapping_.get(), FILE_MAP_ALL_ACCESS, 0, 0, sizeof(frame_warp_lab::RuntimeState)));
         if (!state_) throw std::system_error(static_cast<int>(GetLastError()), std::system_category(), "Map runtime state");
-        state_->version = frame_warp_lab::runtime_state_version;
-        state_->process_id = GetCurrentProcessId();
-        InterlockedExchange(&state_->present_count, 0);
-        InterlockedExchange(&state_->resize_count, 0);
-        InterlockedExchange(&state_->running, 1);
-        record_event(1, 0);
+        std::memset(state_, 0, sizeof(frame_warp_lab::RuntimeState));
+        std::atomic_ref<std::uint32_t>(state_->process_id).store(GetCurrentProcessId(), std::memory_order_relaxed);
+        std::atomic_ref<std::int32_t>(state_->running).store(1, std::memory_order_relaxed);
+        std::atomic_ref<std::uint32_t>(state_->version).store(frame_warp_lab::runtime_state_version, std::memory_order_release);
+        record_event(frame_warp_lab::RuntimeEventType::runtime_started, 0);
     }
     ~RuntimeStatePublisher() {
-        record_event(3, 0);
-        InterlockedExchange(&state_->running, 0);
+        record_event(frame_warp_lab::RuntimeEventType::runtime_stopping, 0);
+        std::atomic_ref<std::int32_t>(state_->running).store(0, std::memory_order_release);
         UnmapViewOfFile(state_);
     }
-    void record_present() { InterlockedIncrement(&state_->present_count); }
-    void update_scene(float scene_time_seconds, bool paused) {
-        InterlockedExchange(&state_->scene_time_ms, static_cast<LONG>(scene_time_seconds * 1000.0f));
-        InterlockedExchange(&state_->scene_paused, paused ? 1 : 0);
+    void record_present() {
+        std::atomic_ref<std::int32_t>(state_->present_count).fetch_add(1, std::memory_order_release);
+    }
+    void update_scene(double scene_time_seconds, bool paused) {
+        std::atomic_ref<std::int64_t>(state_->scene_time_ms).store(static_cast<std::int64_t>(scene_time_seconds * 1000.0), std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->scene_paused).store(paused ? 1 : 0, std::memory_order_release);
     }
     void record_resize() {
-        const LONG resize_count = InterlockedIncrement(&state_->resize_count);
-        record_event(2, resize_count);
+        const std::int32_t resize_count = std::atomic_ref<std::int32_t>(state_->resize_count).fetch_add(1, std::memory_order_acq_rel) + 1;
+        record_event(frame_warp_lab::RuntimeEventType::swap_chain_resized, resize_count);
+    }
+    void record_scene_event(frame_warp_lab::RuntimeEventType event_type, std::int32_t value) {
+        record_event(event_type, value);
     }
 private:
-    void record_event(LONG event_type, LONG value) {
-        const LONG event_sequence = state_->event_count + 1;
+    void record_event(frame_warp_lab::RuntimeEventType event_type, std::int32_t value) {
+        const std::int32_t event_sequence = std::atomic_ref<std::int32_t>(state_->event_count).load(std::memory_order_relaxed) + 1;
         auto& event = state_->events[(static_cast<std::size_t>(event_sequence) - 1) % frame_warp_lab::runtime_event_capacity];
-        InterlockedExchange(&event.sequence, 0);
+        std::atomic_ref<std::int32_t>(event.sequence).store(0, std::memory_order_release);
+        std::atomic_thread_fence(std::memory_order_release);
         FILETIME timestamp{};
         GetSystemTimeAsFileTime(&timestamp);
         event.timestamp_low = timestamp.dwLowDateTime;
         event.timestamp_high = timestamp.dwHighDateTime;
-        event.event_type = event_type;
+        event.event_type = static_cast<std::int32_t>(event_type);
         event.value = value;
-        InterlockedExchange(&event.sequence, event_sequence);
-        InterlockedExchange(&state_->event_count, event_sequence);
+        std::atomic_ref<std::int32_t>(event.sequence).store(event_sequence, std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->event_count).store(event_sequence, std::memory_order_release);
     }
     Handle mapping_;
     frame_warp_lab::RuntimeState* state_ = nullptr;
@@ -86,7 +95,7 @@ private:
 
 class Renderer {
 public:
-    explicit Renderer(HWND window) : fence_completion_event_(CreateEventW(nullptr, FALSE, FALSE, nullptr)) {
+    explicit Renderer(HWND window) : fence_completion_event_(CreateEventW(nullptr, FALSE, FALSE, nullptr), "Create fence event") {
         UINT flags = 0;
 #if defined(_DEBUG)
         ComPtr<ID3D12Debug> debug;
@@ -103,9 +112,11 @@ public:
 
         RECT client_rectangle{};
         if (!GetClientRect(window, &client_rectangle)) throw std::system_error(static_cast<int>(GetLastError()), std::system_category(), "GetClientRect");
+        const UINT initial_width = std::max<UINT>(1, static_cast<UINT>(client_rectangle.right - client_rectangle.left));
+        const UINT initial_height = std::max<UINT>(1, static_cast<UINT>(client_rectangle.bottom - client_rectangle.top));
         DXGI_SWAP_CHAIN_DESC1 swap_chain_description{};
-        swap_chain_description.Width = static_cast<UINT>(client_rectangle.right - client_rectangle.left);
-        swap_chain_description.Height = static_cast<UINT>(client_rectangle.bottom - client_rectangle.top);
+        swap_chain_description.Width = initial_width;
+        swap_chain_description.Height = initial_height;
         swap_chain_description.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
         swap_chain_description.SampleDesc.Count = 1;
         swap_chain_description.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
@@ -127,13 +138,23 @@ public:
         check(device_->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, command_allocators_[0].Get(), nullptr, IID_PPV_ARGS(&command_list_)), "Create command list");
         check(command_list_->Close(), "Close initial command list");
         check(device_->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence_)), "Create fence");
-        viewport_width_ = static_cast<UINT>(client_rectangle.right - client_rectangle.left);
-        viewport_height_ = static_cast<UINT>(client_rectangle.bottom - client_rectangle.top);
+        viewport_width_ = initial_width;
+        viewport_height_ = initial_height;
         create_render_targets();
         create_scene_pipeline();
     }
 
+    ~Renderer() noexcept {
+        if (queue_ && fence_) {
+            try {
+                flush();
+            } catch (...) {
+            }
+        }
+    }
+
     void draw(float scene_time_seconds) {
+        if (viewport_width_ == 0 || viewport_height_ == 0) return;
         const UINT buffer_index = swap_chain_->GetCurrentBackBufferIndex();
         wait_for_fence(buffer_fence_values_[buffer_index]);
         check(command_allocators_[buffer_index]->Reset(), "Reset command allocator");
@@ -201,7 +222,7 @@ private:
         auto compile_shader = [&](const char* entry, const char* target, ComPtr<ID3DBlob>& shader) {
             errors.Reset();
             const HRESULT result = D3DCompileFromFile(shader_path.c_str(), nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE,
-                                                       entry, target, D3DCOMPILE_ENABLE_STRICTNESS, 0, &shader, &errors);
+                                                      entry, target, D3DCOMPILE_ENABLE_STRICTNESS, 0, &shader, &errors);
             if (FAILED(result)) {
                 const std::string detail = errors ? std::string(static_cast<const char*>(errors->GetBufferPointer()), errors->GetBufferSize()) : "Shader file unavailable";
                 throw std::runtime_error("Scene shader compilation failed: " + detail);
@@ -308,11 +329,20 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
             while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
                 if (message.message == WM_QUIT) { running = false; break; }
                 if (message.message == frame_warp_lab::scene_control_message) {
-                    if (message.wParam == frame_warp_lab::scene_pause) scene_paused = true;
-                    if (message.wParam == frame_warp_lab::scene_resume) scene_paused = false;
-                    if (message.wParam == frame_warp_lab::scene_reset) scene_time_seconds = 0;
+                    if (message.wParam == frame_warp_lab::scene_pause) {
+                        scene_paused = true;
+                        runtime_state.record_scene_event(frame_warp_lab::RuntimeEventType::scene_paused, 1);
+                    }
+                    if (message.wParam == frame_warp_lab::scene_resume) {
+                        scene_paused = false;
+                        runtime_state.record_scene_event(frame_warp_lab::RuntimeEventType::scene_resumed, 0);
+                    }
+                    if (message.wParam == frame_warp_lab::scene_reset) {
+                        scene_time_seconds = 0;
+                        runtime_state.record_scene_event(frame_warp_lab::RuntimeEventType::scene_reset, 0);
+                    }
                     previous_tick = std::chrono::steady_clock::now();
-                    runtime_state.update_scene(static_cast<float>(scene_time_seconds), scene_paused);
+                    runtime_state.update_scene(scene_time_seconds, scene_paused);
                     continue;
                 }
                 TranslateMessage(&message);
@@ -325,13 +355,16 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
             previous_tick = current_tick;
             RECT current_client_rectangle{};
             if (!GetClientRect(window, &current_client_rectangle)) throw std::system_error(static_cast<int>(GetLastError()), std::system_category(), "Get client size");
+            const UINT client_width = static_cast<UINT>(std::max<LONG>(0, current_client_rectangle.right - current_client_rectangle.left));
+            const UINT client_height = static_cast<UINT>(std::max<LONG>(0, current_client_rectangle.bottom - current_client_rectangle.top));
+            if (client_width == 0 || client_height == 0) { WaitMessage(); previous_tick = std::chrono::steady_clock::now(); continue; }
             if (current_client_rectangle.right != previous_client_rectangle.right || current_client_rectangle.bottom != previous_client_rectangle.bottom) {
-                renderer.resize(static_cast<UINT>(current_client_rectangle.right), static_cast<UINT>(current_client_rectangle.bottom));
+                renderer.resize(client_width, client_height);
                 runtime_state.record_resize();
                 previous_client_rectangle = current_client_rectangle;
             }
             renderer.draw(static_cast<float>(scene_time_seconds));
-            runtime_state.update_scene(static_cast<float>(scene_time_seconds), scene_paused);
+            runtime_state.update_scene(scene_time_seconds, scene_paused);
             runtime_state.record_present();
         }
         renderer.flush();
