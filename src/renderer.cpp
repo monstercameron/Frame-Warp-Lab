@@ -550,6 +550,7 @@ bool Renderer::submit_scene_async(
     std::int32_t tile_budget_pct,
     TilePolicy tile_policy,
     bool cache_sharpen_enabled,
+    bool coarse_fallback_enabled,
     std::uint64_t frame_id,
     LatencyMonitor& latency_monitor,
     bool wait_for_completion) {
@@ -629,7 +630,7 @@ bool Renderer::submit_scene_async(
         tile_policy == TilePolicy::priority_stbn ? 1U : 0U,
         total_tiles,
         cache_sharpen_enabled ? 1U : 0U,
-        0U);
+        coarse_fallback_enabled ? 1U : 0U);
 
     latency_monitor.emit_marker(LatencyMarker::render_submit_start, frame_id);
     check(slot.command_allocator->Reset(), "Reset scene command allocator");

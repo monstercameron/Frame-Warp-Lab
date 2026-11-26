@@ -129,6 +129,7 @@ public:
         std::int32_t tile_budget_pct,
         TilePolicy tile_policy,
         bool cache_sharpen_enabled,
+        bool coarse_fallback_enabled,
         std::uint64_t frame_id,
         LatencyMonitor& latency_monitor,
         bool wait_for_completion);

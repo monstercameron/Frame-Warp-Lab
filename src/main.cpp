@@ -169,6 +169,7 @@ public:
         frame_warp_lab::TilePolicy policy,
         bool auto_budget_enabled,
         bool cache_sharpen_enabled,
+        bool coarse_fallback_enabled,
         std::int32_t fixed_dt_us,
         std::int64_t target_scene_budget_us,
         const frame_warp_lab::TileCacheStats& stats) {
@@ -177,6 +178,7 @@ public:
         std::atomic_ref<std::int32_t>(state_->tile_policy).store(static_cast<std::int32_t>(policy), std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->auto_tile_budget_enabled).store(auto_budget_enabled ? 1 : 0, std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->cache_sharpen_enabled).store(cache_sharpen_enabled ? 1 : 0, std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->coarse_fallback_enabled).store(coarse_fallback_enabled ? 1 : 0, std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->fixed_dt_us).store(fixed_dt_us, std::memory_order_release);
         std::atomic_ref<std::int64_t>(state_->last_target_scene_budget_us).store(target_scene_budget_us, std::memory_order_release);
         std::atomic_ref<std::uint32_t>(state_->last_tile_total_count).store(stats.total_tiles, std::memory_order_release);
@@ -672,6 +674,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         frame_warp_lab::TilePolicy tile_policy = frame_warp_lab::TilePolicy::priority_stbn;
         bool auto_tile_budget_enabled = false;
         bool cache_sharpen_enabled = false;
+        bool coarse_fallback_enabled = false;
         std::int32_t fixed_dt_us = 0;
         std::int32_t pending_step_frames = 0;
         std::uint32_t pending_capture_tag = 0;
@@ -735,6 +738,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 tile_policy,
                 auto_tile_budget_enabled,
                 cache_sharpen_enabled,
+                coarse_fallback_enabled,
                 fixed_dt_us,
                 auto_tile_budget.last_target_scene_budget_us(),
                 renderer.latest_completed_source().tile_stats);
@@ -1036,6 +1040,27 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                     } else if (command == frame_warp_lab::ControlCommand::set_cache_sharpen) {
                         cache_sharpen_enabled = message.lParam != 0;
                         runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, cache_sharpen_enabled ? 1 : 0, frame_warp_lab::ConfigKey::cache_sharpen);
+                    } else if (command == frame_warp_lab::ControlCommand::set_coarse_fallback) {
+                        coarse_fallback_enabled = message.lParam != 0;
+                        runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, coarse_fallback_enabled ? 1 : 0, frame_warp_lab::ConfigKey::coarse_fallback);
+                    } else if (command == frame_warp_lab::ControlCommand::resize_window) {
+                        const auto packed = static_cast<std::uint32_t>(message.lParam);
+                        const LONG requested_width = static_cast<LONG>(packed & 0xFFFFU);
+                        const LONG requested_height = static_cast<LONG>((packed >> 16U) & 0xFFFFU);
+                        if (requested_width >= 320 && requested_width <= 7680 && requested_height >= 240 && requested_height <= 4320) {
+                            RECT desired_rect{0, 0, requested_width, requested_height};
+                            const auto style = static_cast<DWORD>(GetWindowLongPtrW(window, GWL_STYLE));
+                            const auto ex_style = static_cast<DWORD>(GetWindowLongPtrW(window, GWL_EXSTYLE));
+                            AdjustWindowRectEx(&desired_rect, style, FALSE, ex_style);
+                            SetWindowPos(
+                                window,
+                                nullptr,
+                                0,
+                                0,
+                                desired_rect.right - desired_rect.left,
+                                desired_rect.bottom - desired_rect.top,
+                                SWP_NOZORDER | SWP_NOACTIVATE);
+                        }
                     } else if (command == frame_warp_lab::ControlCommand::set_fixed_dt_us) {
                         fixed_dt_us = std::clamp(static_cast<std::int32_t>(message.lParam), 0, 100000);
                         runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, fixed_dt_us, frame_warp_lab::ConfigKey::fixed_dt_us);
@@ -1188,6 +1213,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                     tile_budget_pct,
                     tile_policy,
                     cache_sharpen_enabled,
+                    coarse_fallback_enabled,
                     frame_id_u64,
                     latency_monitor,
                     must_wait);
@@ -1482,6 +1508,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 tile_policy,
                 auto_tile_budget_enabled,
                 cache_sharpen_enabled,
+                coarse_fallback_enabled,
                 fixed_dt_us,
                 auto_tile_budget.last_target_scene_budget_us(),
                 active_source.tile_stats);

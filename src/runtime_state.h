@@ -10,7 +10,7 @@
 namespace frame_warp_lab {
 
 inline constexpr wchar_t window_class_name[] = L"FrameWarpLabWindow";
-inline constexpr std::uint32_t runtime_state_version = 20;
+inline constexpr std::uint32_t runtime_state_version = 21;
 inline constexpr std::size_t runtime_event_capacity = 64;
 inline constexpr std::size_t runtime_frame_trace_capacity = 256;
 inline constexpr std::size_t hud_graph_sample_count = 128;
@@ -49,6 +49,8 @@ enum class ControlCommand : WPARAM {
     set_fixed_dt_us = 25,
     capture_frame = 26,
     step_frames = 27,
+    set_coarse_fallback = 28,
+    resize_window = 29,
 };
 
 enum class TilePolicy : std::int32_t {
@@ -169,6 +171,7 @@ enum class ConfigKey : std::int32_t {
     auto_tile_budget = 21,
     cache_sharpen = 22,
     fixed_dt_us = 23,
+    coarse_fallback = 24,
 };
 
 enum class RuntimeEventType : std::int32_t {
@@ -325,6 +328,7 @@ struct RuntimeState {
     std::int32_t tile_policy;
     std::int32_t auto_tile_budget_enabled;
     std::int32_t cache_sharpen_enabled;
+    std::int32_t coarse_fallback_enabled;
     std::int32_t fixed_dt_us;
     std::int64_t last_target_scene_budget_us;
     std::uint32_t last_tile_total_count;
@@ -412,6 +416,7 @@ inline const char* config_key_name(std::int32_t key) {
         case ConfigKey::auto_tile_budget: return "auto_tile_budget";
         case ConfigKey::cache_sharpen: return "cache_sharpen";
         case ConfigKey::fixed_dt_us: return "fixed_dt_us";
+        case ConfigKey::coarse_fallback: return "coarse_fallback";
         default: return "unknown";
     }
 }

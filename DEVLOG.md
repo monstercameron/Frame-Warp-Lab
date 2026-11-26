@@ -1,5 +1,24 @@
 # Development log
 
+## v0.22.0 — Unshaded cache provenance fix (`age=255`), 4×4 coarse-to-fine camera-cut recovery, and CLI resize / 1080p scaling envelope
+
+- Fixed a subtle temporal-cache provenance bug and added coarse-to-fine progressive fallback + programmatic window resizing (`shaders/selective_tiles.hlsl`, `src/runtime_state.h`, `src/renderer.h`, `src/renderer.cpp`, `src/main.cpp`, `src/cli.cpp`, `CMakeLists.txt`, `scripts/run_cut_and_scaling_experiments.ps1`):
+  1. **Unshaded Cache Provenance Fix (`age = 255u` sentinel)**: previously, uncached frustum-entry and camera-cut pixels wrote `pixel_age = 0u` in `vis_classify_main`; when deferred by `tile_budget`, they were misclassified on subsequent frames as brand-new valid cache hits for 16 frames. Unshaded/disoccluded/coarse pixels now write `age = 255u` until `tile_shade_main` actually paints them (`age = 0u`), keeping deferred pixels in the critical repair queue and preventing TRM sharpening overshoot on first-time refinement.
+  2. **True `4×4` Coarse-to-Fine Progressive Fallback (`set <pid> coarse_fallback on|off`)**: for uncached blocks (`g_coarse_block_mask != 0`), 1 leader thread per `4×4` block evaluates zero-stress coarse normal+albedo shading into `groupshared` memory (with material-ID boundary guarding via `coarse_material_tint` to prevent silhouette bleeding), immediately eliminating dark void artifacts on 100% hard camera cuts and tight budgets while preserving `age = 255u` so PAR progressively refines every pixel to full `1×1` shaded ground truth.
+  3. **Programmatic Resize (`cli resize <pid> <width> <height>`) & Experiment Script (`scripts/run_cut_and_scaling_experiments.ps1`)**: bumped `RuntimeState` v21 / CLI schema v16 and added `resize <pid> <w> <h>` to measure resolution scaling across `720p` and `1080p`.
+- Verified zero code comments, zero-warning ARM64 Release + Debug builds (all 12 SM 6.0 DXIL shaders), Debug D3D12 Debug Layer validation (`1600×900`, `coarse=True`, `491/5700` shaded tiles), and three controlled Release experiments on **NVIDIA RTX Spark N1X**:
+  - **1. `5%` Quality Cliff Re-Test (Frame `#98` @ 240 Hz, `stress=32`)**:
+    - `fast_pan 5%`: jumped from **`20.56 dB` (`v0.21.0`) → `32.44 dB` (`age=255` fix alone) → `32.82 dB` (`+12.26 dB`, `0.9258` SSIM, `P99=26`, `541 µs` with `4×4` coarse)** — even `5%` PAR now beats Hardware VRS Tier 2 (`31.78 dB` / `943 µs`).
+    - `occlusion_sweep 5%`: jumped from **`21.63 dB` → `31.08 dB` (`+9.45 dB`)**. `15%` PAR+SHARP+COARSE reached **`36.58 dB` (`406 µs`, `7.35×` faster than GT)** on `occlusion_sweep` and **`35.70 dB` (`490 µs`, `6.55×` faster than GT)** on `fast_pan`.
+  - **2. Hard 100% Camera Cut Progressive Recovery (`camera_cut` `t = 1.63s`, clean zero-paused-frame bursts `Cut+0..Cut+8` @ 240 Hz)**:
+    - `PAR 15%` without coarse fallback: `Cut+0` **`15.18 dB`** (`47.2%` sharp, `P99=99`, 85% void) → `Cut+2` `17.27 dB` → `Cut+4` `20.34 dB` → `Cut+6` `38.90 dB`.
+    - **`PAR 15%` + `4×4` Coarse-to-Fine**: `Cut+0` **`28.95 dB` (`+13.77 dB`, `95.4%` sharp, `P99=47`, `499 µs`)** → `Cut+1` `30.13 dB` → `Cut+3` `32.30 dB` → `Cut+4` **`34.32 dB` (`16.7 ms`)** → `Cut+6` **`39.18 dB` (`0.9865` SSIM, `100.1%` sharp, `P99=6`, `25.0 ms`)** — zero deadline stalls and zero black void frames.
+    - `PAR 5%` + `4×4` Coarse-to-Fine: starts at `28.54 dB` (`370 µs`) and climbs slowly to `30.55 dB` by `Cut+8` (honest convergence-rate limit: `5%`/frame needs ~20 frames / `83 ms` at 240 Hz to refine 100% of a cut).
+  - **3. Resolution Scaling Envelope (`occlusion_sweep`, `120 Hz`, `720p` → `1080p` → `1924×1181`)**:
+    - **`1080p` (`1920×1080`), `stress=64`**: Native `1×1` **`14,056 µs`** (misses `8.33 ms` 120 Hz deadline) → VRS Tier 2 **`5,370 µs`** → **PAR `15%` = `1,940 µs` (`7.25×` faster than Native, `2.77×` faster than VRS Tier 2, `11.5%` tiles, `0` missed deadlines)**.
+    - **`1080p`, `stress=32`**: Native **`7,600 µs`** → VRS **`2,257 µs`** → **PAR `15%` = `1,466 µs` (`5.18×` faster than Native, `1.54×` faster than VRS, `0` misses)**.
+    - **Honest Poor Result / Crossover Found (`stress=0` ultra-light shaders)**: at `1080p` `stress=0`, PAR `15%` (`1,113 µs`) is **`2.94×` slower** than Native `1×1` (`379 µs`) because fixed full-res visibility + 3-pass compute dispatch overhead exceeds negligible shader savings; additionally, Windows 150% DPI clamping capped windowed `2560×1440` at `1924×1181` (true `1440p`/`4K` scaling needs an offscreen render-resolution override).
+
 ## v0.21.1 — Add runnable PAR quality report + PNG diff generator and live desktop demo scripts
 
 - Added two zero-dependency PowerShell scripts under `scripts/`:

@@ -43,12 +43,24 @@ static const uint k_stbn_phase_packed[32] = {
 
 groupshared float g_tile_depth[16][16];
 groupshared uint g_tile_mat[16][16];
+groupshared float3 g_coarse_color[4][4];
+groupshared uint g_coarse_mat[4][4];
+groupshared uint g_coarse_block_mask;
 groupshared uint g_dirty_pixel_count;
 groupshared uint g_disoccluded_count;
 groupshared uint g_moving_count;
 groupshared uint g_edge_count;
 groupshared uint g_non_sky_count;
 groupshared uint g_max_age_in_tile;
+
+float3 coarse_material_tint(uint mat_id) {
+    if (mat_id == 1u) return float3(0.16, 0.21, 0.23);
+    if (mat_id == 2u) return float3(0.18, 0.23, 0.26);
+    if (mat_id == 3u) return float3(0.24, 0.31, 0.34);
+    if (mat_id == 4u) return float3(0.38, 0.22, 0.11);
+    if (mat_id == 5u) return float3(0.38, 0.54, 0.56);
+    return float3(0.55, 0.45, 0.18);
+}
 
 uint lookup_stbn_phase(uint tx, uint ty) {
     uint row = ty & 15u;
@@ -208,6 +220,7 @@ void vis_classify_main(
     uint3 group_thread_id : SV_GroupThreadID,
     uint3 dispatch_thread_id : SV_DispatchThreadID) {
     if (group_thread_id.x == 0u && group_thread_id.y == 0u) {
+        g_coarse_block_mask = 0u;
         g_dirty_pixel_count = 0u;
         g_disoccluded_count = 0u;
         g_moving_count = 0u;
@@ -225,8 +238,12 @@ void vis_classify_main(
     bool pixel_disoccluded = false;
     bool pixel_moving = false;
     bool pixel_non_sky = false;
+    bool needs_coarse_seed = false;
     uint pixel_age = 0u;
+    uint priority_age = 0u;
     float linear_view_depth = 1000.0;
+    float hit_distance = 0.0;
+    float3 hit_world_position = camera_position_tan_y.xyz;
     uint mat_id = 0u;
 
     if (in_bounds) {
@@ -256,6 +273,8 @@ void vis_classify_main(
             distance_travelled += distance_sample.x;
             if (distance_travelled > 36.0) break;
         }
+        hit_distance = distance_travelled;
+        hit_world_position = world_position;
 
         float2 motion_vector = float2(0.0, 0.0);
         mat_id = (uint)(material + 0.5);
@@ -290,6 +309,7 @@ void vis_classify_main(
                 uint prev_vis = prev_vis_texture.Load(int3(prev_coord, 0));
                 uint prev_mat = prev_vis & 255u;
                 uint prev_age = (prev_vis >> 8u) & 255u;
+                bool prev_authoritative = prev_age < 255u;
                 if (policy_params.z != 0u) {
                     cached_color = sample_catmull_rom_5tap(
                         previous_uv,
@@ -301,17 +321,28 @@ void vis_classify_main(
                 float rel_z_err = abs(prev_z - expected_prev_z) / max(expected_prev_z, 0.25);
                 bool depth_match = rel_z_err < 0.035;
                 bool mat_match = (prev_mat == mat_id);
-                if (depth_match && mat_match && !pixel_moving && prev_age < cache_params.y) {
+                if (depth_match && mat_match && !pixel_moving && prev_authoritative && prev_age < cache_params.y) {
                     pixel_age = prev_age + 1u;
+                    priority_age = pixel_age;
                     cache_hit = true;
+                } else if (depth_match && mat_match && !pixel_moving && prev_authoritative) {
+                    pixel_age = min(prev_age + 1u, 254u);
+                    priority_age = pixel_age;
                 } else {
-                    pixel_age = min(prev_age + 1u, 255u);
-                    if (!pixel_moving && (!depth_match || !mat_match)) {
+                    pixel_age = 255u;
+                    priority_age = cache_params.y;
+                    needs_coarse_seed = true;
+                    if (!pixel_moving) {
                         pixel_disoccluded = true;
                     }
                 }
-            } else if (!pixel_moving) {
-                pixel_disoccluded = true;
+            } else {
+                pixel_age = 255u;
+                priority_age = cache_params.y;
+                needs_coarse_seed = true;
+                if (!pixel_moving) {
+                    pixel_disoccluded = true;
+                }
             }
             if (!cache_hit) {
                 pixel_dirty = true;
@@ -319,17 +350,52 @@ void vis_classify_main(
         } else {
             cache_hit = true;
             pixel_age = 0u;
+            priority_age = 0u;
         }
 
         out_depth_uav[dispatch_thread_id.xy] = linear_view_depth;
         out_motion_uav[dispatch_thread_id.xy] = motion_vector;
         out_vis_uav[dispatch_thread_id.xy] = pack_vis(mat_id, pixel_age, surf_hash);
         out_color_uav[dispatch_thread_id.xy] = float4(cached_color, 1.0);
+
+        if (needs_coarse_seed && policy_params.w != 0u) {
+            uint block_idx = ((group_thread_id.y >> 2u) << 2u) | (group_thread_id.x >> 2u);
+            uint unused_mask;
+            InterlockedOr(g_coarse_block_mask, 1u << block_idx, unused_mask);
+        }
     }
 
     g_tile_depth[group_thread_id.y][group_thread_id.x] = linear_view_depth;
     g_tile_mat[group_thread_id.y][group_thread_id.x] = mat_id;
     GroupMemoryBarrierWithGroupSync();
+
+    if (policy_params.w != 0u && g_coarse_block_mask != 0u) {
+        uint bx = group_thread_id.x >> 2u;
+        uint by = group_thread_id.y >> 2u;
+        uint block_idx = (by << 2u) | bx;
+        if ((group_thread_id.x & 3u) == 1u && (group_thread_id.y & 3u) == 1u) {
+            if (((g_coarse_block_mask >> block_idx) & 1u) != 0u && in_bounds && mat_id > 0u) {
+                float3 ball_center = ball_center_stress.xyz;
+                float3 normal = surface_normal(hit_world_position, ball_center);
+                float light = 0.35 + 0.65 * saturate(dot(normal, float3(-0.392232, 0.784465, -0.490290)));
+                float3 coarse_col = surface_color(hit_world_position, (float)mat_id, ball_center) * light;
+                coarse_col = lerp(coarse_col, float3(0.12, 0.17, 0.20), saturate(hit_distance * (1.0 / 55.0)));
+                g_coarse_color[by][bx] = max(coarse_col, 0.0);
+                g_coarse_mat[by][bx] = mat_id;
+            } else {
+                g_coarse_color[by][bx] = float3(0.035, 0.055, 0.07);
+                g_coarse_mat[by][bx] = 0u;
+            }
+        }
+        GroupMemoryBarrierWithGroupSync();
+
+        if (needs_coarse_seed && in_bounds && mat_id > 0u) {
+            float3 coarse_seed = (g_coarse_mat[by][bx] == mat_id)
+                ? g_coarse_color[by][bx]
+                : coarse_material_tint(mat_id);
+            out_color_uav[dispatch_thread_id.xy] = float4(coarse_seed, 1.0);
+        }
+    }
 
     bool pixel_edge = false;
     if (in_bounds && group_thread_id.x < 15u && group_thread_id.y < 15u) {
@@ -346,7 +412,7 @@ void vis_classify_main(
     uint wave_moving = WaveActiveCountBits(pixel_moving);
     uint wave_edge = WaveActiveCountBits(pixel_edge);
     uint wave_non_sky = WaveActiveCountBits(pixel_non_sky);
-    uint wave_max_age = WaveActiveMax(pixel_age);
+    uint wave_max_age = WaveActiveMax(priority_age);
     if (WaveIsFirstLane()) {
         uint unused_prev;
         if (wave_dirty > 0u) InterlockedAdd(g_dirty_pixel_count, wave_dirty, unused_prev);
@@ -540,7 +606,8 @@ void tile_shade_main(
         color += synthetic_stress_modulation(world_position, stress_level);
     }
 
-    if (policy_params.z != 0u && cache_params.x != 0u) {
+    uint prev_vis_age = (vis_word >> 8u) & 255u;
+    if (policy_params.z != 0u && cache_params.x != 0u && prev_vis_age < 255u) {
         float3 prev_cached = out_color_uav[pixel_coord].rgb;
         float3 diff = color - prev_cached;
         if (length(diff) < 0.25) {
