@@ -6,7 +6,7 @@ Read [experiment-plan.md](experiment-plan.md) for the prioritized experiment, [r
 
 ## Current baseline
 
-The initial native application creates a D3D12 device, window and double-buffered swap chain, clears the back buffer, presents with VSync, and handles resizing and orderly GPU synchronization. It does not yet draw the test scene or implement reprojection, telemetry, frame generation, or adaptive pacing. It is not a benchmark.
+The native application renders an initial procedural Motion Lab scene with a moving camera, corridor, occluding pillars, moving ball and fine-detail features. It uses a D3D12 window and double-buffered swap chain, presents with VSync, and handles resizing and GPU synchronization. It does not yet provide the full planned scene, explicit scene depth or motion-vector buffers, reprojection, detailed telemetry, frame generation, VRS rendering, or adaptive pacing. It is not a benchmark. See [DEVLOG.md](DEVLOG.md) for development history.
 
 ## Build and run on Windows ARM64
 
@@ -30,6 +30,9 @@ The console executable emits JSON and uses exit code 0 for success and 1 for err
 ./build/Debug/frame_warp_cli.exe instances
 ./build/Debug/frame_warp_cli.exe status <pid>
 ./build/Debug/frame_warp_cli.exe events <pid>
+./build/Debug/frame_warp_cli.exe pause <pid>
+./build/Debug/frame_warp_cli.exe resume <pid>
+./build/Debug/frame_warp_cli.exe reset <pid>
 ./build/Debug/frame_warp_cli.exe capabilities
 ./build/Debug/frame_warp_cli.exe stop <pid>
 ```
@@ -39,3 +42,5 @@ The console executable emits JSON and uses exit code 0 for success and 1 for err
 `events` reads a bounded in-memory journal of the 64 most recent runtime lifecycle and resize events, with UTC timestamps and sequence numbers. Events are available only while the instance's shared state exists; the journal is not persisted, and detailed frame traces and error events are not yet implemented. A concurrent overwrite can cause a record to be omitted from a snapshot. Shared state uses a local Windows named mapping and the process's default security descriptor; it is intended for local inspection, not a remote interface.
 
 The CLI does not yet collect detailed traces, manage scenes or experiment configurations, measure latency, or control generation, reprojection or VRS. Persistent structured logs and the remaining agent operations are still planned.
+
+`status` reports the Motion Lab timeline and pause state. `pause`, `resume` and `reset` queue scene-control requests; inspect `status` to confirm they were applied. Reset returns the timeline to zero and preserves the pause state. The scripted camera and ball movement are functions of scene time; real-time execution and frame sampling are not yet a deterministic capture or benchmark system.

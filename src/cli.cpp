@@ -110,7 +110,9 @@ int print_status(const WindowInstance& instance) {
     std::cout << ",\"display\":";
     print_display(instance.window);
     std::cout << ",\"presentation\":{\"requested_sync_interval\":1,\"displayed_frame_timing\":null},"
-                 "\"features\":{\"scene\":\"not_implemented\",\"reprojection\":\"not_implemented\",\"frame_generation\":\"not_implemented\",\"vrs\":\"not_implemented\"}}\n";
+              << "\"scene\":{\"name\":\"motion_lab\",\"time_ms\":" << state->scene_time_ms
+              << ",\"paused\":" << (state->scene_paused ? "true" : "false") << "},"
+                 "\"features\":{\"scene\":\"procedural_initial\",\"reprojection\":\"not_implemented\",\"frame_generation\":\"not_implemented\",\"vrs\":\"not_implemented\"}}\n";
     UnmapViewOfFile(state);
     CloseHandle(mapping);
     return 0;
@@ -194,7 +196,7 @@ int print_capabilities() {
 
 int wmain(int argument_count, wchar_t** arguments) {
     if (argument_count == 2 && std::wstring(arguments[1]) == L"help") {
-        std::cout << "{\"ok\":true,\"schema_version\":1,\"commands\":[\"help\",\"start\",\"instances\",\"status <pid>\",\"events <pid>\",\"stop <pid>\",\"capabilities\"]}\n";
+        std::cout << "{\"ok\":true,\"schema_version\":1,\"commands\":[\"help\",\"start\",\"instances\",\"status <pid>\",\"events <pid>\",\"pause <pid>\",\"resume <pid>\",\"reset <pid>\",\"stop <pid>\",\"capabilities\"]}\n";
         return 0;
     }
     if (argument_count == 2 && std::wstring(arguments[1]) == L"capabilities") return print_capabilities();
@@ -209,7 +211,7 @@ int wmain(int argument_count, wchar_t** arguments) {
         std::cout << "]}\n";
         return 0;
     }
-    if (argument_count != 3 || (std::wstring(arguments[1]) != L"status" && std::wstring(arguments[1]) != L"events" && std::wstring(arguments[1]) != L"stop"))
+    if (argument_count != 3 || (std::wstring(arguments[1]) != L"status" && std::wstring(arguments[1]) != L"events" && std::wstring(arguments[1]) != L"stop" && std::wstring(arguments[1]) != L"pause" && std::wstring(arguments[1]) != L"resume" && std::wstring(arguments[1]) != L"reset"))
         return fail("invalid_arguments", "Use help for the command list");
     wchar_t* end = nullptr;
     const unsigned long requested_process = std::wcstoul(arguments[2], &end, 10);
@@ -219,6 +221,13 @@ int wmain(int argument_count, wchar_t** arguments) {
         if (instance.process_id != requested_process) continue;
         if (std::wstring(arguments[1]) == L"status") return print_status(instance);
         if (std::wstring(arguments[1]) == L"events") return print_events(instance);
+        if (std::wstring(arguments[1]) != L"stop") {
+            const std::wstring action = arguments[1];
+            const WPARAM operation = action == L"pause" ? frame_warp_lab::scene_pause : action == L"resume" ? frame_warp_lab::scene_resume : frame_warp_lab::scene_reset;
+            if (!PostMessageW(instance.window, frame_warp_lab::scene_control_message, operation, 0)) return fail("control_failed", "Could not send scene control request");
+            std::cout << "{\"ok\":true,\"process_id\":" << instance.process_id << ",\"scene_control_requested\":" << json_string(action) << "}\n";
+            return 0;
+        }
         if (!PostMessageW(instance.window, WM_CLOSE, 0, 0)) return fail("stop_failed", "Could not send the close request");
         std::cout << "{\"ok\":true,\"process_id\":" << instance.process_id << ",\"stop_requested\":true}\n";
         return 0;
