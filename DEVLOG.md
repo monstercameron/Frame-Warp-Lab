@@ -1,5 +1,11 @@
 # Development log
 
+## v0.16.1 — Record pre-neural conventional rendering optimization taxonomy and 20-step roadmap
+
+- Added the comprehensive pre-neural rendering optimization taxonomy to `research.md`, covering spatial/temporal rendering (visibility buffer, temporal interleaving, selective regional repainting), temporally amortized decoupled subsystem frequencies, texture-space shading and persistent surface caching, deterministic artifact correction (layered depth, guard bands, reactive masks, acceleration-aware extrapolation), GPU execution and lighting optimizations, value-per-cost artifact-driven shader scheduling, the 20-step experiment sequence with live `v0.16.0` status tracking, and six foundational graphics paper references (Decoupled Sampling, Temporal Coherence, Visibility Buffer, Adaptive Texture Space Shading, NVIDIA VRS Performance, FastAtlas).
+- Also updated `research.md` Machine Observation with verified `v0.15.0`–`v0.16.0` DXC SM 6.0 measurements.
+- Documentation-only change; verified with `git diff --check` and pushed to `main`.
+
 ## v0.16.0 — Offline DXC Shader Model 6.0, wave-level atomics, precomputed camera homography, and specialized presentation PSOs
 
 - Migrated shader compilation in `CMakeLists.txt` and `src/renderer.cpp` from runtime FXC (`vs_5_0`/`ps_5_0`, `d3dcompiler`) to offline build-time Windows SDK ARM64 `dxc.exe` compilation (`vs_6_0`/`ps_6_0`, `-O3 -WX`), loading precompiled DXIL `.cso` bytecode directly at startup.

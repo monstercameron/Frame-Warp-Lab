@@ -137,13 +137,129 @@ Execute the following ten experiments in priority order, validating each step wi
 | Dynamic resolution | Optional fallback |
 | Temporal upscaling | Optional |
 
+## Pre-neural conventional rendering optimization roadmap
+
+Before turning to generative AI or neural novel-view synthesis, exhaust conventional deterministic graphics techniques that exploit **spatial redundancy, temporal redundancy, geometric information, and perceptual importance** — moving away from whole-frame repainting toward multi-rate, surface-cached, artifact-driven scheduling.
+
+### 1. Spatial and temporal rendering optimizations
+
+| Technique | What it does | Potential impact | Priority |
+| :--- | :--- | :--- | :--- |
+| Adaptive VRS | Changes shading rates according to GPU pressure and image complexity | Very high | P0 |
+| Checkerboard rendering | Shades alternating pixels and reconstructs the remainder | High | P1 |
+| Temporal interleaved rendering | Updates different pixel subsets across successive refreshes | Very high | P0 |
+| Tile-based selective rendering | Repaints only regions that require fresh information | Very high | P0 |
+| Temporal supersampling | Accumulates subpixel detail across successive updates | High | P1 |
+| Deferred shading | Decouples expensive shading from geometry visibility | Very high | P0 |
+| Visibility-buffer rendering | Stores primitive identity and barycentric coordinates before shading | Very high | P0 |
+| Adaptive LOD | Reduces geometric complexity according to visual importance and budget | High | P1 |
+| Dynamic resolution | Reduces internal pixel count when other optimizations are insufficient | High | P2 |
+| Texture sampling adaptation | Adjusts filtering and mip selection according to regional importance | Medium | P2 |
+
+### 2. Temporally amortized decoupled subsystem frequencies
+
+Different rendering subsystems do not need to run at the same frequency. Illustrative experimental target frequencies on a 240 Hz display (not measured optima):
+- **240 Hz**: presentation, HUD / viewmodel, late camera correction, object transforms.
+- **120 Hz**: geometry visibility.
+- **60 Hz**: material shading, direct lighting.
+- **30 Hz**: reflections, shadow maps.
+- **15 Hz**: global illumination, volumetric lighting.
+- **5 Hz**: static environment lighting.
+
+| Technique | Benefit | Priority |
+| :--- | :--- | :--- |
+| Independent animation interpolation | Update object poses without expensive material shading | P0 |
+| Viewmodel separation | Render first-person hands and interactive objects at high frequency | P0 |
+| Asynchronous shadow updates | Avoid regenerating unchanged shadow maps | P1 |
+| Cached direct lighting | Reuse lighting on unchanged surfaces | P1 |
+| Cached indirect lighting | Amortize expensive global illumination | P1 |
+| Incremental reflection updates | Distribute reflection rendering over several frames | P1 |
+| Amortized volumetric effects | Update fog and volumetric lighting at lower frequencies | P2 |
+
+### 3. Texture-space shading and persistent surface caching
+
+Store expensive shading results against object surfaces rather than exclusively in screen space so camera motion can re-rasterize visibility at high frequency while reusing cached diffuse/material shading:
+
+| Technique | Function |
+| :--- | :--- |
+| Texture-space shading | Store shading in object texture coordinates |
+| Object-space shading cache | Reuse results across camera movements |
+| Surface-space lighting cache | Cache illumination independently of visibility |
+| Shader result memoization | Avoid repeating identical shading calculations |
+| Dirty-region invalidation | Recompute only changed surfaces |
+| Adaptive cache resolution | Allocate cache detail according to projected importance |
+| View-dependent shading separation | Recalculate specular effects while retaining reusable diffuse lighting |
+
+### 4. Deterministic artifact correction
+
+Retaining a second layer of occluded geometry/color (**layered depth images**) supplies real disoccluded scene information behind foreground occluders without generative guessing:
+
+| Technique | Artifact addressed | Priority |
+| :--- | :--- | :--- |
+| Guard-band rendering | Missing image boundaries during camera rotation | P0 |
+| Layered depth images | Disoccluded background surfaces | P0 |
+| Separate foreground/background layers | Foreground stretching and ghosting | P0 |
+| Multi-frame temporal cache | Recover previously visible surfaces | P0 |
+| Acceleration-aware extrapolation | Reduce constant-velocity prediction errors | P0 |
+| Reactive masks | Prevent inappropriate temporal reuse | P0 |
+| Depth-aware dilation | Small disocclusion holes | P1 |
+| Push-pull reconstruction | Missing pixels across spatial scales | P1 |
+| Edge-aware interpolation | Blurred geometry boundaries | P1 |
+| Bilateral reconstruction | Color bleeding across depth edges | P1 |
+| Forward splatting with depth testing | Resolve competing projected surfaces | P1 |
+| Bidirectional reprojection | Validate correspondence between frames | P1 |
+| Hierarchical motion estimation | Improve large motion reconstruction | P1 |
+| Classical optical flow | Recover motion not captured by geometry vectors | P1 |
+| Variance clipping | Reduce temporal ghosting | P1 |
+| Depth-aware sharpening | Restore detail without amplifying boundaries | P2 |
+
+### 5. Geometry, GPU execution, and lighting optimizations
+
+- **P0 GPU execution**: packed G-buffers (keeping full-precision `R32_FLOAT` depth where reprojection accuracy requires it), shader execution specialization (implemented in `v0.16.0`), wave-level primitives (implemented in `v0.16.0`), asynchronous compute, and deadline-bounded GPU work batches.
+- **P1/P2 geometry & culling**: GPU-driven rendering, mesh shaders / meshlets, hierarchical Z-buffer, frustum and temporal occlusion culling, bindless resources, indirect draws, FP16 shader arithmetic where precision allows, geometry impostors, and adaptive tessellation.
+- **Non-neural lighting reuse (for complex scenes)**: clustered lighting, ReSTIR DI/GI, radiance caching, probe-based GI, screen-space lighting reuse, adaptive ray counts, temporal denoising, variable-rate ray tracing, and cached shadow visibility.
+
+### 6. Artifact-benefit shader optimization scheduler
+
+Treat rendering and correction passes as independently schedulable operations prioritized by value per GPU cost inside the remaining deadline budget:
+
+`Priority = (Expected visual error reduction * Visual importance) / Estimated GPU cost`
+
+Operations such as late camera warp, motion extrapolation, disocclusion recovery, geometry edge correction, selective material repaint, shadow correction, and temporal detail recovery are scheduled first while lower-priority refinements (e.g., reflection or indirect-lighting updates) defer cleanly when the painting budget is tight.
+
+### 7. 20-step pre-neural experiment sequence
+
+| # | Experiment | Architectural value | Current status (`v0.16.0`) |
+| :--- | :--- | :--- | :--- |
+| 1 | Full-resolution visibility independent of shading | Foundational | Planned |
+| 2 | Adaptive, artifact-aware VRS | Foundational | Partial (Tier 1/2 static foveated + adaptive tier ladder; artifact-driven mask pending) |
+| 3 | Tile-level confidence and age tracking | Foundational | Planned |
+| 4 | Selective regional repainting | Foundational | Planned |
+| 5 | Deadline-bounded GPU work submission | Foundational | Partial (dual queues + deadline pacer + headroom ladder; chunked batch preemption pending) |
+| 6 | Guard-band rendering | Artifact reduction | Planned |
+| 7 | Layered depth and color buffers | Artifact reduction | Planned |
+| 8 | Rotation-only reprojection | Performance | Implemented (`v0.16.0`, 0 depth samples, 53 µs) |
+| 9 | Acceleration-aware motion extrapolation | Temporal accuracy | Partial (constant-velocity MV extrapolation in `v0.12.0`; acceleration term pending) |
+| 10 | Multi-frame history reconstruction | Artifact reduction | Partial (`T_{n-1}` 2-frame history in `v0.12.0`; deeper cache pending) |
+| 11 | Temporal interleaved shading | Performance | Planned |
+| 12 | Texture-space shading | Architectural | Planned (requires rasterized geometry scene) |
+| 13 | Persistent surface shading cache | Architectural | Planned (requires rasterized geometry scene) |
+| 14 | Independent subsystem update frequencies | Architectural | Partial (camera/HUD vs. scene decoupled; per-pass lighting rates pending) |
+| 15 | Independent dynamic-object rendering | Responsiveness | Planned |
+| 16 | Adaptive geometry LOD and culling | Performance | Planned (requires rasterized geometry scene) |
+| 17 | Classical optical flow | Temporal accuracy | Planned |
+| 18 | Temporally amortized lighting | Performance | Planned |
+| 19 | Artifact-benefit-based shader scheduling | Architectural | Planned |
+| 20 | Dynamic resolution as an emergency fallback | Resilience | Planned |
+
 ## Machine observation
 
-On 26 November 2026, `nvidia-smi` and the D3D12 capability query reported an `NVIDIA RTX Spark N1X (6144-core Blackwell RTX GPU)` in WDDM mode (driver `621.40`, `98290 MiB` dedicated VRAM), `DXGI_FEATURE_PRESENT_ALLOW_TEARING` supported, and D3D12 Variable Rate Shading **Tier 2** (`additional_shading_rates_supported: true`, `tile_size_px: 16`). Native ARM64 NVIDIA binaries are present on this machine: `C:\Windows\System32\nvapia64.dll`, `C:\Program Files\NVIDIA Corporation\FrameViewSDK\bin\FvSDK_arm64.dll` (and `SDK\Public_Release\ARM64\FvSDK_ARM64.lib`), `PresentMon_arm64.exe`, and `nvrla.exe`; NVIDIA Streamline `v2.14.16` also publishes official `streamline-sdk-v2.14.16-aarch64.zip` and `arm64ec` releases (DLSS-G runtime plugin behavior on this GPU remains to be tested). Active Windows display mode on `\\.\DISPLAY6` enumerated as `2880x1800` at nominal `120 Hz` (enumerated max `120 Hz` at active resolution; physical monitor upper bound and displayed scanout timing remain unverified). Local Python is ARM64. Measured Release findings on `1264x681` Motion Lab (`v0.10.0`–`v0.14.0`):
+On 26 November 2026, `nvidia-smi` and the D3D12 capability query reported an `NVIDIA RTX Spark N1X (6144-core Blackwell RTX GPU)` in WDDM mode (driver `621.40`, `98290 MiB` dedicated VRAM), `DXGI_FEATURE_PRESENT_ALLOW_TEARING` supported, and D3D12 Variable Rate Shading **Tier 2** (`additional_shading_rates_supported: true`, `tile_size_px: 16`). Native ARM64 NVIDIA binaries are present on this machine: `C:\Windows\System32\nvapia64.dll`, `C:\Program Files\NVIDIA Corporation\FrameViewSDK\bin\FvSDK_arm64.dll` (and `SDK\Public_Release\ARM64\FvSDK_ARM64.lib`), `PresentMon_arm64.exe`, and `nvrla.exe`; NVIDIA Streamline `v2.14.16` also publishes official `streamline-sdk-v2.14.16-aarch64.zip` and `arm64ec` releases (DLSS-G runtime plugin behavior on this GPU remains to be tested). Active Windows display mode on `\\.\DISPLAY6` enumerated as `2880x1800` at nominal `120 Hz` (enumerated max `120 Hz` at active resolution; physical monitor upper bound and displayed scanout timing remain unverified). Local Python is ARM64. Measured Release findings on `1264x681` Motion Lab (`v0.10.0`–`v0.16.0`):
 - **Dual-queue async execution (`v0.11.0`)**: D3D12 granted `D3D12_COMMAND_QUEUE_PRIORITY_HIGH` for `present_queue_` alongside `NORMAL` `scene_queue_`; under `reproject /2`, `stress=64`, `120 Hz` deadline lock, missed deadlines dropped from **80/160 (sync)** to **1/160 (async, 81 overlaps)** with `cpu_present_interval_us` median **8,333 µs** and `present_gpu_us` median **48 µs** (trading ~1 extra frame of source age, 10.8 ms → 17.4 ms).
 - **Frame generation & combined mode (`v0.12.0`)**: motion-vector extrapolation `frame_gen` ran in **85–89 µs** GPU time and `combined` (depth camera warp + independent moving-object extrapolation + `T_{n-1}` temporal history recovery) ran in **228–232 µs**, reducing `occlusion_sweep` `/4` mean holes from 0.808% to 0.675% with 0 missed deadlines; rapid `fast_pan` still exposes ~2.1–2.7% out-of-frustum border pixels absent from both `T_n` and `T_{n-1}`, directly motivating oversized render guard bands.
 - **Variable Rate Shading (`v0.13.0`)**: on heavy pixel-bound `combined /2`, `stress=64`, Tier 2 `foveated` VRS cut `scene_gpu_us` median from **14,605 µs → 5,116 µs (2.85x speedup)**, eliminated missed deadlines (3 → 0), and halved both source age (34.4 ms → 17.5 ms) and `invalid_pixel_ratio` (0.630% → 0.299%); Tier 1 `uniform_2x2` reached **3,762 µs (3.88x speedup)**.
 - **Adaptive deadline-aware scheduler (`v0.14.0`)**: with explicit 25%+ GPU headroom reservation and VRS-gain-compensated hysteresis, a `240 Hz` (`4,166 µs`) `stress` `0 → 64 → 0` ramp escalated to Tier 1 (`foveated VRS`, `scene_gpu_us` 1,565 µs) in 26 ms, held `cpu_present_interval_us` median **4,166 µs** / p95 **4,167 µs**, and recovered cleanly to Tier 0 with zero oscillation (2 total decisions).
+- **Offline DXC SM 6.0, wave atomics & specialized PSOs (`v0.15.0`–`v0.16.0`)**: migrating to offline Windows SDK ARM64 `dxc.exe` (`vs_6_0`/`ps_6_0`, `-O3 -WX`), wave-level atomic reductions (`WaveActiveCountBits`), CPU-precomputed homography matrices, and 5 specialized PSOs cut `pure_rotation /4` warp time to **53 µs** (0 depth samples, **2.85x faster** than the 151 µs depth solver), `occlusion_sweep /4` depth warp to **104 µs** (31% faster), and `combined` synthesis to **209 µs** (10% faster) with 0 / 500 missed deadlines.
 
 ## Sources
 
@@ -152,6 +268,12 @@ On 26 November 2026, `nvidia-smi` and the D3D12 capability query reported an `NV
 - [Intel PresentMon](https://github.com/GameTechDev/PresentMon): Windows frame timing and measurement limitations.
 - [AMD FidelityFX Super Resolution 3.1.4](https://gpuopen.com/manuals/fidelityfx_sdk/techniques/super-resolution-interpolation/): another frame-generation integration reference; verify platform support separately.
 - [Microsoft Direct3D 12 synchronization](https://learn.microsoft.com/en-us/windows/win32/direct3d12/user-mode-heap-synchronization): fence-based GPU resource coordination.
+- [Decoupled Sampling for Graphics Pipelines (2011)](https://research.nvidia.com/publication/decoupled-sampling-graphics-pipelines): independent visibility and shading sampling.
+- [Temporal Coherence Methods in Real-Time Rendering (2012)](https://doi.org/10.1111/j.1467-8659.2012.03075.x): comprehensive temporal reuse techniques.
+- [The Visibility Buffer (2013)](https://jcgt.org/published/0002/02/04/): bandwidth-efficient deferred shading architecture.
+- [Adaptive Texture Space Shading (2014)](https://onlinelibrary.wiley.com/doi/10.1111/cgf.12303): adaptive surface-space shading.
+- [Advanced API Performance: Variable Rate Shading (2022)](https://developer.nvidia.com/blog/?p=36325): hardware VRS optimization considerations.
+- [FastAtlas (2025)](https://doi.org/10.1111/cgf.70010): real-time compact texture-space shading caches.
 
 ## Questions to resolve
 
