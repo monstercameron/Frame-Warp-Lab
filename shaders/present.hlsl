@@ -1,3 +1,7 @@
+#ifndef PRESENT_VARIANT
+#define PRESENT_VARIANT 4
+#endif
+
 cbuffer PresentConstants : register(b0) {
     float4 viewport_and_flags;
     float4 warp_flags_and_aspect;
@@ -16,6 +20,9 @@ cbuffer PresentConstants : register(b0) {
     float4 previous_camera_forward_tan_x;
     float4 vrs_params;
     float4 reprojection_thresholds;
+    float4 homography_col_x;
+    float4 homography_col_y;
+    float4 homography_col_z;
 };
 
 cbuffer HudConstants : register(b1) {
@@ -53,6 +60,8 @@ VertexOutput vertex_main(uint vertex_id : SV_VertexID) {
     output.position = float4(corner * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0);
     return output;
 }
+
+#if PRESENT_VARIANT != 0
 
 bool project_world_to_camera_uv(
     float3 world_position,
@@ -94,6 +103,26 @@ float3 reconstruct_camera_world_position(
         + camera_forward * linear_view_depth;
 }
 
+ReprojectionSample evaluate_rotation_homography(float2 target_uv) {
+    ReprojectionSample result;
+    result.source_uv = target_uv;
+    result.linear_depth = 1000.0;
+    result.valid = false;
+
+    float2 target_ndc = float2(target_uv.x * 2.0 - 1.0, 1.0 - target_uv.y * 2.0);
+    float3 projected = homography_col_x.xyz * target_ndc.x
+        + homography_col_y.xyz * target_ndc.y
+        + homography_col_z.xyz;
+    if (projected.z <= 0.05) {
+        return result;
+    }
+    float inv_z = rcp(projected.z);
+    float2 src_uv = float2(projected.x * inv_z * 0.5 + 0.5, 0.5 - projected.y * inv_z * 0.5);
+    result.source_uv = src_uv;
+    result.valid = src_uv.x >= 0.0 && src_uv.x <= 1.0 && src_uv.y >= 0.0 && src_uv.y <= 1.0;
+    return result;
+}
+
 ReprojectionSample evaluate_reprojection_camera(
     Texture2D<float> depth_texture,
     float3 ref_position,
@@ -104,7 +133,9 @@ ReprojectionSample evaluate_reprojection_camera(
     float ref_tan_y,
     float2 target_uv,
     float2 viewport_size,
-    float2 texel_size) {
+    float2 texel_size,
+    int iteration_count,
+    bool check_neighbors) {
     ReprojectionSample result;
     result.source_uv = target_uv;
     result.linear_depth = 1000.0;
@@ -140,6 +171,7 @@ ReprojectionSample evaluate_reprojection_camera(
 
     [unroll]
     for (int iteration = 0; iteration < 4; ++iteration) {
+        if (iteration >= iteration_count) break;
         float3 candidate_world = target_origin + target_ray * ray_distance;
         if (!project_world_to_camera_uv(
                 candidate_world,
@@ -180,22 +212,51 @@ ReprojectionSample evaluate_reprojection_camera(
     float pixel_error = length((roundtrip_uv - target_uv) * viewport_size);
     float relative_depth_error = abs(projected_ref_z - sampled_depth) * inv_safe_depth;
 
-    float depth_left = depth_texture.SampleLevel(point_clamp_sampler, projected_uv - float2(texel_size.x, 0.0), 0);
-    float depth_right = depth_texture.SampleLevel(point_clamp_sampler, projected_uv + float2(texel_size.x, 0.0), 0);
-    float depth_up = depth_texture.SampleLevel(point_clamp_sampler, projected_uv - float2(0.0, texel_size.y), 0);
-    float depth_down = depth_texture.SampleLevel(point_clamp_sampler, projected_uv + float2(0.0, texel_size.y), 0);
-    float max_neighbor_jump = max(
-        max(abs(depth_left - sampled_depth), abs(depth_right - sampled_depth)),
-        max(abs(depth_up - sampled_depth), abs(depth_down - sampled_depth))) * inv_safe_depth;
-
-    bool consistent = (pixel_error <= reprojection_thresholds.x)
-        && (relative_depth_error <= reprojection_thresholds.y)
-        && !(max_neighbor_jump > reprojection_thresholds.z && pixel_error > reprojection_thresholds.w);
+    bool consistent = (pixel_error <= reprojection_thresholds.x) && (relative_depth_error <= reprojection_thresholds.y);
+    if (check_neighbors && consistent) {
+        float depth_left = depth_texture.SampleLevel(point_clamp_sampler, projected_uv - float2(texel_size.x, 0.0), 0);
+        float depth_right = depth_texture.SampleLevel(point_clamp_sampler, projected_uv + float2(texel_size.x, 0.0), 0);
+        float depth_up = depth_texture.SampleLevel(point_clamp_sampler, projected_uv - float2(0.0, texel_size.y), 0);
+        float depth_down = depth_texture.SampleLevel(point_clamp_sampler, projected_uv + float2(0.0, texel_size.y), 0);
+        float max_neighbor_jump = max(
+            max(abs(depth_left - sampled_depth), abs(depth_right - sampled_depth)),
+            max(abs(depth_up - sampled_depth), abs(depth_down - sampled_depth))) * inv_safe_depth;
+        if (max_neighbor_jump > reprojection_thresholds.z && pixel_error > reprojection_thresholds.w) {
+            consistent = false;
+        }
+    }
     result.source_uv = projected_uv;
     result.linear_depth = sampled_depth;
     result.valid = consistent;
     return result;
 }
+
+float3 sample_conservative_hole_fill(float2 sample_uv, float2 texel_size) {
+    float2 clamped_uv = saturate(sample_uv);
+    float2 probe_step = texel_size * 3.0;
+    float best_depth = scene_depth_texture.SampleLevel(point_clamp_sampler, clamped_uv, 0);
+    float2 best_bg_uv = clamped_uv;
+    float2 bg_offsets[4] = {
+        float2(-probe_step.x, 0.0),
+        float2(probe_step.x, 0.0),
+        float2(0.0, -probe_step.y),
+        float2(0.0, probe_step.y)
+    };
+    [unroll]
+    for (int b = 0; b < 4; ++b) {
+        float2 tap_uv = saturate(clamped_uv + bg_offsets[b]);
+        float tap_depth = scene_depth_texture.SampleLevel(point_clamp_sampler, tap_uv, 0);
+        if (tap_depth > best_depth) {
+            best_depth = tap_depth;
+            best_bg_uv = tap_uv;
+        }
+    }
+    return pow(saturate(scene_color_texture.SampleLevel(linear_clamp_sampler, best_bg_uv, 0).rgb), 1.0 / 2.2);
+}
+
+#endif
+
+#if PRESENT_VARIANT == 4
 
 float2 sample_independent_object_motion(float2 sample_uv) {
     float2 total_mv = scene_motion_texture.SampleLevel(point_clamp_sampler, sample_uv, 0);
@@ -282,6 +343,8 @@ ReprojectionSample evaluate_frame_gen(float2 uv, float2 viewport_size, float2 te
     result.valid = consistent;
     return result;
 }
+
+#endif
 
 uint pack_rows_0_to_3(uint r0, uint r1, uint r2, uint r3) {
     return (r0 & 31u) | ((r1 & 31u) << 5u) | ((r2 & 31u) << 10u) | ((r3 & 31u) << 15u);
@@ -462,16 +525,87 @@ float3 composite_hud_layer(float2 pixel_pos, float3 base_color) {
     return result;
 }
 
+float3 composite_overlays(float2 pixel_pos, float2 viewport_size, float3 output_color) {
+    bool overlay_enabled = viewport_and_flags.w > 0.5;
+    if (overlay_enabled) {
+        float2 center_offset = abs(pixel_pos - viewport_size * 0.5);
+        bool horizontal_arm = center_offset.y < 1.25 && center_offset.x > 4.0 && center_offset.x < 14.0;
+        bool vertical_arm = center_offset.x < 1.25 && center_offset.y > 4.0 && center_offset.y < 14.0;
+        bool center_dot = center_offset.x < 1.25 && center_offset.y < 1.25;
+        if (horizontal_arm || vertical_arm || center_dot) {
+            output_color = float3(0.95, 0.98, 1.0);
+        }
+        output_color = composite_hud_layer(pixel_pos, output_color);
+    }
+
+    bool flash_enabled = warp_flags_and_aspect.z > 0.5;
+    if (flash_enabled) {
+        bool in_flash_box = pixel_pos.x >= 0.0 && pixel_pos.x < 72.0
+            && abs(pixel_pos.y - viewport_size.y * 0.5) < 48.0;
+        if (in_flash_box) {
+            bool flash_lit = warp_flags_and_aspect.w > 0.5;
+            output_color = flash_lit ? float3(1.0, 1.0, 1.0) : float3(0.02, 0.02, 0.02);
+        }
+    }
+    return output_color;
+}
+
 float4 pixel_main(VertexOutput input) : SV_Target {
     float2 viewport_size = viewport_and_flags.xy;
     float2 texel_size = float2(source_camera_right_rcp_width.w, source_camera_up_rcp_height.w);
+    float2 uv = input.position.xy * texel_size;
+
+#if PRESENT_VARIANT == 0
+    float3 linear_color = scene_color_texture.SampleLevel(linear_clamp_sampler, uv, 0).rgb;
+    float3 output_color = pow(saturate(linear_color), 1.0 / 2.2);
+    return float4(composite_overlays(input.position.xy, viewport_size, output_color), 1.0);
+#elif PRESENT_VARIANT == 1
+    ReprojectionSample rot = evaluate_rotation_homography(uv);
+    float2 sample_uv = saturate(rot.source_uv);
+    bool collect_stats = synthesis_params.w > 0.5;
+    if (collect_stats) {
+        uint invalid_wave = WaveActiveCountBits(!rot.valid);
+        if (WaveIsFirstLane() && invalid_wave > 0u) {
+            uint previous_invalid;
+            reprojection_stats.InterlockedAdd(0, invalid_wave, previous_invalid);
+        }
+    }
+    float3 output_color = pow(saturate(scene_color_texture.SampleLevel(linear_clamp_sampler, sample_uv, 0).rgb), 1.0 / 2.2);
+    return float4(composite_overlays(input.position.xy, viewport_size, output_color), 1.0);
+#elif PRESENT_VARIANT == 2 || PRESENT_VARIANT == 3
+    ReprojectionSample reproj = evaluate_reprojection_camera(
+        scene_depth_texture,
+        source_camera_position_tan_y.xyz,
+        source_camera_right_rcp_width.xyz,
+        source_camera_up_rcp_height.xyz,
+        source_camera_forward_tan_x.xyz,
+        source_camera_forward_tan_x.w,
+        source_camera_position_tan_y.w,
+        uv,
+        viewport_size,
+        texel_size,
+        PRESENT_VARIANT == 2 ? 2 : 4,
+        PRESENT_VARIANT == 3);
+    float2 sample_uv = saturate(reproj.source_uv);
+    bool collect_stats = synthesis_params.w > 0.5;
+    if (collect_stats) {
+        uint invalid_wave = WaveActiveCountBits(!reproj.valid);
+        if (WaveIsFirstLane() && invalid_wave > 0u) {
+            uint previous_invalid;
+            reprojection_stats.InterlockedAdd(0, invalid_wave, previous_invalid);
+        }
+    }
+    float3 output_color = reproj.valid
+        ? pow(saturate(scene_color_texture.SampleLevel(linear_clamp_sampler, sample_uv, 0).rgb), 1.0 / 2.2)
+        : sample_conservative_hole_fill(sample_uv, texel_size);
+    return float4(composite_overlays(input.position.xy, viewport_size, output_color), 1.0);
+#else
     int diagnostic_view = (int)(viewport_and_flags.z + 0.5);
-    bool overlay_enabled = viewport_and_flags.w > 0.5;
     int synthesis_mode = (int)(synthesis_params.x + 0.5);
     float extrapolation_alpha = synthesis_params.y;
     bool has_previous_history = synthesis_params.z > 0.5;
+    bool collect_stats = synthesis_params.w > 0.5;
     bool synthesis_active = synthesis_mode > 0;
-    float2 uv = input.position.xy * texel_size;
 
     float2 sample_uv = uv;
     bool pixel_valid = true;
@@ -488,7 +622,9 @@ float4 pixel_main(VertexOutput input) : SV_Target {
             source_camera_position_tan_y.w,
             uv,
             viewport_size,
-            texel_size);
+            texel_size,
+            4,
+            true);
         sample_uv = saturate(reproj.source_uv);
         pixel_valid = reproj.valid;
     } else if (synthesis_mode == 2) {
@@ -506,7 +642,9 @@ float4 pixel_main(VertexOutput input) : SV_Target {
                 previous_camera_position_tan_y.w,
                 uv,
                 viewport_size,
-                texel_size);
+                texel_size,
+                4,
+                true);
             if (hist.valid) {
                 sample_uv = saturate(hist.source_uv);
                 pixel_valid = true;
@@ -524,7 +662,9 @@ float4 pixel_main(VertexOutput input) : SV_Target {
             source_camera_position_tan_y.w,
             uv,
             viewport_size,
-            texel_size);
+            texel_size,
+            4,
+            true);
         sample_uv = saturate(reproj.source_uv);
         pixel_valid = reproj.valid;
 
@@ -572,7 +712,9 @@ float4 pixel_main(VertexOutput input) : SV_Target {
                 previous_camera_position_tan_y.w,
                 uv,
                 viewport_size,
-                texel_size);
+                texel_size,
+                4,
+                true);
             if (hist.valid) {
                 sample_uv = saturate(hist.source_uv);
                 pixel_valid = true;
@@ -581,14 +723,13 @@ float4 pixel_main(VertexOutput input) : SV_Target {
         }
     }
 
-    bool collect_stats = synthesis_params.w > 0.5;
     if (synthesis_active && collect_stats) {
-        if (recovered_from_history) {
-            uint previous_recovered;
-            reprojection_stats.InterlockedAdd(4, 1, previous_recovered);
-        } else if (!pixel_valid) {
-            uint previous_invalid;
-            reprojection_stats.InterlockedAdd(0, 1, previous_invalid);
+        uint invalid_wave = WaveActiveCountBits(!pixel_valid);
+        uint recovered_wave = WaveActiveCountBits(recovered_from_history);
+        if (WaveIsFirstLane()) {
+            uint previous_val;
+            if (invalid_wave > 0u) reprojection_stats.InterlockedAdd(0, invalid_wave, previous_val);
+            if (recovered_wave > 0u) reprojection_stats.InterlockedAdd(4, recovered_wave, previous_val);
         }
     }
 
@@ -616,27 +757,7 @@ float4 pixel_main(VertexOutput input) : SV_Target {
             if (diagnostic_view == 3) {
                 output_color = float3(1.0, 0.12, 0.78);
             } else {
-                float2 clamped_uv = saturate(sample_uv);
-                float2 probe_step = texel_size * 3.0;
-                float best_depth = scene_depth_texture.SampleLevel(point_clamp_sampler, clamped_uv, 0);
-                float2 best_bg_uv = clamped_uv;
-                float2 bg_offsets[4] = {
-                    float2(-probe_step.x, 0.0),
-                    float2(probe_step.x, 0.0),
-                    float2(0.0, -probe_step.y),
-                    float2(0.0, probe_step.y)
-                };
-                [unroll]
-                for (int b = 0; b < 4; ++b) {
-                    float2 tap_uv = saturate(clamped_uv + bg_offsets[b]);
-                    float tap_depth = scene_depth_texture.SampleLevel(point_clamp_sampler, tap_uv, 0);
-                    if (tap_depth > best_depth) {
-                        best_depth = tap_depth;
-                        best_bg_uv = tap_uv;
-                    }
-                }
-                float3 bg_linear = scene_color_texture.SampleLevel(linear_clamp_sampler, best_bg_uv, 0).rgb;
-                output_color = pow(saturate(bg_linear), 1.0 / 2.2);
+                output_color = sample_conservative_hole_fill(sample_uv, texel_size);
             }
         }
         if (diagnostic_view == 4) {
@@ -670,26 +791,6 @@ float4 pixel_main(VertexOutput input) : SV_Target {
         }
     }
 
-    if (overlay_enabled) {
-        float2 center_offset = abs(input.position.xy - viewport_size * 0.5);
-        bool horizontal_arm = center_offset.y < 1.25 && center_offset.x > 4.0 && center_offset.x < 14.0;
-        bool vertical_arm = center_offset.x < 1.25 && center_offset.y > 4.0 && center_offset.y < 14.0;
-        bool center_dot = center_offset.x < 1.25 && center_offset.y < 1.25;
-        if (horizontal_arm || vertical_arm || center_dot) {
-            output_color = float3(0.95, 0.98, 1.0);
-        }
-        output_color = composite_hud_layer(input.position.xy, output_color);
-    }
-
-    bool flash_enabled = warp_flags_and_aspect.z > 0.5;
-    if (flash_enabled) {
-        bool in_flash_box = input.position.x >= 0.0 && input.position.x < 72.0
-            && abs(input.position.y - viewport_size.y * 0.5) < 48.0;
-        if (in_flash_box) {
-            bool flash_lit = warp_flags_and_aspect.w > 0.5;
-            output_color = flash_lit ? float3(1.0, 1.0, 1.0) : float3(0.02, 0.02, 0.02);
-        }
-    }
-
-    return float4(output_color, 1.0);
+    return float4(composite_overlays(input.position.xy, viewport_size, output_color), 1.0);
+#endif
 }

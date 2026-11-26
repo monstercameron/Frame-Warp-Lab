@@ -58,6 +58,7 @@ struct FrameExecutionMetrics {
     std::uint32_t completed_invalid_pixel_count;
     std::uint32_t completed_temporal_recovered_count;
     std::uint32_t completed_total_pixel_count;
+    PresentVariant selected_present_variant;
     bool completed_slot_valid;
     bool completed_slot_warped;
     bool async_overlapped;
@@ -188,7 +189,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12RootSignature> scene_root_signature_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> scene_pipeline_;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> present_root_signature_;
-    Microsoft::WRL::ComPtr<ID3D12PipelineState> present_pipeline_;
+    std::array<Microsoft::WRL::ComPtr<ID3D12PipelineState>, 5> present_pipelines_;
     Microsoft::WRL::ComPtr<ID3D12Resource> scene_constant_buffer_;
     Microsoft::WRL::ComPtr<ID3D12Resource> present_constant_buffer_;
     Microsoft::WRL::ComPtr<ID3D12Resource> hud_constant_buffer_;

@@ -1,16 +1,16 @@
 #include "renderer.h"
 #include "simd_math.h"
 
-#include <d3dcompiler.h>
-
 #include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <stdexcept>
 #include <string>
 #include <system_error>
+#include <vector>
 
 using Microsoft::WRL::ComPtr;
 
@@ -49,6 +49,9 @@ struct PresentConstantsData {
     float previous_camera_forward_tan_x[4];
     float vrs_params[4];
     float reprojection_thresholds[4];
+    float homography_col_x[4];
+    float homography_col_y[4];
+    float homography_col_z[4];
 };
 
 struct HudConstantsData {
@@ -79,18 +82,29 @@ std::filesystem::path shader_directory() {
     return std::filesystem::path(executable_path).parent_path() / L"shaders";
 }
 
-ComPtr<ID3DBlob> compile_hlsl(const std::filesystem::path& path, const char* entry, const char* target) {
-    ComPtr<ID3DBlob> shader;
-    ComPtr<ID3DBlob> errors;
-    const HRESULT result = D3DCompileFromFile(path.c_str(), nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE,
-                                              entry, target, D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &shader, &errors);
-    if (FAILED(result)) {
-        const std::string detail = errors
-            ? std::string(static_cast<const char*>(errors->GetBufferPointer()), errors->GetBufferSize())
-            : "Shader file unavailable";
-        throw std::runtime_error("Shader compilation failed (" + std::string(entry) + "): " + detail);
+std::vector<std::uint8_t> load_shader_bytecode(const std::filesystem::path& path) {
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
+    if (!file) {
+        throw std::runtime_error("Could not open compiled shader: " + path.string());
     }
-    return shader;
+    const std::streamsize size = file.tellg();
+    if (size <= 0) {
+        throw std::runtime_error("Compiled shader is empty: " + path.string());
+    }
+    std::vector<std::uint8_t> bytecode(static_cast<std::size_t>(size));
+    file.seekg(0, std::ios::beg);
+    if (!file.read(reinterpret_cast<char*>(bytecode.data()), size)) {
+        throw std::runtime_error("Could not read compiled shader: " + path.string());
+    }
+    return bytecode;
+}
+
+float dot3(Float3 a, Float3 b) {
+    return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+
+Float3 scale3(Float3 v, float s) {
+    return Float3{v.x * s, v.y * s, v.z * s};
 }
 
 D3D12_RESOURCE_BARRIER transition_barrier(ID3D12Resource* resource, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after) {
@@ -590,6 +604,7 @@ FrameExecutionMetrics Renderer::present_from_source(const PresentRequest& reques
         0,
         0,
         0,
+        PresentVariant::simple,
         false,
         false,
         has_scene_in_flight(),
@@ -696,6 +711,36 @@ FrameExecutionMetrics Renderer::present_from_source(const PresentRequest& reques
         0.18f,
         0.65f);
 
+    const Float3 src_proj_x = scale3(request.source_snapshot.camera.right, 1.0f / source_tan_x);
+    const Float3 src_proj_y = scale3(request.source_snapshot.camera.up, 1.0f / source_tan_y);
+    const Float3 src_proj_z = request.source_snapshot.camera.forward;
+    const Float3 tgt_col_x = scale3(request.target_camera.right, target_tan_x);
+    const Float3 tgt_col_y = scale3(request.target_camera.up, target_tan_y);
+    const Float3 tgt_col_z = request.target_camera.forward;
+    simd::store_float4(present_constants->homography_col_x, dot3(tgt_col_x, src_proj_x), dot3(tgt_col_x, src_proj_y), dot3(tgt_col_x, src_proj_z), 0.0f);
+    simd::store_float4(present_constants->homography_col_y, dot3(tgt_col_y, src_proj_x), dot3(tgt_col_y, src_proj_y), dot3(tgt_col_y, src_proj_z), 0.0f);
+    simd::store_float4(present_constants->homography_col_z, dot3(tgt_col_z, src_proj_x), dot3(tgt_col_z, src_proj_y), dot3(tgt_col_z, src_proj_z), 0.0f);
+
+    PresentVariant chosen_variant = PresentVariant::synthesis;
+    if (request.diagnostic_view == DiagnosticView::final_color) {
+        if (request.synthesis_mode == SynthesisMode::passthrough) {
+            chosen_variant = PresentVariant::simple;
+        } else if (request.synthesis_mode == SynthesisMode::reproject) {
+            const float dx = request.target_camera.position.x - request.source_snapshot.camera.position.x;
+            const float dy = request.target_camera.position.y - request.source_snapshot.camera.position.y;
+            const float dz = request.target_camera.position.z - request.source_snapshot.camera.position.z;
+            const float translation_sq = dx * dx + dy * dy + dz * dz;
+            if (translation_sq < 0.0005f * 0.0005f) {
+                chosen_variant = PresentVariant::rotation_homography;
+            } else if (translation_sq < 0.04f * 0.04f) {
+                chosen_variant = PresentVariant::depth_fast;
+            } else {
+                chosen_variant = PresentVariant::depth_full;
+            }
+        }
+    }
+    metrics.selected_present_variant = chosen_variant;
+
     if (render_overlay && request.hud) {
         auto* hud_destination = reinterpret_cast<HudConstantsData*>(mapped_hud_constants_ + hud_offset);
         write_hud_constants_simd(hud_destination, *request.hud, viewport_width_, viewport_height_);
@@ -733,7 +778,7 @@ FrameExecutionMetrics Renderer::present_from_source(const PresentRequest& reques
     ID3D12DescriptorHeap* heaps[] = {shader_resource_heap_.Get()};
     present_command_list_->SetDescriptorHeaps(1, heaps);
     present_command_list_->SetGraphicsRootSignature(present_root_signature_.Get());
-    present_command_list_->SetPipelineState(present_pipeline_.Get());
+    present_command_list_->SetPipelineState(present_pipelines_[static_cast<std::size_t>(chosen_variant)].Get());
     present_command_list_->SetGraphicsRootConstantBufferView(0, present_constant_buffer_->GetGPUVirtualAddress() + constant_offset);
     auto source_srv_gpu = shader_resource_heap_->GetGPUDescriptorHandleForHeapStart();
     source_srv_gpu.ptr += static_cast<UINT64>(request.source_slot_index) * targets_per_source_slot * shader_resource_descriptor_stride_;
@@ -874,10 +919,16 @@ void Renderer::flush() {
 
 void Renderer::create_pipelines() {
     const auto shaders = shader_directory();
-    const auto scene_vs = compile_hlsl(shaders / L"motion_lab.hlsl", "vertex_main", "vs_5_0");
-    const auto scene_ps = compile_hlsl(shaders / L"motion_lab.hlsl", "pixel_main", "ps_5_0");
-    const auto present_vs = compile_hlsl(shaders / L"present.hlsl", "vertex_main", "vs_5_0");
-    const auto present_ps = compile_hlsl(shaders / L"present.hlsl", "pixel_main", "ps_5_0");
+    const auto scene_vs = load_shader_bytecode(shaders / L"scene_vs.cso");
+    const auto scene_ps = load_shader_bytecode(shaders / L"scene_ps.cso");
+    const auto present_vs = load_shader_bytecode(shaders / L"present_vs.cso");
+    const std::array<std::vector<std::uint8_t>, 5> present_ps_variants = {
+        load_shader_bytecode(shaders / L"present_simple_ps.cso"),
+        load_shader_bytecode(shaders / L"present_rot_warp_ps.cso"),
+        load_shader_bytecode(shaders / L"present_depth_fast_ps.cso"),
+        load_shader_bytecode(shaders / L"present_depth_full_ps.cso"),
+        load_shader_bytecode(shaders / L"present_synthesis_ps.cso"),
+    };
 
     D3D12_ROOT_PARAMETER scene_parameter{};
     scene_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
@@ -896,8 +947,8 @@ void Renderer::create_pipelines() {
 
     D3D12_GRAPHICS_PIPELINE_STATE_DESC scene_pipeline_desc{};
     scene_pipeline_desc.pRootSignature = scene_root_signature_.Get();
-    scene_pipeline_desc.VS = {scene_vs->GetBufferPointer(), scene_vs->GetBufferSize()};
-    scene_pipeline_desc.PS = {scene_ps->GetBufferPointer(), scene_ps->GetBufferSize()};
+    scene_pipeline_desc.VS = {scene_vs.data(), scene_vs.size()};
+    scene_pipeline_desc.PS = {scene_ps.data(), scene_ps.size()};
     for (UINT i = 0; i < targets_per_source_slot; ++i) {
         scene_pipeline_desc.BlendState.RenderTarget[i].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
     }
@@ -974,8 +1025,7 @@ void Renderer::create_pipelines() {
 
     D3D12_GRAPHICS_PIPELINE_STATE_DESC present_pipeline_desc{};
     present_pipeline_desc.pRootSignature = present_root_signature_.Get();
-    present_pipeline_desc.VS = {present_vs->GetBufferPointer(), present_vs->GetBufferSize()};
-    present_pipeline_desc.PS = {present_ps->GetBufferPointer(), present_ps->GetBufferSize()};
+    present_pipeline_desc.VS = {present_vs.data(), present_vs.size()};
     present_pipeline_desc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
     present_pipeline_desc.SampleMask = UINT_MAX;
     present_pipeline_desc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
@@ -987,7 +1037,10 @@ void Renderer::create_pipelines() {
     present_pipeline_desc.NumRenderTargets = 1;
     present_pipeline_desc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
     present_pipeline_desc.SampleDesc.Count = 1;
-    check(device_->CreateGraphicsPipelineState(&present_pipeline_desc, IID_PPV_ARGS(&present_pipeline_)), "Create present graphics pipeline");
+    for (std::size_t variant = 0; variant < present_pipelines_.size(); ++variant) {
+        present_pipeline_desc.PS = {present_ps_variants[variant].data(), present_ps_variants[variant].size()};
+        check(device_->CreateGraphicsPipelineState(&present_pipeline_desc, IID_PPV_ARGS(&present_pipelines_[variant])), "Create present graphics pipeline variant");
+    }
 }
 
 void Renderer::create_constant_buffers() {

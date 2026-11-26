@@ -91,6 +91,11 @@ inline CameraBasis evaluate_scripted_camera(double scene_time_seconds, CameraPat
             const float yaw = static_cast<float>(0.20 + 0.08 * std::sin(scene_time_seconds * 0.6));
             return make_camera_basis(Float3{-1.8f, 1.35f, 1.0f}, yaw, 0.02f, vertical_fov_radians);
         }
+        case CameraPath::pure_rotation: {
+            const float yaw = static_cast<float>(0.65 * std::sin(scene_time_seconds * 2.2));
+            const float pitch = static_cast<float>(0.14 * std::sin(scene_time_seconds * 1.4));
+            return make_camera_basis(Float3{0.0f, 1.45f, 1.5f}, yaw, pitch, vertical_fov_radians);
+        }
         case CameraPath::corridor_sway:
         default: {
             const float x = static_cast<float>(0.8 * std::sin(scene_time_seconds * 0.45));

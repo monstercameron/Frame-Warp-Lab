@@ -1,5 +1,23 @@
 # Development log
 
+## v0.16.0 — Offline DXC Shader Model 6.0, wave-level atomics, precomputed camera homography, and specialized presentation PSOs
+
+- Migrated shader compilation in `CMakeLists.txt` and `src/renderer.cpp` from runtime FXC (`vs_5_0`/`ps_5_0`, `d3dcompiler`) to offline build-time Windows SDK ARM64 `dxc.exe` compilation (`vs_6_0`/`ps_6_0`, `-O3 -WX`), loading precompiled DXIL `.cso` bytecode directly at startup.
+- Added precomputed CPU-to-GPU relative projective homography columns (`homography_col_x/y/z`) in `PresentConstants` and split `shaders/present.hlsl` into 5 specialized PSOs selected per frame on the CPU based on mode, diagnostic view, and camera translation displacement:
+  - `present_simple_ps.cso`: plain passthrough + overlays (`full_render` / `repeat`).
+  - `present_rot_warp_ps.cso`: **0-depth-sample** projective homography for pure camera rotation (`translation < 0.5 mm`, e.g., mouse-look or the new deterministic `pure_rotation` camera path).
+  - `present_depth_fast_ps.cso`: 2-iteration lightweight depth warp without 4-neighbor gradient checks for small translations (`0.5 mm <= translation < 4 cm`).
+  - `present_depth_full_ps.cso`: 4-iteration full depth-guided warp with 4-neighbor edge checks (`translation >= 4 cm`).
+  - `present_synthesis_ps.cso`: `frame_gen`, `combined`, and diagnostic views (`depth`, `motion`, `holes`, `vrs`).
+- Replaced per-pixel global `reprojection_stats.InterlockedAdd` contention with uniform-control-flow Shader Model 6.0 wave reductions (`WaveActiveCountBits` + `WaveIsFirstLane`), cutting atomic traffic by up to 32x per wave.
+- Updated `AGENTS.md` to require `git push` after every commit, and added the Shading and Resolution Technology Priorities table to `research.md` and `experiment-plan.md`.
+- Verified zero-warning ARM64 Release and Debug builds (all 8 DXIL shaders compiled with `-WX`), Debug D3D12 Debug Layer smoke test on `rotation_homography`, and live 100-frame Release measurements on `NVIDIA RTX Spark N1X` (`1264x681`, `120 Hz` DWM deadline lock, `diagnostic` instrumentation, 0 / 500 missed deadlines across all 5 variants):
+  - `simple` (`full_render`): `present_gpu_us` median **52 µs** (min 36 µs).
+  - `rotation_homography` (`pure_rotation /4`, 0 depth samples): `present_gpu_us` median **53 µs** (min 41 µs) — within 1 µs of plain passthrough and **2.85x faster** than the previous 151 µs 9-sample depth solver, even while counting 2.2% out-of-frustum invalid pixels via wave reductions.
+  - `depth_fast` / `depth_full` (`occlusion_sweep /4`): `present_gpu_us` median dropped from **151 µs (`v0.12.0` FXC SM 5.0)** to **104 µs** (**31% faster**).
+  - `synthesis` (`combined`, `occlusion_sweep /4`): `present_gpu_us` median dropped from **232 µs** to **209 µs** (**10% faster**).
+- Note on retained tradeoffs: `R32_FLOAT` linear depth was intentionally kept over `R16_FLOAT` to preserve depth-reprojection accuracy at corridor distances (~25 m), and the SDF raymarcher was retained as a controlled synthetic pixel workload for historical continuity.
+
 ## v0.15.0 — Wait/fence error hardening, seqlock IPC, exact GPU attribution, typed events, and instrumentation levels
 
 - Hardened synchronization and failure handling in `src/renderer.h` and `src/renderer.cpp`:

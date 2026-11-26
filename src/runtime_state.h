@@ -10,7 +10,7 @@
 namespace frame_warp_lab {
 
 inline constexpr wchar_t window_class_name[] = L"FrameWarpLabWindow";
-inline constexpr std::uint32_t runtime_state_version = 14;
+inline constexpr std::uint32_t runtime_state_version = 15;
 inline constexpr std::size_t runtime_event_capacity = 64;
 inline constexpr std::size_t runtime_frame_trace_capacity = 256;
 inline constexpr std::size_t hud_graph_sample_count = 128;
@@ -88,6 +88,15 @@ enum class CameraPath : std::int32_t {
     occlusion_sweep = 2,
     camera_cut = 3,
     manual = 4,
+    pure_rotation = 5,
+};
+
+enum class PresentVariant : std::int32_t {
+    simple = 0,
+    rotation_homography = 1,
+    depth_fast = 2,
+    depth_full = 3,
+    synthesis = 4,
 };
 
 enum class FrameKind : std::int32_t {
@@ -235,6 +244,7 @@ struct RuntimeState {
     std::int64_t adaptive_reserved_headroom_us;
     std::int64_t adaptive_decision_count;
     std::int32_t instrumentation_level;
+    std::int32_t last_present_variant;
     std::int32_t diagnostic_view;
     std::int32_t camera_path;
     std::int32_t stress_level;
@@ -407,6 +417,17 @@ inline const char* diagnostic_view_name(std::int32_t view) {
     }
 }
 
+inline const char* present_variant_name(std::int32_t variant) {
+    switch (static_cast<PresentVariant>(variant)) {
+        case PresentVariant::simple: return "simple";
+        case PresentVariant::rotation_homography: return "rotation_homography";
+        case PresentVariant::depth_fast: return "depth_fast";
+        case PresentVariant::depth_full: return "depth_full";
+        case PresentVariant::synthesis: return "synthesis";
+        default: return "unknown";
+    }
+}
+
 inline const char* camera_path_name(std::int32_t path) {
     switch (static_cast<CameraPath>(path)) {
         case CameraPath::corridor_sway: return "corridor_sway";
@@ -414,6 +435,7 @@ inline const char* camera_path_name(std::int32_t path) {
         case CameraPath::occlusion_sweep: return "occlusion_sweep";
         case CameraPath::camera_cut: return "camera_cut";
         case CameraPath::manual: return "manual";
+        case CameraPath::pure_rotation: return "pure_rotation";
         default: return "unknown";
     }
 }

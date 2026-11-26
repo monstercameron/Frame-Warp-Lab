@@ -66,6 +66,18 @@ NVIDIA Streamline/DLSS-G can control its own swap chain, pacing and generated fr
 | 9 | 1080p, 1440p and 4K benchmarks | Establish scaling characteristics. |
 | 10 | Complex game-like workloads | Validate practical viability. |
 
+## Shading and resolution technology priorities
+
+| Technology | Priority for Frame Warp Lab |
+| :--- | :--- |
+| Hardware VRS | Essential |
+| Adaptive VRS | Essential |
+| Artifact-aware VRS | Essential |
+| Full-resolution depth and motion | Essential |
+| Selective regional repainting | High |
+| Dynamic resolution | Optional fallback |
+| Temporal upscaling | Optional |
+
 ## Experiment progression and CLI
 
 1. Build agent-accessible, structured logging and CLI inspection/control alongside the baseline. Expose supported and unavailable capabilities, display target, configuration, run lifecycle, per-frame correlation and bounded trace capture. See `AGENTS.md` for the full interface requirements.

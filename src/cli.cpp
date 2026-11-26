@@ -264,6 +264,7 @@ int print_status(const WindowInstance& instance) {
     const std::int64_t adaptive_reserved_headroom_us = std::atomic_ref<std::int64_t>(state->adaptive_reserved_headroom_us).load(std::memory_order_acquire);
     const std::int64_t adaptive_decision_count = std::atomic_ref<std::int64_t>(state->adaptive_decision_count).load(std::memory_order_acquire);
     const std::int32_t instrumentation_level = std::atomic_ref<std::int32_t>(state->instrumentation_level).load(std::memory_order_acquire);
+    const std::int32_t last_present_variant = std::atomic_ref<std::int32_t>(state->last_present_variant).load(std::memory_order_acquire);
     const std::int32_t diagnostic_view = std::atomic_ref<std::int32_t>(state->diagnostic_view).load(std::memory_order_acquire);
     const std::int32_t camera_path = std::atomic_ref<std::int32_t>(state->camera_path).load(std::memory_order_acquire);
     const std::int32_t stress_level = std::atomic_ref<std::int32_t>(state->stress_level).load(std::memory_order_acquire);
@@ -308,6 +309,7 @@ int print_status(const WindowInstance& instance) {
               << ",\"high_priority_present_queue\":" << (high_priority_present_queue ? "true" : "false")
               << ",\"async_overlapped_presents\":" << async_overlaps
               << ",\"instrumentation\":\"" << frame_warp_lab::instrumentation_level_name(instrumentation_level) << "\""
+              << ",\"present_variant\":\"" << frame_warp_lab::present_variant_name(last_present_variant) << "\""
               << ",\"wait_before_input_sample\":true"
               << ",\"max_frame_latency\":2,\"displayed_frame_timing\":null}"
               << ",\"timing\":{\"cpu_present_interval_us\":" << present_interval_us
@@ -360,7 +362,7 @@ int print_status(const WindowInstance& instance) {
               << ",\"decision_count\":" << adaptive_decision_count << "}"
               << ",\"features\":{\"scene\":\"cpu_camera_gbuffer\",\"hud\":\"2d_frametime_graph_and_readout\",\"async_gpu\":\"dual_queue_3slot_ring\",\"reprojection\":\"depth_camera_warp\",\"nvidia_pcl_markers\":\"etw_tracelogging_active\",\"frame_generation\":\"mv_extrapolation_and_temporal_history\",\"vrs\":\""
               << (vrs_tier >= 2 ? "tier1_and_tier2_foveated_image" : vrs_tier == 1 ? "tier1_per_draw" : "unsupported")
-              << "\",\"adaptive_scheduler\":\"deadline_headroom_ladder\",\"ipc\":\"seqlock_v14\"}}\n";
+              << "\",\"adaptive_scheduler\":\"deadline_headroom_ladder\",\"ipc\":\"seqlock_v15\",\"shaders\":\"dxc_sm6_0_wave_specialized\"}}\n";
     return 0;
 }
 
@@ -579,7 +581,8 @@ int apply_setting(const WindowInstance& instance, const std::wstring& key, const
         else if (value == L"occlusion_sweep") parameter = static_cast<LPARAM>(frame_warp_lab::CameraPath::occlusion_sweep);
         else if (value == L"camera_cut") parameter = static_cast<LPARAM>(frame_warp_lab::CameraPath::camera_cut);
         else if (value == L"manual") parameter = static_cast<LPARAM>(frame_warp_lab::CameraPath::manual);
-        else return fail("invalid_value", "Expected path in {corridor_sway, fast_pan, occlusion_sweep, camera_cut, manual}");
+        else if (value == L"pure_rotation") parameter = static_cast<LPARAM>(frame_warp_lab::CameraPath::pure_rotation);
+        else return fail("invalid_value", "Expected path in {corridor_sway, fast_pan, occlusion_sweep, camera_cut, manual, pure_rotation}");
     } else if (key == L"stress") {
         unsigned long parsed = 0;
         if (!parse_unsigned_long(value.c_str(), parsed) || parsed > static_cast<unsigned long>(frame_warp_lab::max_stress_level)) {
@@ -736,7 +739,7 @@ int print_capabilities() {
 
 int wmain(int argument_count, wchar_t** arguments) {
     if (argument_count == 2 && std::wstring(arguments[1]) == L"help") {
-        std::cout << "{\"ok\":true,\"schema_version\":10,\"commands\":[\"help\",\"start\",\"instances\",\"status <pid>\",\"events <pid>\",\"trace <pid> [limit] [summary]\",\"set <pid> <key> <value>\",\"pause <pid>\",\"resume <pid>\",\"reset <pid>\",\"stop <pid>\",\"capabilities\"],\"settings\":{\"mode\":[\"full_render\",\"repeat\",\"reproject\",\"frame_gen\",\"combined\"],\"pacer\":[\"deadline\",\"vsync_only\",\"unlocked\"],\"target_fps\":\"0 or 30..500\",\"async_gpu\":[\"on\",\"off\"],\"vrs\":[\"off\",\"uniform_2x2\",\"foveated\"],\"adaptive\":[\"on\",\"off\"],\"instrumentation\":[\"minimal\",\"standard\",\"diagnostic\"],\"divider\":\"1..8\",\"vsync\":[\"on\",\"off\"],\"view\":[\"final\",\"depth\",\"motion\",\"holes\",\"vrs\"],\"path\":[\"corridor_sway\",\"fast_pan\",\"occlusion_sweep\",\"camera_cut\",\"manual\"],\"stress\":\"0..64\",\"overlay\":[\"on\",\"off\"],\"flash\":[\"on\",\"off\"]}}\n";
+        std::cout << "{\"ok\":true,\"schema_version\":10,\"commands\":[\"help\",\"start\",\"instances\",\"status <pid>\",\"events <pid>\",\"trace <pid> [limit] [summary]\",\"set <pid> <key> <value>\",\"pause <pid>\",\"resume <pid>\",\"reset <pid>\",\"stop <pid>\",\"capabilities\"],\"settings\":{\"mode\":[\"full_render\",\"repeat\",\"reproject\",\"frame_gen\",\"combined\"],\"pacer\":[\"deadline\",\"vsync_only\",\"unlocked\"],\"target_fps\":\"0 or 30..500\",\"async_gpu\":[\"on\",\"off\"],\"vrs\":[\"off\",\"uniform_2x2\",\"foveated\"],\"adaptive\":[\"on\",\"off\"],\"instrumentation\":[\"minimal\",\"standard\",\"diagnostic\"],\"divider\":\"1..8\",\"vsync\":[\"on\",\"off\"],\"view\":[\"final\",\"depth\",\"motion\",\"holes\",\"vrs\"],\"path\":[\"corridor_sway\",\"fast_pan\",\"occlusion_sweep\",\"camera_cut\",\"manual\",\"pure_rotation\"],\"stress\":\"0..64\",\"overlay\":[\"on\",\"off\"],\"flash\":[\"on\",\"off\"]}}\n";
         return 0;
     }
     if (argument_count == 2 && std::wstring(arguments[1]) == L"capabilities") return print_capabilities();

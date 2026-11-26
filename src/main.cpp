@@ -224,6 +224,10 @@ public:
         std::atomic_ref<std::int64_t>(state_->trace_count).store(sequence, std::memory_order_release);
     }
 
+    void update_present_variant(frame_warp_lab::PresentVariant variant) {
+        std::atomic_ref<std::int32_t>(state_->last_present_variant).store(static_cast<std::int32_t>(variant), std::memory_order_release);
+    }
+
     void record_resize() {
         const std::int32_t resize_count = std::atomic_ref<std::int32_t>(state_->resize_count).fetch_add(1, std::memory_order_acq_rel) + 1;
         record_event(frame_warp_lab::RuntimeEventType::swap_chain_resized, resize_count);
@@ -369,6 +373,7 @@ const char* short_path_label(frame_warp_lab::CameraPath path) {
         case frame_warp_lab::CameraPath::occlusion_sweep: return "OCCL";
         case frame_warp_lab::CameraPath::camera_cut: return "CUT";
         case frame_warp_lab::CameraPath::manual: return "MANUAL";
+        case frame_warp_lab::CameraPath::pure_rotation: return "ROTATE";
         default: return "UNK";
     }
 }
@@ -710,7 +715,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                         pacer.reset();
                         runtime_state.record_event(frame_warp_lab::RuntimeEventType::scene_reset, 0);
                     } else if (message.wParam == 'C') {
-                        const auto next_path = static_cast<frame_warp_lab::CameraPath>((static_cast<std::int32_t>(simulation.path()) + 1) % 5);
+                        const auto next_path = static_cast<frame_warp_lab::CameraPath>((static_cast<std::int32_t>(simulation.path()) + 1) % 6);
                         simulation.set_path(next_path);
                         renderer.invalidate_source_history();
                         config_changed = true;
@@ -759,7 +764,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                         }
                     } else if (command == frame_warp_lab::ControlCommand::set_camera_path) {
                         const auto raw = static_cast<std::int32_t>(message.lParam);
-                        if (raw >= 0 && raw <= 4) {
+                        if (raw >= 0 && raw <= 5) {
                             simulation.set_path(static_cast<frame_warp_lab::CameraPath>(raw));
                             renderer.invalidate_source_history();
                             runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, raw, frame_warp_lab::ConfigKey::camera_path);
@@ -1155,6 +1160,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 yaw_deg,
                 pitch_deg,
                 latency_monitor);
+            runtime_state.update_present_variant(gpu_metrics.selected_present_variant);
             runtime_state.record_frame(
                 frame_warp_lab::RuntimeFrameSample{
                     0,
