@@ -71,6 +71,7 @@ public:
         std::atomic_ref<std::int32_t>(state_->dlssg_dynamic_mfg_supported).store(streamline_caps.dynamic_mfg_supported ? 1 : 0, std::memory_order_relaxed);
         std::atomic_ref<std::int32_t>(state_->dlssg_max_frames_to_generate).store(static_cast<std::int32_t>(streamline_caps.max_frames_to_generate), std::memory_order_relaxed);
         std::atomic_ref<std::int32_t>(state_->dlssg_requested_multiplier).store(2, std::memory_order_relaxed);
+        std::atomic_ref<std::int32_t>(state_->tile_budget_pct).store(100, std::memory_order_relaxed);
         std::atomic_ref<std::int64_t>(state_->last_input_to_present_us).store(-1, std::memory_order_relaxed);
         std::atomic_ref<std::int64_t>(state_->last_scene_gpu_us).store(-1, std::memory_order_relaxed);
         std::atomic_ref<std::int64_t>(state_->last_present_gpu_us).store(-1, std::memory_order_relaxed);
@@ -157,6 +158,15 @@ public:
         std::atomic_ref<std::int32_t>(state_->adaptive_utilization_permille).store(permille, std::memory_order_release);
         std::atomic_ref<std::int64_t>(state_->adaptive_reserved_headroom_us).store(telemetry.reserved_headroom_us, std::memory_order_release);
         std::atomic_ref<std::int64_t>(state_->adaptive_decision_count).store(telemetry.decision_count, std::memory_order_release);
+    }
+
+    void update_selective_tiles(bool enabled, std::int32_t budget_pct, const frame_warp_lab::TileCacheStats& stats) {
+        std::atomic_ref<std::int32_t>(state_->selective_tiles_enabled).store(enabled ? 1 : 0, std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->tile_budget_pct).store(budget_pct, std::memory_order_release);
+        std::atomic_ref<std::uint32_t>(state_->last_tile_total_count).store(stats.total_tiles, std::memory_order_release);
+        std::atomic_ref<std::uint32_t>(state_->last_tile_cached_count).store(stats.cached_tiles, std::memory_order_release);
+        std::atomic_ref<std::uint32_t>(state_->last_tile_shaded_count).store(stats.shaded_tiles, std::memory_order_release);
+        std::atomic_ref<std::uint32_t>(state_->last_tile_deferred_count).store(stats.deferred_tiles, std::memory_order_release);
     }
 
     void update_scene(
@@ -267,6 +277,9 @@ public:
             target.missed_deadline = sample.missed_deadline;
             target.discontinuity = sample.discontinuity;
             target.dlssg_frames_presented = sample.dlssg_frames_presented;
+            target.tile_total_count = sample.tile_total_count;
+            target.tile_shaded_count = sample.tile_shaded_count;
+            target.tile_deferred_count = sample.tile_deferred_count;
         });
         std::atomic_ref<std::int64_t>(state_->trace_count).store(sequence, std::memory_order_release);
     }
@@ -451,6 +464,8 @@ void format_hud_lines(
     bool adaptive_enabled,
     std::int32_t adaptive_tier,
     frame_warp_lab::VrsMode active_vrs_mode,
+    bool selective_tiles_enabled,
+    const frame_warp_lab::TileCacheStats& tile_stats,
     frame_warp_lab::CameraPath path,
     std::int32_t stress_level,
     bool mouse_look_locked) {
@@ -465,12 +480,15 @@ void format_hud_lines(
 
     std::snprintf(hud.lines[0], sizeof(hud.lines[0]), "FPS %5.1f  FT %5.2f MS  %s /%d  PACE %s", fps, frame_ms, short_mode_label(mode), source_divider, short_pacer_label(pacer_mode));
     std::snprintf(hud.lines[1], sizeof(hud.lines[1]), "GPU SCN %4.2f  WRP %4.2f  IN-PR %4.2f  MS", scene_ms, warp_ms, input_ms);
-    if (adaptive_enabled) {
+    if (selective_tiles_enabled && tile_stats.total_tiles > 0U) {
+        const double shaded_pct = 100.0 * static_cast<double>(tile_stats.shaded_tiles) / static_cast<double>(tile_stats.total_tiles);
+        std::snprintf(hud.lines[2], sizeof(hud.lines[2]), "TILE %4.1f%%  DEF %u  HOLE %4.2f%%  STR %d", shaded_pct, tile_stats.deferred_tiles, holes_pct, stress_level);
+    } else if (adaptive_enabled) {
         std::snprintf(hud.lines[2], sizeof(hud.lines[2]), "HOLE %4.2f%%  MISS %lld  VRS %s  ADP T%d", holes_pct, static_cast<long long>(missed_deadlines), short_vrs_label(active_vrs_mode), adaptive_tier);
     } else {
         std::snprintf(hud.lines[2], sizeof(hud.lines[2]), "HOLE %4.2f%%  MISS %lld  VRS %s  STR %d", holes_pct, static_cast<long long>(missed_deadlines), short_vrs_label(active_vrs_mode), stress_level);
     }
-    std::snprintf(hud.lines[3], sizeof(hud.lines[3]), "%s  PATH %s  1-7 MODE  X FG  B VRS", mouse_look_locked ? "RMB/ESC UNLK" : "LMB/RMB LOOK", short_path_label(path));
+    std::snprintf(hud.lines[3], sizeof(hud.lines[3]), "%s  PATH %s  1-7 MODE  U TILE  T MAP", mouse_look_locked ? "RMB/ESC UNLK" : "LMB/RMB LOOK", short_path_label(path));
 }
 
 LRESULT CALLBACK window_procedure(HWND window, UINT message, WPARAM message_parameter, LPARAM message_data) {
@@ -619,6 +637,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         std::int64_t dlss_warp_guard_trips = 0;
         bool vsync_enabled = !renderer.allow_tearing_enabled();
         bool async_gpu_enabled = true;
+        bool selective_tiles_enabled = false;
+        std::int32_t tile_budget_pct = 100;
         frame_warp_lab::VrsMode vrs_mode = frame_warp_lab::VrsMode::off;
         frame_warp_lab::InstrumentationLevel instrumentation_level = frame_warp_lab::InstrumentationLevel::diagnostic;
         frame_warp_lab::AdaptiveScheduler adaptive_scheduler;
@@ -669,6 +689,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 overlay_enabled,
                 flash_indicator_enabled);
             runtime_state.update_adaptive(adaptive_scheduler.enabled(), adaptive_scheduler.telemetry());
+            runtime_state.update_selective_tiles(selective_tiles_enabled, tile_budget_pct, renderer.latest_completed_source().tile_stats);
         };
         publish_config();
 
@@ -773,6 +794,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                             ? frame_warp_lab::DiagnosticView::final_color
                             : frame_warp_lab::DiagnosticView::reprojection_holes;
                         config_changed = true;
+                    } else if (message.wParam == 'U') {
+                        selective_tiles_enabled = !selective_tiles_enabled;
+                        config_changed = true;
+                    } else if (message.wParam == 'T') {
+                        diagnostic_view = diagnostic_view == frame_warp_lab::DiagnosticView::tile_cache
+                            ? frame_warp_lab::DiagnosticView::final_color
+                            : frame_warp_lab::DiagnosticView::tile_cache;
+                        config_changed = true;
                     } else if (message.wParam == 'O') {
                         overlay_enabled = !overlay_enabled;
                         config_changed = true;
@@ -838,7 +867,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                         runtime_state.record_event(frame_warp_lab::RuntimeEventType::scene_reset, 0);
                     } else if (command == frame_warp_lab::ControlCommand::set_diagnostic_view) {
                         const auto raw = static_cast<std::int32_t>(message.lParam);
-                        if (raw >= 0 && raw <= 4) {
+                        if (raw >= 0 && raw <= 5) {
                             diagnostic_view = static_cast<frame_warp_lab::DiagnosticView>(raw);
                             runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, raw, frame_warp_lab::ConfigKey::diagnostic_view);
                         }
@@ -934,6 +963,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                             instrumentation_level = static_cast<frame_warp_lab::InstrumentationLevel>(raw);
                             runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, raw, frame_warp_lab::ConfigKey::instrumentation_level);
                         }
+                    } else if (command == frame_warp_lab::ControlCommand::set_selective_tiles) {
+                        selective_tiles_enabled = message.lParam != 0;
+                        runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, selective_tiles_enabled ? 1 : 0, frame_warp_lab::ConfigKey::selective_tiles);
+                    } else if (command == frame_warp_lab::ControlCommand::set_tile_budget_pct) {
+                        tile_budget_pct = std::clamp(static_cast<std::int32_t>(message.lParam), 10, 100);
+                        runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, tile_budget_pct, frame_warp_lab::ConfigKey::tile_budget_pct);
                     }
                     previous_tick = std::chrono::steady_clock::now();
                     publish_config();
@@ -1066,6 +1101,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                     capture_time,
                     stress_level,
                     vrs_mode,
+                    selective_tiles_enabled,
+                    tile_budget_pct,
                     frame_id_u64,
                     latency_monitor,
                     must_wait);
@@ -1180,6 +1217,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                         adaptive_scheduler.enabled(),
                         adaptive_scheduler.tier(),
                         active_vrs_mode,
+                        selective_tiles_enabled,
+                        active_source.tile_stats,
                         simulation.path(),
                         stress_level,
                         input_state.mouse_look_locked);
@@ -1325,6 +1364,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                         ? frame_warp_lab::PacingOwner::dxgi_vsync
                         : frame_warp_lab::PacingOwner::unlocked));
             runtime_state.update_present_variant(gpu_metrics.selected_present_variant);
+            runtime_state.update_selective_tiles(selective_tiles_enabled, tile_budget_pct, active_source.tile_stats);
             runtime_state.update_dlssg(
                 dlssg_multiplier,
                 window_focused,
@@ -1367,6 +1407,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                     gpu_metrics.missed_deadline ? 1 : 0,
                     frame_discontinuity ? 1 : 0,
                     gpu_metrics.dlssg_state.frames_actually_presented,
+                    active_source.tile_stats.total_tiles,
+                    active_source.tile_stats.shaded_tiles,
+                    active_source.tile_stats.deferred_tiles,
                 },
                 static_cast<std::int64_t>(smoothed_present_interval_us));
         }

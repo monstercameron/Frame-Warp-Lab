@@ -297,11 +297,17 @@ int print_status(const WindowInstance& instance) {
     const std::int64_t dlssg_total_frames_presented = std::atomic_ref<std::int64_t>(state->dlssg_total_frames_presented).load(std::memory_order_acquire);
     const std::int64_t dlssg_total_generated_frames = std::atomic_ref<std::int64_t>(state->dlssg_total_generated_frames).load(std::memory_order_acquire);
     const std::int32_t window_focused = std::atomic_ref<std::int32_t>(state->window_focused).load(std::memory_order_acquire);
+    const std::int32_t selective_tiles_enabled = std::atomic_ref<std::int32_t>(state->selective_tiles_enabled).load(std::memory_order_acquire);
+    const std::int32_t tile_budget_pct = std::atomic_ref<std::int32_t>(state->tile_budget_pct).load(std::memory_order_acquire);
+    const std::uint32_t tile_total = std::atomic_ref<std::uint32_t>(state->last_tile_total_count).load(std::memory_order_acquire);
+    const std::uint32_t tile_cached = std::atomic_ref<std::uint32_t>(state->last_tile_cached_count).load(std::memory_order_acquire);
+    const std::uint32_t tile_shaded = std::atomic_ref<std::uint32_t>(state->last_tile_shaded_count).load(std::memory_order_acquire);
+    const std::uint32_t tile_deferred = std::atomic_ref<std::uint32_t>(state->last_tile_deferred_count).load(std::memory_order_acquire);
     const double smoothed_fps = smoothed_interval_us > 0 ? 1000000.0 / static_cast<double>(smoothed_interval_us) : 0.0;
 
     RECT client_rectangle{};
     const bool has_client_size = GetClientRect(instance.window, &client_rectangle) != 0;
-    std::cout << "{\"ok\":true,\"schema_version\":12,\"process_id\":" << instance.process_id
+    std::cout << "{\"ok\":true,\"schema_version\":13,\"process_id\":" << instance.process_id
               << ",\"running\":" << (running ? "true" : "false")
               << ",\"present_calls_completed\":" << present_count
               << ",\"display_frame_id\":" << display_frame_id
@@ -404,9 +410,19 @@ int print_status(const WindowInstance& instance) {
               << ",\"last_frames_presented\":" << dlssg_last_frames_presented
               << ",\"total_frames_presented\":" << dlssg_total_frames_presented
               << ",\"total_generated_frames\":" << dlssg_total_generated_frames << "}"
-              << ",\"features\":{\"scene\":\"cpu_camera_gbuffer\",\"hud\":\"2d_frametime_graph_and_readout\",\"async_gpu\":\"dual_queue_3slot_ring\",\"reprojection\":\"depth_camera_warp\",\"nvidia_pcl_markers\":\"etw_and_streamline_pcl\",\"frame_generation\":\"mv_extrapolation_temporal_and_dlss_g\",\"dlss_g_inputs\":\"3slot_aligned_hudless_clipdepth_motion\",\"vrs\":\""
+              << ",\"selective_tiles\":{\"enabled\":" << (selective_tiles_enabled ? "true" : "false")
+              << ",\"tile_size_px\":16"
+              << ",\"budget_pct\":" << tile_budget_pct
+              << ",\"total_tiles\":" << tile_total
+              << ",\"cached_tiles\":" << tile_cached
+              << ",\"shaded_tiles\":" << tile_shaded
+              << ",\"deferred_tiles\":" << tile_deferred
+              << ",\"shaded_tile_ratio\":";
+    print_ratio(tile_shaded, tile_total);
+    std::cout << "}"
+              << ",\"features\":{\"scene\":\"cpu_camera_gbuffer\",\"selective_tiles\":\"vis_buffer_execute_indirect_16x16\",\"hud\":\"2d_frametime_graph_and_readout\",\"async_gpu\":\"dual_queue_3slot_ring\",\"reprojection\":\"depth_camera_warp\",\"nvidia_pcl_markers\":\"etw_and_streamline_pcl\",\"frame_generation\":\"mv_extrapolation_temporal_and_dlss_g\",\"dlss_g_inputs\":\"3slot_aligned_hudless_clipdepth_motion\",\"vrs\":\""
               << (vrs_tier >= 2 ? "tier1_and_tier2_foveated_image" : vrs_tier == 1 ? "tier1_per_draw" : "unsupported")
-              << "\",\"adaptive_scheduler\":\"unified_vrs_dlss_warp_ladder\",\"ipc\":\"seqlock_v17\",\"shaders\":\"dxc_sm6_0_wave_specialized\"}}\n";
+              << "\",\"adaptive_scheduler\":\"unified_vrs_dlss_warp_ladder\",\"ipc\":\"seqlock_v18\",\"shaders\":\"dxc_sm6_0_wave_specialized\"}}\n";
     return 0;
 }
 
@@ -419,7 +435,7 @@ int print_events(const WindowInstance& instance) {
     const std::int32_t event_count = std::atomic_ref<std::int32_t>(state->event_count).load(std::memory_order_acquire);
     const std::int32_t first_sequence = event_count > static_cast<std::int32_t>(frame_warp_lab::runtime_event_capacity)
         ? event_count - static_cast<std::int32_t>(frame_warp_lab::runtime_event_capacity) + 1 : 1;
-    std::cout << "{\"ok\":true,\"schema_version\":12,\"process_id\":" << instance.process_id
+    std::cout << "{\"ok\":true,\"schema_version\":13,\"process_id\":" << instance.process_id
               << ",\"capacity\":" << frame_warp_lab::runtime_event_capacity << ",\"total_events\":" << event_count << ",\"events\":[";
     bool first_event = true;
     for (std::int32_t sequence = first_sequence; sequence <= event_count; ++sequence) {
@@ -465,6 +481,8 @@ int print_trace(const WindowInstance& instance, std::size_t max_samples, bool in
     std::vector<std::int64_t> present_gpu_times;
     std::vector<double> invalid_ratios;
     std::vector<double> temporal_recovered_ratios;
+    std::vector<double> shaded_tile_ratios;
+    std::int64_t total_deferred_tiles = 0;
     std::int64_t rendered_count = 0;
     std::int64_t repeated_count = 0;
     std::int64_t warped_count = 0;
@@ -495,6 +513,10 @@ int print_trace(const WindowInstance& instance, std::size_t max_samples, bool in
             invalid_ratios.push_back(static_cast<double>(copy.invalid_pixel_count) / static_cast<double>(copy.total_pixel_count));
             temporal_recovered_ratios.push_back(static_cast<double>(copy.temporal_recovered_count) / static_cast<double>(copy.total_pixel_count));
         }
+        if (copy.tile_total_count > 0) {
+            shaded_tile_ratios.push_back(static_cast<double>(copy.tile_shaded_count) / static_cast<double>(copy.tile_total_count));
+            total_deferred_tiles += static_cast<std::int64_t>(copy.tile_deferred_count);
+        }
         switch (static_cast<frame_warp_lab::FrameKind>(copy.frame_kind)) {
             case frame_warp_lab::FrameKind::rendered: ++rendered_count; break;
             case frame_warp_lab::FrameKind::repeated: ++repeated_count; break;
@@ -510,7 +532,7 @@ int print_trace(const WindowInstance& instance, std::size_t max_samples, bool in
         if (copy.missed_deadline) ++missed_deadline_count;
     }
 
-    std::cout << "{\"ok\":true,\"schema_version\":12,\"process_id\":" << instance.process_id
+    std::cout << "{\"ok\":true,\"schema_version\":13,\"process_id\":" << instance.process_id
               << ",\"capacity\":" << frame_warp_lab::runtime_frame_trace_capacity
               << ",\"total_frames_recorded\":" << total_samples
               << ",\"sample_count\":" << captured.size()
@@ -547,6 +569,9 @@ int print_trace(const WindowInstance& instance, std::size_t max_samples, bool in
     print_double_summary(invalid_ratios);
     std::cout << ",\"temporal_recovered_ratio\":";
     print_double_summary(temporal_recovered_ratios);
+    std::cout << ",\"shaded_tile_ratio\":";
+    print_double_summary(shaded_tile_ratios);
+    std::cout << ",\"total_deferred_tiles\":" << total_deferred_tiles;
     std::cout << "}";
 
     if (include_samples) {
@@ -589,7 +614,12 @@ int print_trace(const WindowInstance& instance, std::size_t max_samples, bool in
                       << ",\"vrs_mode\":\"" << frame_warp_lab::vrs_mode_name(sample.vrs_mode)
                       << "\",\"adaptive_tier\":" << sample.adaptive_tier
                       << ",\"dlssg_frames_presented\":" << sample.dlssg_frames_presented
-                      << ",\"discontinuity\":" << (sample.discontinuity ? "true" : "false") << "}";
+                      << ",\"tile_total_count\":" << sample.tile_total_count
+                      << ",\"tile_shaded_count\":" << sample.tile_shaded_count
+                      << ",\"tile_deferred_count\":" << sample.tile_deferred_count
+                      << ",\"shaded_tile_ratio\":";
+            print_ratio(sample.tile_shaded_count, sample.tile_total_count);
+            std::cout << ",\"discontinuity\":" << (sample.discontinuity ? "true" : "false") << "}";
         }
         std::cout << "]";
     }
@@ -640,7 +670,8 @@ int apply_setting(const WindowInstance& instance, const std::wstring& key, const
         else if (value == L"motion") parameter = static_cast<LPARAM>(frame_warp_lab::DiagnosticView::motion_vectors);
         else if (value == L"holes") parameter = static_cast<LPARAM>(frame_warp_lab::DiagnosticView::reprojection_holes);
         else if (value == L"vrs") parameter = static_cast<LPARAM>(frame_warp_lab::DiagnosticView::vrs_mask);
-        else return fail("invalid_value", "Expected view in {final, depth, motion, holes, vrs}");
+        else if (value == L"tiles") parameter = static_cast<LPARAM>(frame_warp_lab::DiagnosticView::tile_cache);
+        else return fail("invalid_value", "Expected view in {final, depth, motion, holes, vrs, tiles}");
     } else if (key == L"path") {
         command = frame_warp_lab::ControlCommand::set_camera_path;
         if (value == L"corridor_sway") parameter = static_cast<LPARAM>(frame_warp_lab::CameraPath::corridor_sway);
@@ -707,8 +738,20 @@ int apply_setting(const WindowInstance& instance, const std::wstring& key, const
         else if (value == L"standard") parameter = static_cast<LPARAM>(frame_warp_lab::InstrumentationLevel::standard);
         else if (value == L"diagnostic") parameter = static_cast<LPARAM>(frame_warp_lab::InstrumentationLevel::diagnostic);
         else return fail("invalid_value", "Expected instrumentation in {minimal, standard, diagnostic}");
+    } else if (key == L"selective_tiles") {
+        command = frame_warp_lab::ControlCommand::set_selective_tiles;
+        if (value == L"on" || value == L"1" || value == L"true") parameter = 1;
+        else if (value == L"off" || value == L"0" || value == L"false") parameter = 0;
+        else return fail("invalid_value", "Expected selective_tiles in {on, off}");
+    } else if (key == L"tile_budget") {
+        unsigned long parsed = 0;
+        if (!parse_unsigned_long(value.c_str(), parsed) || parsed < 10 || parsed > 100) {
+            return fail("invalid_value", "Expected tile_budget integer in [10, 100]");
+        }
+        command = frame_warp_lab::ControlCommand::set_tile_budget_pct;
+        parameter = static_cast<LPARAM>(parsed);
     } else {
-        return fail("unknown_setting", "Supported settings are: mode, dlssg_mult, pacer, target_fps, async_gpu, vrs, adaptive, adaptive_dlssg, instrumentation, divider, vsync, view, path, stress, overlay, flash");
+        return fail("unknown_setting", "Supported settings are: mode, dlssg_mult, pacer, target_fps, async_gpu, vrs, selective_tiles, tile_budget, adaptive, adaptive_dlssg, instrumentation, divider, vsync, view, path, stress, overlay, flash");
     }
 
     if (!PostMessageW(instance.window, frame_warp_lab::control_message, static_cast<WPARAM>(command), parameter)) {
@@ -836,14 +879,14 @@ int print_capabilities() {
 
 int wmain(int argument_count, wchar_t** arguments) {
     if (argument_count == 2 && std::wstring(arguments[1]) == L"help") {
-        std::cout << "{\"ok\":true,\"schema_version\":12,\"commands\":[\"help\",\"start\",\"instances\",\"status <pid>\",\"events <pid>\",\"trace <pid> [limit] [summary]\",\"set <pid> <key> <value>\",\"pause <pid>\",\"resume <pid>\",\"reset <pid>\",\"stop <pid>\",\"capabilities\"],\"settings\":{\"mode\":[\"full_render\",\"repeat\",\"reproject\",\"frame_gen\",\"combined\",\"dlss_g\",\"dlss_g_warp\"],\"dlssg_mult\":[\"2\",\"3\",\"4\",\"5\",\"6\",\"dynamic\"],\"pacer\":[\"deadline\",\"vsync_only\",\"unlocked\"],\"target_fps\":\"0 or 30..500\",\"async_gpu\":[\"on\",\"off\"],\"vrs\":[\"off\",\"uniform_2x2\",\"foveated\"],\"adaptive\":[\"on\",\"off\"],\"adaptive_dlssg\":[\"on\",\"off\"],\"instrumentation\":[\"minimal\",\"standard\",\"diagnostic\"],\"divider\":\"1..8\",\"vsync\":[\"on\",\"off\"],\"view\":[\"final\",\"depth\",\"motion\",\"holes\",\"vrs\"],\"path\":[\"corridor_sway\",\"fast_pan\",\"occlusion_sweep\",\"camera_cut\",\"manual\",\"pure_rotation\"],\"stress\":\"0..64\",\"overlay\":[\"on\",\"off\"],\"flash\":[\"on\",\"off\"]}}\n";
+        std::cout << "{\"ok\":true,\"schema_version\":13,\"commands\":[\"help\",\"start\",\"instances\",\"status <pid>\",\"events <pid>\",\"trace <pid> [limit] [summary]\",\"set <pid> <key> <value>\",\"pause <pid>\",\"resume <pid>\",\"reset <pid>\",\"stop <pid>\",\"capabilities\"],\"settings\":{\"mode\":[\"full_render\",\"repeat\",\"reproject\",\"frame_gen\",\"combined\",\"dlss_g\",\"dlss_g_warp\"],\"dlssg_mult\":[\"2\",\"3\",\"4\",\"5\",\"6\",\"dynamic\"],\"pacer\":[\"deadline\",\"vsync_only\",\"unlocked\"],\"target_fps\":\"0 or 30..500\",\"async_gpu\":[\"on\",\"off\"],\"vrs\":[\"off\",\"uniform_2x2\",\"foveated\"],\"selective_tiles\":[\"on\",\"off\"],\"tile_budget\":\"10..100\",\"adaptive\":[\"on\",\"off\"],\"adaptive_dlssg\":[\"on\",\"off\"],\"instrumentation\":[\"minimal\",\"standard\",\"diagnostic\"],\"divider\":\"1..8\",\"vsync\":[\"on\",\"off\"],\"view\":[\"final\",\"depth\",\"motion\",\"holes\",\"vrs\",\"tiles\"],\"path\":[\"corridor_sway\",\"fast_pan\",\"occlusion_sweep\",\"camera_cut\",\"manual\",\"pure_rotation\"],\"stress\":\"0..64\",\"overlay\":[\"on\",\"off\"],\"flash\":[\"on\",\"off\"]}}\n";
         return 0;
     }
     if (argument_count == 2 && std::wstring(arguments[1]) == L"capabilities") return print_capabilities();
     if (argument_count == 2 && std::wstring(arguments[1]) == L"start") return start_instance();
     const auto instances = find_instances();
     if (argument_count == 2 && std::wstring(arguments[1]) == L"instances") {
-        std::cout << "{\"ok\":true,\"schema_version\":12,\"instances\":[";
+        std::cout << "{\"ok\":true,\"schema_version\":13,\"instances\":[";
         for (std::size_t index = 0; index < instances.size(); ++index) {
             if (index) std::cout << ',';
             std::cout << "{\"process_id\":" << instances[index].process_id << "}";

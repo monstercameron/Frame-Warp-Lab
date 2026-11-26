@@ -45,6 +45,7 @@ Texture2D<float2> scene_motion_texture : register(t2);
 Texture2D<float4> prev_color_texture : register(t3);
 Texture2D<float> prev_depth_texture : register(t4);
 Texture2D<float2> prev_motion_texture : register(t5);
+Texture2D<uint> scene_tile_map_texture : register(t6);
 RWByteAddressBuffer reprojection_stats : register(u1);
 SamplerState linear_clamp_sampler : register(s0);
 SamplerState point_clamp_sampler : register(s1);
@@ -833,6 +834,23 @@ float4 pixel_main(VertexOutput input) : SV_Target {
             float2 in_tile = fmod(input.position.xy, tile_size);
             if (in_tile.x < 1.0 || in_tile.y < 1.0) {
                 output_color = lerp(output_color, float3(0.06, 0.08, 0.10), 0.55);
+            }
+        }
+        if (diagnostic_view == 5) {
+            uint2 tile_coord = (uint2)floor(input.position.xy / 16.0);
+            uint tile_state = scene_tile_map_texture.Load(int3(tile_coord, 0));
+            float3 tile_tint = float3(0.16, 0.84, 0.42);
+            if (tile_state == 1u) {
+                tile_tint = float3(0.98, 0.34, 0.18);
+            } else if (tile_state == 2u) {
+                tile_tint = float3(0.18, 0.78, 0.96);
+            } else if (tile_state == 3u) {
+                tile_tint = float3(0.96, 0.18, 0.82);
+            }
+            output_color = lerp(output_color, tile_tint, 0.46);
+            float2 in_tile = fmod(input.position.xy, 16.0);
+            if (in_tile.x < 1.0 || in_tile.y < 1.0) {
+                output_color = lerp(output_color, float3(0.05, 0.07, 0.09), 0.55);
             }
         }
     }

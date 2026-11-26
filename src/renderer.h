@@ -33,12 +33,21 @@ struct HudOverlayState {
     std::uint32_t alignment_padding;
 };
 
+struct TileCacheStats {
+    std::uint32_t total_tiles = 0;
+    std::uint32_t cached_tiles = 0;
+    std::uint32_t shaded_tiles = 0;
+    std::uint32_t deferred_tiles = 0;
+    bool active = false;
+};
+
 struct CompletedSourceInfo {
     bool valid;
     std::int32_t slot_index;
     SceneSnapshot snapshot;
     std::chrono::steady_clock::time_point capture_time;
     std::int64_t scene_gpu_us;
+    TileCacheStats tile_stats;
 };
 
 enum class SynthesisMode : std::int32_t {
@@ -113,6 +122,8 @@ public:
         std::chrono::steady_clock::time_point capture_time,
         std::int32_t stress_level,
         VrsMode vrs_mode,
+        bool selective_tiles_enabled,
+        std::int32_t tile_budget_pct,
         std::uint64_t frame_id,
         LatencyMonitor& latency_monitor,
         bool wait_for_completion);
@@ -138,6 +149,9 @@ private:
     static constexpr UINT rtv_targets_per_dlss_slot = 3;
     static constexpr UINT source_slot_count = 3;
     static constexpr UINT targets_per_source_slot = 3;
+    static constexpr UINT compute_descriptors_per_source_slot = 8;
+    static constexpr UINT max_dirty_tile_capacity = 65536;
+    static constexpr UINT tile_stats_u32_count = 8;
     static constexpr UINT timestamps_per_pass = 2;
     static constexpr std::size_t scene_constant_buffer_stride = 256;
     static constexpr std::size_t present_constant_buffer_stride = 512;
@@ -158,12 +172,16 @@ private:
         Microsoft::WRL::ComPtr<ID3D12Resource> color_target;
         Microsoft::WRL::ComPtr<ID3D12Resource> depth_target;
         Microsoft::WRL::ComPtr<ID3D12Resource> motion_target;
+        Microsoft::WRL::ComPtr<ID3D12Resource> vis_target;
+        Microsoft::WRL::ComPtr<ID3D12Resource> tile_map_target;
         Microsoft::WRL::ComPtr<ID3D12CommandAllocator> command_allocator;
         SceneSnapshot snapshot{};
         std::chrono::steady_clock::time_point capture_time{};
         std::uint64_t scene_fence_value = 0;
         std::uint64_t last_read_present_fence = 0;
         std::int64_t scene_gpu_us = -1;
+        TileCacheStats tile_stats{};
+        bool used_selective_tiles = false;
         bool in_flight = false;
         bool valid = false;
     };
@@ -181,6 +199,7 @@ private:
     void create_constant_buffers();
     void create_timestamp_resources();
     void create_reprojection_stats_resources();
+    void create_selective_tile_resources();
     void create_vrs_resources();
     void create_swap_chain_targets();
     void create_dlss_input_targets();
@@ -201,6 +220,7 @@ private:
     Microsoft::WRL::ComPtr<IDXGISwapChain3> swap_chain_;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> render_target_heap_;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> shader_resource_heap_;
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> scene_compute_heap_;
     std::array<Microsoft::WRL::ComPtr<ID3D12Resource>, swap_chain_buffer_count> render_targets_;
     std::array<DlssInputSlot, dlss_input_slot_count> dlss_input_slots_;
     UINT next_dlss_input_slot_ = 0;
@@ -214,6 +234,15 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Fence> scene_fence_;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> scene_root_signature_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> scene_pipeline_;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> tile_compute_root_signature_;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> tile_vis_classify_pipeline_;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> tile_shade_indirect_pipeline_;
+    Microsoft::WRL::ComPtr<ID3D12CommandSignature> dispatch_command_signature_;
+    Microsoft::WRL::ComPtr<ID3D12Resource> dirty_tile_list_uav_;
+    Microsoft::WRL::ComPtr<ID3D12Resource> tile_indirect_args_uav_;
+    Microsoft::WRL::ComPtr<ID3D12Resource> tile_indirect_args_init_upload_;
+    Microsoft::WRL::ComPtr<ID3D12Resource> tile_stats_readback_;
+    const std::uint32_t* mapped_tile_stats_ = nullptr;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> present_root_signature_;
     std::array<Microsoft::WRL::ComPtr<ID3D12PipelineState>, 5> present_pipelines_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> present_dlss_inputs_pipeline_;
