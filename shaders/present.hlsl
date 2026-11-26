@@ -15,6 +15,7 @@ cbuffer PresentConstants : register(b0) {
     float4 previous_camera_up_rcp_tan_y;
     float4 previous_camera_forward_tan_x;
     float4 vrs_params;
+    float4 reprojection_thresholds;
 };
 
 cbuffer HudConstants : register(b1) {
@@ -187,7 +188,9 @@ ReprojectionSample evaluate_reprojection_camera(
         max(abs(depth_left - sampled_depth), abs(depth_right - sampled_depth)),
         max(abs(depth_up - sampled_depth), abs(depth_down - sampled_depth))) * inv_safe_depth;
 
-    bool consistent = (pixel_error <= 1.75) && (relative_depth_error <= 0.045) && !(max_neighbor_jump > 0.18 && pixel_error > 0.65);
+    bool consistent = (pixel_error <= reprojection_thresholds.x)
+        && (relative_depth_error <= reprojection_thresholds.y)
+        && !(max_neighbor_jump > reprojection_thresholds.z && pixel_error > reprojection_thresholds.w);
     result.source_uv = projected_uv;
     result.linear_depth = sampled_depth;
     result.valid = consistent;
@@ -578,7 +581,8 @@ float4 pixel_main(VertexOutput input) : SV_Target {
         }
     }
 
-    if (synthesis_active) {
+    bool collect_stats = synthesis_params.w > 0.5;
+    if (synthesis_active && collect_stats) {
         if (recovered_from_history) {
             uint previous_recovered;
             reprojection_stats.InterlockedAdd(4, 1, previous_recovered);
@@ -612,8 +616,27 @@ float4 pixel_main(VertexOutput input) : SV_Target {
             if (diagnostic_view == 3) {
                 output_color = float3(1.0, 0.12, 0.78);
             } else {
-                float3 fallback_color = pow(saturate(scene_color_texture.SampleLevel(linear_clamp_sampler, uv, 0).rgb), 1.0 / 2.2);
-                output_color = lerp(output_color, fallback_color, 0.65);
+                float2 clamped_uv = saturate(sample_uv);
+                float2 probe_step = texel_size * 3.0;
+                float best_depth = scene_depth_texture.SampleLevel(point_clamp_sampler, clamped_uv, 0);
+                float2 best_bg_uv = clamped_uv;
+                float2 bg_offsets[4] = {
+                    float2(-probe_step.x, 0.0),
+                    float2(probe_step.x, 0.0),
+                    float2(0.0, -probe_step.y),
+                    float2(0.0, probe_step.y)
+                };
+                [unroll]
+                for (int b = 0; b < 4; ++b) {
+                    float2 tap_uv = saturate(clamped_uv + bg_offsets[b]);
+                    float tap_depth = scene_depth_texture.SampleLevel(point_clamp_sampler, tap_uv, 0);
+                    if (tap_depth > best_depth) {
+                        best_depth = tap_depth;
+                        best_bg_uv = tap_uv;
+                    }
+                }
+                float3 bg_linear = scene_color_texture.SampleLevel(linear_clamp_sampler, best_bg_uv, 0).rgb;
+                output_color = pow(saturate(bg_linear), 1.0 / 2.2);
             }
         }
         if (diagnostic_view == 4) {

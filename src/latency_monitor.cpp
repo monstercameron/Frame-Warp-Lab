@@ -76,16 +76,22 @@ void LatencyMonitor::stop() {
     }
 }
 
+void LatencyMonitor::set_enabled(bool enabled) {
+    enabled_.store(enabled, std::memory_order_release);
+}
+
 bool LatencyMonitor::is_ping_message(UINT message) const {
     return ping_window_message_ != 0 && message == ping_window_message_;
 }
 
 void LatencyMonitor::record_ping_received(std::uint64_t frame_id) {
+    if (!enabled_.load(std::memory_order_relaxed)) return;
     pings_received_.fetch_add(1, std::memory_order_relaxed);
     emit_marker(LatencyMarker::pc_latency_ping, frame_id);
 }
 
 void LatencyMonitor::emit_marker(LatencyMarker marker, std::uint64_t frame_id) {
+    if (!enabled_.load(std::memory_order_relaxed)) return;
     markers_emitted_.fetch_add(1, std::memory_order_relaxed);
     if (!provider_registered_) return;
     const std::uint32_t marker_value = static_cast<std::uint32_t>(marker);

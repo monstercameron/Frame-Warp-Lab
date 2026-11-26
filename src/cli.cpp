@@ -263,6 +263,7 @@ int print_status(const WindowInstance& instance) {
     const std::int32_t adaptive_utilization_permille = std::atomic_ref<std::int32_t>(state->adaptive_utilization_permille).load(std::memory_order_acquire);
     const std::int64_t adaptive_reserved_headroom_us = std::atomic_ref<std::int64_t>(state->adaptive_reserved_headroom_us).load(std::memory_order_acquire);
     const std::int64_t adaptive_decision_count = std::atomic_ref<std::int64_t>(state->adaptive_decision_count).load(std::memory_order_acquire);
+    const std::int32_t instrumentation_level = std::atomic_ref<std::int32_t>(state->instrumentation_level).load(std::memory_order_acquire);
     const std::int32_t diagnostic_view = std::atomic_ref<std::int32_t>(state->diagnostic_view).load(std::memory_order_acquire);
     const std::int32_t camera_path = std::atomic_ref<std::int32_t>(state->camera_path).load(std::memory_order_acquire);
     const std::int32_t stress_level = std::atomic_ref<std::int32_t>(state->stress_level).load(std::memory_order_acquire);
@@ -278,7 +279,7 @@ int print_status(const WindowInstance& instance) {
 
     RECT client_rectangle{};
     const bool has_client_size = GetClientRect(instance.window, &client_rectangle) != 0;
-    std::cout << "{\"ok\":true,\"schema_version\":9,\"process_id\":" << instance.process_id
+    std::cout << "{\"ok\":true,\"schema_version\":10,\"process_id\":" << instance.process_id
               << ",\"running\":" << (running ? "true" : "false")
               << ",\"present_calls_completed\":" << present_count
               << ",\"display_frame_id\":" << display_frame_id
@@ -306,6 +307,7 @@ int print_status(const WindowInstance& instance) {
               << ",\"async_gpu_enabled\":" << (async_gpu_enabled ? "true" : "false")
               << ",\"high_priority_present_queue\":" << (high_priority_present_queue ? "true" : "false")
               << ",\"async_overlapped_presents\":" << async_overlaps
+              << ",\"instrumentation\":\"" << frame_warp_lab::instrumentation_level_name(instrumentation_level) << "\""
               << ",\"wait_before_input_sample\":true"
               << ",\"max_frame_latency\":2,\"displayed_frame_timing\":null}"
               << ",\"timing\":{\"cpu_present_interval_us\":" << present_interval_us
@@ -358,7 +360,7 @@ int print_status(const WindowInstance& instance) {
               << ",\"decision_count\":" << adaptive_decision_count << "}"
               << ",\"features\":{\"scene\":\"cpu_camera_gbuffer\",\"hud\":\"2d_frametime_graph_and_readout\",\"async_gpu\":\"dual_queue_3slot_ring\",\"reprojection\":\"depth_camera_warp\",\"nvidia_pcl_markers\":\"etw_tracelogging_active\",\"frame_generation\":\"mv_extrapolation_and_temporal_history\",\"vrs\":\""
               << (vrs_tier >= 2 ? "tier1_and_tier2_foveated_image" : vrs_tier == 1 ? "tier1_per_draw" : "unsupported")
-              << "\",\"adaptive_scheduler\":\"deadline_headroom_ladder\"}}\n";
+              << "\",\"adaptive_scheduler\":\"deadline_headroom_ladder\",\"ipc\":\"seqlock_v14\"}}\n";
     return 0;
 }
 
@@ -371,19 +373,14 @@ int print_events(const WindowInstance& instance) {
     const std::int32_t event_count = std::atomic_ref<std::int32_t>(state->event_count).load(std::memory_order_acquire);
     const std::int32_t first_sequence = event_count > static_cast<std::int32_t>(frame_warp_lab::runtime_event_capacity)
         ? event_count - static_cast<std::int32_t>(frame_warp_lab::runtime_event_capacity) + 1 : 1;
-    std::cout << "{\"ok\":true,\"schema_version\":9,\"process_id\":" << instance.process_id
+    std::cout << "{\"ok\":true,\"schema_version\":10,\"process_id\":" << instance.process_id
               << ",\"capacity\":" << frame_warp_lab::runtime_event_capacity << ",\"total_events\":" << event_count << ",\"events\":[";
     bool first_event = true;
     for (std::int32_t sequence = first_sequence; sequence <= event_count; ++sequence) {
-        auto& event = state->events[(static_cast<std::size_t>(sequence) - 1) % frame_warp_lab::runtime_event_capacity];
-        if (std::atomic_ref<std::int32_t>(event.sequence).load(std::memory_order_acquire) != sequence) continue;
-        const std::uint32_t timestamp_low = event.timestamp_low;
-        const std::uint32_t timestamp_high = event.timestamp_high;
-        const std::int32_t event_type = event.event_type;
-        const std::int32_t value = event.value;
-        std::atomic_thread_fence(std::memory_order_acquire);
-        if (std::atomic_ref<std::int32_t>(event.sequence).load(std::memory_order_acquire) != sequence) continue;
-        FILETIME file_time{timestamp_low, timestamp_high};
+        const auto& event_slot = state->events[(static_cast<std::size_t>(sequence) - 1) % frame_warp_lab::runtime_event_capacity];
+        frame_warp_lab::RuntimeEvent event{};
+        if (!frame_warp_lab::seqlock_try_read(event_slot, event) || event.sequence != sequence) continue;
+        FILETIME file_time{event.timestamp_low, event.timestamp_high};
         SYSTEMTIME utc{};
         if (!FileTimeToSystemTime(&file_time, &utc)) continue;
         char timestamp[32]{};
@@ -391,8 +388,9 @@ int print_events(const WindowInstance& instance) {
         if (!first_event) std::cout << ',';
         first_event = false;
         std::cout << "{\"sequence\":" << sequence << ",\"timestamp_utc\":\"" << timestamp
-                  << "\",\"severity\":\"info\",\"subsystem\":\"runtime\",\"event\":\"" << frame_warp_lab::runtime_event_name(event_type)
-                  << "\",\"value\":" << value << "}";
+                  << "\",\"severity\":\"info\",\"subsystem\":\"runtime\",\"event\":\"" << frame_warp_lab::runtime_event_name(event.event_type)
+                  << "\",\"key\":\"" << frame_warp_lab::config_key_name(event.config_key)
+                  << "\",\"value\":" << event.value << "}";
     }
     std::cout << "]}\n";
     return 0;
@@ -432,12 +430,9 @@ int print_trace(const WindowInstance& instance, std::size_t max_samples, bool in
 
     for (std::int64_t sequence = first_sequence; sequence <= total_samples; ++sequence) {
         if (sequence <= 0) continue;
-        auto& slot = state->trace[(static_cast<std::size_t>(sequence) - 1) % frame_warp_lab::runtime_frame_trace_capacity];
-        if (std::atomic_ref<std::int64_t>(slot.sequence).load(std::memory_order_acquire) != sequence) continue;
-        frame_warp_lab::RuntimeFrameSample copy = slot;
-        copy.sequence = sequence;
-        std::atomic_thread_fence(std::memory_order_acquire);
-        if (std::atomic_ref<std::int64_t>(slot.sequence).load(std::memory_order_acquire) != sequence) continue;
+        const auto& slot = state->trace[(static_cast<std::size_t>(sequence) - 1) % frame_warp_lab::runtime_frame_trace_capacity];
+        frame_warp_lab::RuntimeFrameSample copy{};
+        if (!frame_warp_lab::seqlock_try_read(slot, copy) || copy.sequence != sequence) continue;
         captured.push_back(copy);
         if (copy.present_interval_us > 0) present_intervals.push_back(copy.present_interval_us);
         if (copy.source_age_us >= 0) source_ages.push_back(copy.source_age_us);
@@ -463,7 +458,7 @@ int print_trace(const WindowInstance& instance, std::size_t max_samples, bool in
         if (copy.missed_deadline) ++missed_deadline_count;
     }
 
-    std::cout << "{\"ok\":true,\"schema_version\":9,\"process_id\":" << instance.process_id
+    std::cout << "{\"ok\":true,\"schema_version\":10,\"process_id\":" << instance.process_id
               << ",\"capacity\":" << frame_warp_lab::runtime_frame_trace_capacity
               << ",\"total_frames_recorded\":" << total_samples
               << ",\"sample_count\":" << captured.size()
@@ -507,7 +502,11 @@ int print_trace(const WindowInstance& instance, std::size_t max_samples, bool in
             std::cout << "{\"sequence\":" << sample.sequence
                       << ",\"display_frame_id\":" << sample.display_frame_id
                       << ",\"source_frame_id\":" << sample.source_frame_id
-                      << ",\"mode\":\"" << frame_warp_lab::presentation_mode_name(sample.presentation_mode)
+                      << ",\"gpu_measured_display_frame_id\":";
+            print_nullable_int64(sample.gpu_measured_display_frame_id);
+            std::cout << ",\"gpu_measured_source_frame_id\":";
+            print_nullable_int64(sample.gpu_measured_source_frame_id);
+            std::cout << ",\"mode\":\"" << frame_warp_lab::presentation_mode_name(sample.presentation_mode)
                       << "\",\"frame_kind\":\"" << frame_warp_lab::frame_kind_name(sample.frame_kind)
                       << "\",\"fallback_reason\":\"" << frame_warp_lab::fallback_reason_name(sample.fallback_reason)
                       << "\",\"source_rendered\":" << (sample.source_rendered ? "true" : "false")
@@ -627,8 +626,14 @@ int apply_setting(const WindowInstance& instance, const std::wstring& key, const
         if (value == L"on" || value == L"1" || value == L"true") parameter = 1;
         else if (value == L"off" || value == L"0" || value == L"false") parameter = 0;
         else return fail("invalid_value", "Expected adaptive in {on, off}");
+    } else if (key == L"instrumentation") {
+        command = frame_warp_lab::ControlCommand::set_instrumentation_level;
+        if (value == L"minimal") parameter = static_cast<LPARAM>(frame_warp_lab::InstrumentationLevel::minimal);
+        else if (value == L"standard") parameter = static_cast<LPARAM>(frame_warp_lab::InstrumentationLevel::standard);
+        else if (value == L"diagnostic") parameter = static_cast<LPARAM>(frame_warp_lab::InstrumentationLevel::diagnostic);
+        else return fail("invalid_value", "Expected instrumentation in {minimal, standard, diagnostic}");
     } else {
-        return fail("unknown_setting", "Supported settings are: mode, pacer, target_fps, async_gpu, vrs, adaptive, divider, vsync, view, path, stress, overlay, flash");
+        return fail("unknown_setting", "Supported settings are: mode, pacer, target_fps, async_gpu, vrs, adaptive, instrumentation, divider, vsync, view, path, stress, overlay, flash");
     }
 
     if (!PostMessageW(instance.window, frame_warp_lab::control_message, static_cast<WPARAM>(command), parameter)) {
@@ -731,14 +736,14 @@ int print_capabilities() {
 
 int wmain(int argument_count, wchar_t** arguments) {
     if (argument_count == 2 && std::wstring(arguments[1]) == L"help") {
-        std::cout << "{\"ok\":true,\"schema_version\":9,\"commands\":[\"help\",\"start\",\"instances\",\"status <pid>\",\"events <pid>\",\"trace <pid> [limit] [summary]\",\"set <pid> <key> <value>\",\"pause <pid>\",\"resume <pid>\",\"reset <pid>\",\"stop <pid>\",\"capabilities\"],\"settings\":{\"mode\":[\"full_render\",\"repeat\",\"reproject\",\"frame_gen\",\"combined\"],\"pacer\":[\"deadline\",\"vsync_only\",\"unlocked\"],\"target_fps\":\"0 or 30..500\",\"async_gpu\":[\"on\",\"off\"],\"vrs\":[\"off\",\"uniform_2x2\",\"foveated\"],\"adaptive\":[\"on\",\"off\"],\"divider\":\"1..8\",\"vsync\":[\"on\",\"off\"],\"view\":[\"final\",\"depth\",\"motion\",\"holes\",\"vrs\"],\"path\":[\"corridor_sway\",\"fast_pan\",\"occlusion_sweep\",\"camera_cut\",\"manual\"],\"stress\":\"0..64\",\"overlay\":[\"on\",\"off\"],\"flash\":[\"on\",\"off\"]}}\n";
+        std::cout << "{\"ok\":true,\"schema_version\":10,\"commands\":[\"help\",\"start\",\"instances\",\"status <pid>\",\"events <pid>\",\"trace <pid> [limit] [summary]\",\"set <pid> <key> <value>\",\"pause <pid>\",\"resume <pid>\",\"reset <pid>\",\"stop <pid>\",\"capabilities\"],\"settings\":{\"mode\":[\"full_render\",\"repeat\",\"reproject\",\"frame_gen\",\"combined\"],\"pacer\":[\"deadline\",\"vsync_only\",\"unlocked\"],\"target_fps\":\"0 or 30..500\",\"async_gpu\":[\"on\",\"off\"],\"vrs\":[\"off\",\"uniform_2x2\",\"foveated\"],\"adaptive\":[\"on\",\"off\"],\"instrumentation\":[\"minimal\",\"standard\",\"diagnostic\"],\"divider\":\"1..8\",\"vsync\":[\"on\",\"off\"],\"view\":[\"final\",\"depth\",\"motion\",\"holes\",\"vrs\"],\"path\":[\"corridor_sway\",\"fast_pan\",\"occlusion_sweep\",\"camera_cut\",\"manual\"],\"stress\":\"0..64\",\"overlay\":[\"on\",\"off\"],\"flash\":[\"on\",\"off\"]}}\n";
         return 0;
     }
     if (argument_count == 2 && std::wstring(arguments[1]) == L"capabilities") return print_capabilities();
     if (argument_count == 2 && std::wstring(arguments[1]) == L"start") return start_instance();
     const auto instances = find_instances();
     if (argument_count == 2 && std::wstring(arguments[1]) == L"instances") {
-        std::cout << "{\"ok\":true,\"schema_version\":9,\"instances\":[";
+        std::cout << "{\"ok\":true,\"schema_version\":10,\"instances\":[";
         for (std::size_t index = 0; index < instances.size(); ++index) {
             if (index) std::cout << ',';
             std::cout << "{\"process_id\":" << instances[index].process_id << "}";

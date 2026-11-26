@@ -51,6 +51,8 @@ struct FrameExecutionMetrics {
     std::chrono::steady_clock::time_point present_call_time;
     std::int64_t completed_scene_gpu_us;
     std::int64_t completed_present_gpu_us;
+    std::int64_t completed_gpu_display_frame_id;
+    std::int64_t completed_gpu_source_frame_id;
     std::int64_t render_submit_cpu_us;
     std::int64_t present_call_cpu_us;
     std::uint32_t completed_invalid_pixel_count;
@@ -74,6 +76,7 @@ struct PresentRequest {
     DiagnosticView diagnostic_view;
     SynthesisMode synthesis_mode;
     VrsMode active_vrs_mode;
+    InstrumentationLevel instrumentation_level;
     float extrapolation_alpha;
     bool has_previous_history;
     bool overlay_enabled;
@@ -90,7 +93,7 @@ public:
     Renderer(const Renderer&) = delete;
     Renderer& operator=(const Renderer&) = delete;
 
-    void wait_for_frame_slot();
+    bool wait_for_frame_slot();
     bool poll_completed_scenes();
     bool has_scene_in_flight() const;
     bool has_completed_source() const { return latest_completed_slot_ >= 0; }
@@ -160,6 +163,7 @@ private:
     void create_swap_chain_targets();
     void create_source_targets();
     std::int32_t find_available_source_slot() const;
+    static constexpr DWORD gpu_wait_timeout_ms = 5000;
     void wait_for_fence(ID3D12Fence* fence, HANDLE event_handle, std::uint64_t value);
 
     OsHandle present_fence_event_;
@@ -204,8 +208,11 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Resource> reprojection_stats_readback_;
     const std::uint32_t* mapped_reprojection_stats_ = nullptr;
     std::array<std::uint64_t, swap_chain_buffer_count> buffer_fence_values_{};
+    std::array<std::int64_t, swap_chain_buffer_count> buffer_display_frame_ids_{};
+    std::array<std::int64_t, swap_chain_buffer_count> buffer_source_frame_ids_{};
     std::array<bool, swap_chain_buffer_count> buffer_has_data_{};
     std::array<bool, swap_chain_buffer_count> buffer_warped_{};
+    std::array<bool, swap_chain_buffer_count> buffer_stats_enabled_{};
     std::array<std::uint32_t, swap_chain_buffer_count> buffer_total_pixels_{};
     std::uint64_t next_present_fence_value_ = 1;
     std::uint64_t next_scene_fence_value_ = 1;

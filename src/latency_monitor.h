@@ -33,6 +33,7 @@ public:
 
     void start_ping_loop(HWND target_window);
     void stop();
+    void set_enabled(bool enabled);
     bool is_ping_message(UINT message) const;
     void record_ping_received(std::uint64_t frame_id);
     void emit_marker(LatencyMarker marker, std::uint64_t frame_id);
@@ -51,6 +52,7 @@ private:
     HANDLE ping_thread_ = nullptr;
     std::atomic<std::int64_t> markers_emitted_{0};
     std::atomic<std::int64_t> pings_received_{0};
+    std::atomic<bool> enabled_{true};
     bool provider_registered_ = false;
 };
 

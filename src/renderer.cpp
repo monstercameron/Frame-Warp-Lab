@@ -48,6 +48,7 @@ struct PresentConstantsData {
     float previous_camera_up_rcp_tan_y[4];
     float previous_camera_forward_tan_x[4];
     float vrs_params[4];
+    float reprojection_thresholds[4];
 };
 
 struct HudConstantsData {
@@ -326,14 +327,31 @@ Renderer::~Renderer() noexcept {
     }
 }
 
-void Renderer::wait_for_frame_slot() {
-    if (viewport_width_ == 0 || viewport_height_ == 0 || has_acquired_slot_) return;
+bool Renderer::wait_for_frame_slot() {
+    if (viewport_width_ == 0 || viewport_height_ == 0) return false;
+    if (has_acquired_slot_) return true;
     if (frame_latency_waitable_object_) {
-        WaitForSingleObjectEx(frame_latency_waitable_object_, 1000, TRUE);
+        for (;;) {
+            const DWORD wait_result = WaitForSingleObjectEx(frame_latency_waitable_object_, 1000, TRUE);
+            if (wait_result == WAIT_OBJECT_0) break;
+            if (wait_result == WAIT_IO_COMPLETION) continue;
+            if (wait_result == WAIT_TIMEOUT) {
+                const HRESULT removed_reason = device_ ? device_->GetDeviceRemovedReason() : S_OK;
+                if (FAILED(removed_reason)) {
+                    throw std::system_error(static_cast<int>(removed_reason), std::system_category(), "D3D12 device removed during swap-chain wait");
+                }
+                return false;
+            }
+            if (wait_result == WAIT_ABANDONED) {
+                throw std::runtime_error("Swap-chain frame latency wait handle was abandoned");
+            }
+            throw std::system_error(static_cast<int>(GetLastError()), std::system_category(), "Wait for swap-chain frame latency object");
+        }
     }
     pending_buffer_index_ = swap_chain_->GetCurrentBackBufferIndex();
     wait_for_fence(present_fence_.Get(), present_fence_event_.get(), buffer_fence_values_[pending_buffer_index_]);
     has_acquired_slot_ = true;
+    return true;
 }
 
 bool Renderer::poll_completed_scenes() {
@@ -565,6 +583,8 @@ FrameExecutionMetrics Renderer::present_from_source(const PresentRequest& reques
         std::chrono::steady_clock::now(),
         last_completed_scene_gpu_us_,
         -1,
+        -1,
+        -1,
         0,
         0,
         0,
@@ -580,15 +600,17 @@ FrameExecutionMetrics Renderer::present_from_source(const PresentRequest& reques
         return metrics;
     }
 
-    if (!has_acquired_slot_) {
-        wait_for_frame_slot();
+    if (!has_acquired_slot_ && !wait_for_frame_slot()) {
+        return metrics;
     }
     const UINT buffer_index = pending_buffer_index_;
     has_acquired_slot_ = false;
 
     if (buffer_has_data_[buffer_index]) {
         metrics.completed_slot_valid = true;
-        metrics.completed_slot_warped = buffer_warped_[buffer_index];
+        metrics.completed_slot_warped = buffer_warped_[buffer_index] && buffer_stats_enabled_[buffer_index];
+        metrics.completed_gpu_display_frame_id = buffer_display_frame_ids_[buffer_index];
+        metrics.completed_gpu_source_frame_id = buffer_source_frame_ids_[buffer_index];
         metrics.completed_total_pixel_count = buffer_total_pixels_[buffer_index];
         if (mapped_present_timestamps_ && present_timestamp_frequency_ > 0) {
             const std::size_t base_index = static_cast<std::size_t>(buffer_index) * timestamps_per_pass;
@@ -598,17 +620,24 @@ FrameExecutionMetrics Renderer::present_from_source(const PresentRequest& reques
                 metrics.completed_present_gpu_us = static_cast<std::int64_t>(((present_end - present_begin) * 1000000ULL) / present_timestamp_frequency_);
             }
         }
-        if (buffer_warped_[buffer_index] && mapped_reprojection_stats_) {
+        if (buffer_warped_[buffer_index] && buffer_stats_enabled_[buffer_index] && mapped_reprojection_stats_) {
             metrics.completed_invalid_pixel_count = mapped_reprojection_stats_[buffer_index * 2U + 0U];
             metrics.completed_temporal_recovered_count = mapped_reprojection_stats_[buffer_index * 2U + 1U];
         }
     }
 
     const bool synthesis_active = request.synthesis_mode != SynthesisMode::passthrough;
+    const bool emit_etw = request.instrumentation_level != InstrumentationLevel::minimal;
+    const bool collect_stats = synthesis_active
+        && (request.instrumentation_level == InstrumentationLevel::diagnostic
+            || request.diagnostic_view == DiagnosticView::reprojection_holes);
+    const bool render_overlay = request.overlay_enabled && request.instrumentation_level != InstrumentationLevel::minimal;
     const auto submit_begin_time = std::chrono::steady_clock::now();
-    latency_monitor.emit_marker(
-        synthesis_active ? LatencyMarker::late_warp_submit_start : LatencyMarker::render_submit_start,
-        request.display_frame_id);
+    if (emit_etw) {
+        latency_monitor.emit_marker(
+            synthesis_active ? LatencyMarker::late_warp_submit_start : LatencyMarker::render_submit_start,
+            request.display_frame_id);
+    }
 
     const float aspect_ratio = static_cast<float>(viewport_width_) / static_cast<float>(viewport_height_);
     const float rcp_width = 1.0f / static_cast<float>(viewport_width_);
@@ -629,7 +658,7 @@ FrameExecutionMetrics Renderer::present_from_source(const PresentRequest& reques
         static_cast<float>(viewport_width_),
         static_cast<float>(viewport_height_),
         static_cast<float>(static_cast<std::int32_t>(request.diagnostic_view)),
-        request.overlay_enabled ? 1.0f : 0.0f);
+        render_overlay ? 1.0f : 0.0f);
     simd::store_float4(
         present_constants->warp_flags_and_aspect,
         synthesis_active ? 1.0f : 0.0f,
@@ -641,7 +670,7 @@ FrameExecutionMetrics Renderer::present_from_source(const PresentRequest& reques
         static_cast<float>(static_cast<std::int32_t>(request.synthesis_mode)),
         request.extrapolation_alpha,
         request.has_previous_history ? 1.0f : 0.0f,
-        0.0f);
+        collect_stats ? 1.0f : 0.0f);
     write_float4(present_constants->source_camera_position_tan_y, request.source_snapshot.camera.position, source_tan_y);
     write_float4(present_constants->source_camera_right_unused, request.source_snapshot.camera.right, rcp_width);
     write_float4(present_constants->source_camera_up_unused, request.source_snapshot.camera.up, rcp_height);
@@ -660,8 +689,14 @@ FrameExecutionMetrics Renderer::present_from_source(const PresentRequest& reques
         static_cast<float>(vrs_tile_size_px_ > 0 ? vrs_tile_size_px_ : 16),
         vrs_additional_rates_supported_ ? 1.0f : 0.0f,
         0.0f);
+    simd::store_float4(
+        present_constants->reprojection_thresholds,
+        1.75f,
+        0.045f,
+        0.18f,
+        0.65f);
 
-    if (request.overlay_enabled && request.hud) {
+    if (render_overlay && request.hud) {
         auto* hud_destination = reinterpret_cast<HudConstantsData*>(mapped_hud_constants_ + hud_offset);
         write_hud_constants_simd(hud_destination, *request.hud, viewport_width_, viewport_height_);
     }
@@ -675,7 +710,7 @@ FrameExecutionMetrics Renderer::present_from_source(const PresentRequest& reques
     present_command_list_->RSSetScissorRects(1, &scissor);
     present_command_list_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
-    if (synthesis_active) {
+    if (collect_stats) {
         const auto stats_to_copy_dest = transition_barrier(reprojection_stats_uav_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST);
         present_command_list_->ResourceBarrier(1, &stats_to_copy_dest);
         present_command_list_->CopyBufferRegion(reprojection_stats_uav_.Get(), 0, reprojection_stats_zero_upload_.Get(), 0, 2U * sizeof(std::uint32_t));
@@ -727,7 +762,7 @@ FrameExecutionMetrics Renderer::present_from_source(const PresentRequest& reques
             static_cast<UINT64>(query_base) * sizeof(std::uint64_t));
     }
 
-    if (synthesis_active) {
+    if (collect_stats) {
         const auto stats_to_copy_source = transition_barrier(reprojection_stats_uav_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
         present_command_list_->ResourceBarrier(1, &stats_to_copy_source);
         present_command_list_->CopyBufferRegion(
@@ -745,34 +780,43 @@ FrameExecutionMetrics Renderer::present_from_source(const PresentRequest& reques
     present_queue_->ExecuteCommandLists(1, command_lists);
 
     const auto submit_end_time = std::chrono::steady_clock::now();
-    latency_monitor.emit_marker(
-        synthesis_active ? LatencyMarker::late_warp_submit_end : LatencyMarker::render_submit_end,
-        request.display_frame_id);
+    if (emit_etw) {
+        latency_monitor.emit_marker(
+            synthesis_active ? LatencyMarker::late_warp_submit_end : LatencyMarker::render_submit_end,
+            request.display_frame_id);
+    }
     metrics.render_submit_cpu_us = std::chrono::duration_cast<std::chrono::microseconds>(submit_end_time - submit_begin_time).count();
 
     metrics.missed_deadline = pacer.wait_for_present_deadline();
 
     const auto present_begin_time = std::chrono::steady_clock::now();
     metrics.present_call_time = present_begin_time;
-    latency_monitor.emit_marker(
-        synthesis_active ? LatencyMarker::late_warp_present_start : LatencyMarker::present_start,
-        request.display_frame_id);
+    if (emit_etw) {
+        latency_monitor.emit_marker(
+            synthesis_active ? LatencyMarker::late_warp_present_start : LatencyMarker::present_start,
+            request.display_frame_id);
+    }
 
     const UINT sync_interval = request.vsync_enabled ? 1U : 0U;
     const UINT present_flags = (!request.vsync_enabled && allow_tearing_supported_) ? DXGI_PRESENT_ALLOW_TEARING : 0U;
     check(swap_chain_->Present(sync_interval, present_flags), "Present");
 
     const auto present_end_time = std::chrono::steady_clock::now();
-    latency_monitor.emit_marker(
-        synthesis_active ? LatencyMarker::late_warp_present_end : LatencyMarker::present_end,
-        request.display_frame_id);
+    if (emit_etw) {
+        latency_monitor.emit_marker(
+            synthesis_active ? LatencyMarker::late_warp_present_end : LatencyMarker::present_end,
+            request.display_frame_id);
+    }
     metrics.present_call_cpu_us = std::chrono::duration_cast<std::chrono::microseconds>(present_end_time - present_begin_time).count();
 
     const auto fence_value = next_present_fence_value_++;
     check(present_queue_->Signal(present_fence_.Get(), fence_value), "Signal present fence");
     buffer_fence_values_[buffer_index] = fence_value;
+    buffer_display_frame_ids_[buffer_index] = static_cast<std::int64_t>(request.display_frame_id);
+    buffer_source_frame_ids_[buffer_index] = request.source_snapshot.source_frame_id;
     buffer_has_data_[buffer_index] = true;
     buffer_warped_[buffer_index] = synthesis_active;
+    buffer_stats_enabled_[buffer_index] = collect_stats;
     buffer_total_pixels_[buffer_index] = viewport_width_ * viewport_height_;
     source_slots_[static_cast<std::size_t>(request.source_slot_index)].last_read_present_fence = fence_value;
     if (history_slot_index >= 0 && history_slot_index != request.source_slot_index) {
@@ -803,8 +847,11 @@ void Renderer::resize(UINT width, UINT height) {
     viewport_width_ = width;
     viewport_height_ = height;
     buffer_fence_values_.fill(0);
+    buffer_display_frame_ids_.fill(-1);
+    buffer_source_frame_ids_.fill(-1);
     buffer_has_data_.fill(false);
     buffer_warped_.fill(false);
+    buffer_stats_enabled_.fill(false);
     buffer_total_pixels_.fill(0);
     vrs_image_.Reset();
     create_swap_chain_targets();
@@ -1167,13 +1214,32 @@ void Renderer::create_source_targets() {
 
 void Renderer::wait_for_fence(ID3D12Fence* fence, HANDLE event_handle, std::uint64_t value) {
     const auto completed = fence->GetCompletedValue();
-    if (completed == UINT64_MAX) throw std::runtime_error("D3D12 device was removed");
+    if (completed == UINT64_MAX) {
+        const HRESULT removed_reason = device_ ? device_->GetDeviceRemovedReason() : DXGI_ERROR_DEVICE_REMOVED;
+        throw std::system_error(static_cast<int>(removed_reason), std::system_category(), "D3D12 device was removed");
+    }
     if (value == 0 || completed >= value) return;
     check(fence->SetEventOnCompletion(value, event_handle), "Set fence event");
-    if (WaitForSingleObject(event_handle, INFINITE) != WAIT_OBJECT_0) {
-        throw std::system_error(static_cast<int>(GetLastError()), std::system_category(), "Wait for GPU");
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        const DWORD wait_result = WaitForSingleObject(event_handle, gpu_wait_timeout_ms);
+        if (wait_result == WAIT_OBJECT_0) {
+            if (fence->GetCompletedValue() == UINT64_MAX) {
+                const HRESULT removed_reason = device_ ? device_->GetDeviceRemovedReason() : DXGI_ERROR_DEVICE_REMOVED;
+                throw std::system_error(static_cast<int>(removed_reason), std::system_category(), "D3D12 device was removed after fence wait");
+            }
+            return;
+        }
+        if (wait_result == WAIT_TIMEOUT) {
+            const HRESULT removed_reason = device_ ? device_->GetDeviceRemovedReason() : S_OK;
+            if (FAILED(removed_reason)) {
+                throw std::system_error(static_cast<int>(removed_reason), std::system_category(), "D3D12 device removed during GPU fence wait");
+            }
+            if (fence->GetCompletedValue() >= value) return;
+            continue;
+        }
+        throw std::system_error(static_cast<int>(GetLastError()), std::system_category(), "Wait for GPU fence");
     }
-    if (fence->GetCompletedValue() == UINT64_MAX) throw std::runtime_error("D3D12 device was removed");
+    throw std::runtime_error("Timed out waiting for D3D12 GPU fence completion");
 }
 
 }

@@ -1,5 +1,17 @@
 # Development log
 
+## v0.15.0 — Wait/fence error hardening, seqlock IPC, exact GPU attribution, typed events, and instrumentation levels
+
+- Hardened synchronization and failure handling in `src/renderer.h` and `src/renderer.cpp`:
+  - `wait_for_frame_slot()` now explicitly inspects `WaitForSingleObjectEx` results (`WAIT_OBJECT_0`, `WAIT_IO_COMPLETION` retry, `WAIT_TIMEOUT` with `GetDeviceRemovedReason()` check returning `false` instead of presenting an unacquired slot, and throwing on `WAIT_ABANDONED` / `WAIT_FAILED`).
+  - `wait_for_fence()` replaces `INFINITE` waits with bounded 5,000 ms wait intervals and `GetDeviceRemovedReason()` checks so TDR/device-loss events surface cleanly instead of hanging indefinitely.
+  - Tagged each swap-chain buffer slot with its original `display_frame_id` and `source_frame_id`, reporting exact `gpu_measured_display_frame_id` and `gpu_measured_source_frame_id` in `RuntimeFrameSample` and CLI `trace`.
+- Upgraded shared-memory IPC in `src/runtime_state.h` (`runtime_state_version = 14`), `src/main.cpp`, and `src/cli.cpp` (`schema_version: 10`) to a formal odd/even generation seqlock (`seqlock_write` / `seqlock_try_read`) and replaced magic-number config event payloads with typed `ConfigKey` fields (`"key":"mode"`, `"key":"divider"`, `"key":"instrumentation"`, etc.).
+- Moved reprojection consistency thresholds (`1.75 px`, `4.5%` depth, `18%` edge jump, `0.65 px` edge threshold) into `PresentConstants::reprojection_thresholds`, replaced the 65% unwarped-image ghosting blend on invalid pixels with a conservative background-depth neighbor fill in `shaders/present.hlsl`, throttled HUD text formatting to 15 Hz (plus immediate refresh on config changes), and added configurable `InstrumentationLevel` (`minimal`, `standard`, `diagnostic`; CLI `set <pid> instrumentation ...`) gating ETW markers, HUD rendering, and UAV stats barriers/copies.
+- Verified zero-warning ARM64 Release and Debug builds and live Release measurements on `NVIDIA RTX Spark N1X` (`occlusion_sweep`, `reproject /4`, `120 Hz`):
+  - `trace` samples accurately report the 2-frame readback lag (`display_frame_id: 50` carrying `gpu_measured_display_frame_id: 48`, `gpu_measured_source_frame_id: 12`).
+  - Switching `instrumentation` from `diagnostic` to `minimal` cut `render_submit_cpu_us` median from **145 µs → 117 µs**, `present_call_cpu_us` median from **265 µs → 231 µs**, and `sim_cpu_us` median from **5 µs → 3 µs** with 0 missed deadlines (`8,333 µs` median / `8,333 µs` p95).
+
 ## v0.14.0 — Adaptive deadline-aware scheduler with GPU execution headroom reservation
 
 - Added `src/adaptive_scheduler.h` and wired it into `src/runtime_state.h` (`runtime_state_version = 13`), `src/main.cpp`, and `src/cli.cpp` (`schema_version: 9`):

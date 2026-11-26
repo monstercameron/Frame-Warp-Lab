@@ -10,7 +10,7 @@
 namespace frame_warp_lab {
 
 inline constexpr wchar_t window_class_name[] = L"FrameWarpLabWindow";
-inline constexpr std::uint32_t runtime_state_version = 13;
+inline constexpr std::uint32_t runtime_state_version = 14;
 inline constexpr std::size_t runtime_event_capacity = 64;
 inline constexpr std::size_t runtime_frame_trace_capacity = 256;
 inline constexpr std::size_t hud_graph_sample_count = 128;
@@ -37,6 +37,13 @@ enum class ControlCommand : WPARAM {
     set_async_gpu = 14,
     set_vrs_mode = 15,
     set_adaptive_scheduler = 16,
+    set_instrumentation_level = 17,
+};
+
+enum class InstrumentationLevel : std::int32_t {
+    minimal = 0,
+    standard = 1,
+    diagnostic = 2,
 };
 
 enum class SchedulerReason : std::int32_t {
@@ -99,6 +106,25 @@ enum class FallbackReason : std::int32_t {
     no_source_frame = 3,
 };
 
+enum class ConfigKey : std::int32_t {
+    none = 0,
+    diagnostic_view = 1,
+    camera_path = 2,
+    stress_level = 3,
+    overlay_enabled = 4,
+    presentation_mode = 5,
+    source_divider = 6,
+    vsync_enabled = 7,
+    flash_indicator = 8,
+    pacer_mode = 9,
+    target_fps = 10,
+    async_gpu = 11,
+    vrs_mode = 12,
+    adaptive_scheduler = 13,
+    instrumentation_level = 14,
+    hotkey = 15,
+};
+
 enum class RuntimeEventType : std::int32_t {
     runtime_started = 1,
     swap_chain_resized = 2,
@@ -112,17 +138,22 @@ enum class RuntimeEventType : std::int32_t {
 };
 
 struct RuntimeEvent {
+    std::uint64_t seqlock_version;
     std::int32_t sequence;
     std::uint32_t timestamp_low;
     std::uint32_t timestamp_high;
     std::int32_t event_type;
+    std::int32_t config_key;
     std::int32_t value;
 };
 
 struct RuntimeFrameSample {
+    std::uint64_t seqlock_version;
     std::int64_t sequence;
     std::int64_t display_frame_id;
     std::int64_t source_frame_id;
+    std::int64_t gpu_measured_display_frame_id;
+    std::int64_t gpu_measured_source_frame_id;
     std::int64_t present_interval_us;
     std::int64_t source_age_us;
     std::int64_t input_to_present_us;
@@ -203,6 +234,7 @@ struct RuntimeState {
     std::int32_t adaptive_utilization_permille;
     std::int64_t adaptive_reserved_headroom_us;
     std::int64_t adaptive_decision_count;
+    std::int32_t instrumentation_level;
     std::int32_t diagnostic_view;
     std::int32_t camera_path;
     std::int32_t stress_level;
@@ -224,6 +256,68 @@ struct RuntimeState {
 static_assert(std::atomic_ref<std::int32_t>::is_always_lock_free);
 static_assert(std::atomic_ref<std::uint32_t>::is_always_lock_free);
 static_assert(std::atomic_ref<std::int64_t>::is_always_lock_free);
+static_assert(std::atomic_ref<std::uint64_t>::is_always_lock_free);
+
+template <typename Record, typename WriterFn>
+inline void seqlock_write(Record& slot, WriterFn&& writer) {
+    std::atomic_ref<std::uint64_t> version(slot.seqlock_version);
+    const std::uint64_t prior = version.load(std::memory_order_relaxed);
+    const std::uint64_t odd = (prior + 1ULL) | 1ULL;
+    version.store(odd, std::memory_order_relaxed);
+    std::atomic_thread_fence(std::memory_order_release);
+    writer(slot);
+    std::atomic_thread_fence(std::memory_order_release);
+    version.store(odd + 1ULL, std::memory_order_release);
+}
+
+template <typename Record>
+inline bool seqlock_try_read(const Record& slot, Record& out_copy) {
+    std::atomic_ref<std::uint64_t> version(const_cast<std::uint64_t&>(slot.seqlock_version));
+    for (int attempt = 0; attempt < 4; ++attempt) {
+        const std::uint64_t begin_version = version.load(std::memory_order_acquire);
+        if ((begin_version & 1ULL) != 0ULL || begin_version == 0ULL) continue;
+        std::atomic_thread_fence(std::memory_order_acquire);
+        out_copy = slot;
+        std::atomic_thread_fence(std::memory_order_acquire);
+        const std::uint64_t end_version = version.load(std::memory_order_acquire);
+        if (begin_version == end_version) {
+            out_copy.seqlock_version = end_version;
+            return true;
+        }
+    }
+    return false;
+}
+
+inline const char* instrumentation_level_name(std::int32_t level) {
+    switch (static_cast<InstrumentationLevel>(level)) {
+        case InstrumentationLevel::minimal: return "minimal";
+        case InstrumentationLevel::standard: return "standard";
+        case InstrumentationLevel::diagnostic: return "diagnostic";
+        default: return "unknown";
+    }
+}
+
+inline const char* config_key_name(std::int32_t key) {
+    switch (static_cast<ConfigKey>(key)) {
+        case ConfigKey::none: return "none";
+        case ConfigKey::diagnostic_view: return "view";
+        case ConfigKey::camera_path: return "path";
+        case ConfigKey::stress_level: return "stress";
+        case ConfigKey::overlay_enabled: return "overlay";
+        case ConfigKey::presentation_mode: return "mode";
+        case ConfigKey::source_divider: return "divider";
+        case ConfigKey::vsync_enabled: return "vsync";
+        case ConfigKey::flash_indicator: return "flash";
+        case ConfigKey::pacer_mode: return "pacer";
+        case ConfigKey::target_fps: return "target_fps";
+        case ConfigKey::async_gpu: return "async_gpu";
+        case ConfigKey::vrs_mode: return "vrs";
+        case ConfigKey::adaptive_scheduler: return "adaptive";
+        case ConfigKey::instrumentation_level: return "instrumentation";
+        case ConfigKey::hotkey: return "hotkey";
+        default: return "unknown";
+    }
+}
 
 inline const char* runtime_event_name(std::int32_t event_type) {
     switch (static_cast<RuntimeEventType>(event_type)) {
