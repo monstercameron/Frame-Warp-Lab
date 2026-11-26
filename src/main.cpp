@@ -1,3 +1,4 @@
+#include "adaptive_scheduler.h"
 #include "frame_pacer.h"
 #include "latency_monitor.h"
 #include "renderer.h"
@@ -106,6 +107,16 @@ public:
         std::atomic_ref<std::int32_t>(state_->flash_indicator_enabled).store(flash_indicator_enabled ? 1 : 0, std::memory_order_release);
     }
 
+    void update_adaptive(bool enabled, const frame_warp_lab::AdaptiveTelemetry& telemetry) {
+        std::atomic_ref<std::int32_t>(state_->adaptive_enabled).store(enabled ? 1 : 0, std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->adaptive_tier).store(telemetry.tier, std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->adaptive_reason).store(static_cast<std::int32_t>(telemetry.reason), std::memory_order_release);
+        const auto permille = static_cast<std::int32_t>(std::clamp(telemetry.gpu_budget_utilization * 1000.0, 0.0, 999999.0));
+        std::atomic_ref<std::int32_t>(state_->adaptive_utilization_permille).store(permille, std::memory_order_release);
+        std::atomic_ref<std::int64_t>(state_->adaptive_reserved_headroom_us).store(telemetry.reserved_headroom_us, std::memory_order_release);
+        std::atomic_ref<std::int64_t>(state_->adaptive_decision_count).store(telemetry.decision_count, std::memory_order_release);
+    }
+
     void update_scene(
         double scene_time_seconds,
         bool paused,
@@ -198,6 +209,7 @@ public:
         slot.camera_path = sample.camera_path;
         slot.stress_level = sample.stress_level;
         slot.vrs_mode = sample.vrs_mode;
+        slot.adaptive_tier = sample.adaptive_tier;
         slot.source_divider = sample.source_divider;
         slot.source_rendered = sample.source_rendered;
         slot.gpu_slot_warped = sample.gpu_slot_warped;
@@ -374,7 +386,8 @@ void format_hud_lines(
     frame_warp_lab::PresentationMode mode,
     frame_warp_lab::PacerMode pacer_mode,
     std::int32_t source_divider,
-    bool async_gpu_enabled,
+    bool adaptive_enabled,
+    std::int32_t adaptive_tier,
     frame_warp_lab::VrsMode active_vrs_mode,
     frame_warp_lab::CameraPath path,
     std::int32_t stress_level,
@@ -390,8 +403,12 @@ void format_hud_lines(
 
     std::snprintf(hud.lines[0], sizeof(hud.lines[0]), "FPS %5.1f  FT %5.2f MS  %s /%d  PACE %s", fps, frame_ms, short_mode_label(mode), source_divider, short_pacer_label(pacer_mode));
     std::snprintf(hud.lines[1], sizeof(hud.lines[1]), "GPU SCN %4.2f  WRP %4.2f  IN-PR %4.2f  MS", scene_ms, warp_ms, input_ms);
-    std::snprintf(hud.lines[2], sizeof(hud.lines[2]), "HOLE %4.2f%%  MISS %lld  VRS %s  STR %d", holes_pct, static_cast<long long>(missed_deadlines), short_vrs_label(active_vrs_mode), stress_level);
-    std::snprintf(hud.lines[3], sizeof(hud.lines[3]), "%s  PATH %s  1-5 MODE  B VRS  G %s", mouse_look_locked ? "RMB/ESC UNLK" : "LMB/RMB LOOK", short_path_label(path), async_gpu_enabled ? "ASYN" : "SYNC");
+    if (adaptive_enabled) {
+        std::snprintf(hud.lines[2], sizeof(hud.lines[2]), "HOLE %4.2f%%  MISS %lld  VRS %s  ADP T%d", holes_pct, static_cast<long long>(missed_deadlines), short_vrs_label(active_vrs_mode), adaptive_tier);
+    } else {
+        std::snprintf(hud.lines[2], sizeof(hud.lines[2]), "HOLE %4.2f%%  MISS %lld  VRS %s  STR %d", holes_pct, static_cast<long long>(missed_deadlines), short_vrs_label(active_vrs_mode), stress_level);
+    }
+    std::snprintf(hud.lines[3], sizeof(hud.lines[3]), "%s  PATH %s  1-5 MODE  B VRS  K ADP", mouse_look_locked ? "RMB/ESC UNLK" : "LMB/RMB LOOK", short_path_label(path));
 }
 
 LRESULT CALLBACK window_procedure(HWND window, UINT message, WPARAM message_parameter, LPARAM message_data) {
@@ -534,6 +551,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         bool vsync_enabled = !renderer.allow_tearing_enabled();
         bool async_gpu_enabled = true;
         frame_warp_lab::VrsMode vrs_mode = frame_warp_lab::VrsMode::off;
+        frame_warp_lab::AdaptiveScheduler adaptive_scheduler;
         frame_warp_lab::DiagnosticView diagnostic_view = frame_warp_lab::DiagnosticView::final_color;
         std::int32_t stress_level = 0;
         bool overlay_enabled = true;
@@ -575,6 +593,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 stress_level,
                 overlay_enabled,
                 flash_indicator_enabled);
+            runtime_state.update_adaptive(adaptive_scheduler.enabled(), adaptive_scheduler.telemetry());
         };
         publish_config();
 
@@ -597,25 +616,30 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                     } else if (message.wParam == 'M') {
                         set_mouse_look_locked(window, input_state, !input_state.mouse_look_locked);
                     } else if (message.wParam == '1') {
+                        adaptive_scheduler.set_enabled(false);
                         presentation_mode = frame_warp_lab::PresentationMode::full_render;
                         cadence_counter = 0;
                         config_changed = true;
                     } else if (message.wParam == '2') {
+                        adaptive_scheduler.set_enabled(false);
                         presentation_mode = frame_warp_lab::PresentationMode::repeat;
                         if (source_divider < 2) source_divider = 2;
                         cadence_counter = 0;
                         config_changed = true;
                     } else if (message.wParam == '3') {
+                        adaptive_scheduler.set_enabled(false);
                         presentation_mode = frame_warp_lab::PresentationMode::reproject;
                         if (source_divider < 2) source_divider = 2;
                         cadence_counter = 0;
                         config_changed = true;
                     } else if (message.wParam == '4') {
+                        adaptive_scheduler.set_enabled(false);
                         presentation_mode = frame_warp_lab::PresentationMode::frame_gen;
                         if (source_divider < 2) source_divider = 2;
                         cadence_counter = 0;
                         config_changed = true;
                     } else if (message.wParam == '5') {
+                        adaptive_scheduler.set_enabled(false);
                         presentation_mode = frame_warp_lab::PresentationMode::combined;
                         if (source_divider < 2) source_divider = 2;
                         cadence_counter = 0;
@@ -629,7 +653,21 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                         async_gpu_enabled = !async_gpu_enabled;
                         config_changed = true;
                     } else if (message.wParam == 'B') {
+                        adaptive_scheduler.set_enabled(false);
                         vrs_mode = static_cast<frame_warp_lab::VrsMode>((static_cast<std::int32_t>(vrs_mode) + 1) % 3);
+                        config_changed = true;
+                    } else if (message.wParam == 'K') {
+                        const bool enable_adaptive = !adaptive_scheduler.enabled();
+                        adaptive_scheduler.set_enabled(enable_adaptive);
+                        if (enable_adaptive) {
+                            adaptive_scheduler.reset();
+                            const auto initial_policy = frame_warp_lab::AdaptiveScheduler::policy_for_tier(0, renderer.vrs_tier());
+                            presentation_mode = initial_policy.mode;
+                            source_divider = initial_policy.divider;
+                            vrs_mode = initial_policy.vrs;
+                            async_gpu_enabled = initial_policy.async_gpu;
+                            cadence_counter = 0;
+                        }
                         config_changed = true;
                     } else if (message.wParam == 'H') {
                         diagnostic_view = diagnostic_view == frame_warp_lab::DiagnosticView::reprojection_holes
@@ -718,11 +756,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                     } else if (command == frame_warp_lab::ControlCommand::set_presentation_mode) {
                         const auto raw = static_cast<std::int32_t>(message.lParam);
                         if (raw >= 0 && raw <= 4) {
+                            adaptive_scheduler.set_enabled(false);
                             presentation_mode = static_cast<frame_warp_lab::PresentationMode>(raw);
                             cadence_counter = 0;
                             runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, 400 + raw);
                         }
                     } else if (command == frame_warp_lab::ControlCommand::set_source_divider) {
+                        adaptive_scheduler.set_enabled(false);
                         source_divider = std::clamp(static_cast<std::int32_t>(message.lParam), 1, frame_warp_lab::max_source_divider);
                         cadence_counter = 0;
                         runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, 500 + source_divider);
@@ -755,9 +795,23 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                     } else if (command == frame_warp_lab::ControlCommand::set_vrs_mode) {
                         const auto raw = static_cast<std::int32_t>(message.lParam);
                         if (raw >= 0 && raw <= 2) {
+                            adaptive_scheduler.set_enabled(false);
                             vrs_mode = static_cast<frame_warp_lab::VrsMode>(raw);
                             runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, 1100 + raw);
                         }
+                    } else if (command == frame_warp_lab::ControlCommand::set_adaptive_scheduler) {
+                        const bool enable_adaptive = message.lParam != 0;
+                        adaptive_scheduler.set_enabled(enable_adaptive);
+                        if (enable_adaptive) {
+                            adaptive_scheduler.reset();
+                            const auto initial_policy = frame_warp_lab::AdaptiveScheduler::policy_for_tier(0, renderer.vrs_tier());
+                            presentation_mode = initial_policy.mode;
+                            source_divider = initial_policy.divider;
+                            vrs_mode = initial_policy.vrs;
+                            async_gpu_enabled = initial_policy.async_gpu;
+                            cadence_counter = 0;
+                        }
+                        runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, enable_adaptive ? 1201 : 1200);
                     }
                     previous_tick = std::chrono::steady_clock::now();
                     publish_config();
@@ -858,6 +912,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
             ++cadence_counter;
 
             const frame_warp_lab::VrsMode active_vrs_mode = renderer.resolve_effective_vrs_mode(vrs_mode);
+            const bool scene_overran_cadence = cadence_requests_scene && async_gpu_enabled && renderer.has_scene_in_flight() && !need_initial_source;
             bool scene_submitted_this_frame = false;
             if (cadence_requests_scene && (!renderer.has_scene_in_flight() || !async_gpu_enabled || need_initial_source)) {
                 ++source_frame_id;
@@ -955,7 +1010,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 presentation_mode,
                 pacer.mode(),
                 effective_divider,
-                async_gpu_enabled,
+                adaptive_scheduler.enabled(),
+                adaptive_scheduler.tier(),
                 active_vrs_mode,
                 simulation.path(),
                 stress_level,
@@ -1011,6 +1067,30 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
             if (input_to_present_us >= 0) last_input_to_present_us = input_to_present_us;
             if (gpu_metrics.completed_scene_gpu_us >= 0) last_scene_gpu_us = gpu_metrics.completed_scene_gpu_us;
             if (gpu_metrics.completed_present_gpu_us >= 0) last_present_gpu_us = gpu_metrics.completed_present_gpu_us;
+
+            frame_warp_lab::AdaptivePolicyTarget adapted_policy{};
+            if (adaptive_scheduler.update(
+                    pacer.target_period_us(),
+                    last_scene_gpu_us,
+                    last_present_gpu_us,
+                    gpu_metrics.missed_deadline,
+                    scene_overran_cadence,
+                    renderer.vrs_tier(),
+                    active_vrs_mode,
+                    effective_divider,
+                    adapted_policy)) {
+                presentation_mode = adapted_policy.mode;
+                source_divider = adapted_policy.divider;
+                vrs_mode = adapted_policy.vrs;
+                async_gpu_enabled = adapted_policy.async_gpu;
+                cadence_counter = 0;
+                runtime_state.record_event(
+                    frame_warp_lab::RuntimeEventType::scheduler_decision,
+                    adaptive_scheduler.tier() * 10 + static_cast<std::int32_t>(adaptive_scheduler.reason()));
+                publish_config();
+            } else {
+                runtime_state.update_adaptive(adaptive_scheduler.enabled(), adaptive_scheduler.telemetry());
+            }
             if (gpu_metrics.completed_slot_warped) {
                 last_invalid_pixels = gpu_metrics.completed_invalid_pixel_count;
                 last_total_pixels = gpu_metrics.completed_total_pixel_count;
@@ -1062,6 +1142,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                     static_cast<std::int32_t>(simulation.path()),
                     stress_level,
                     static_cast<std::int32_t>(active_vrs_mode),
+                    adaptive_scheduler.tier(),
                     effective_divider,
                     scene_submitted_this_frame ? 1 : 0,
                     gpu_metrics.completed_slot_warped ? 1 : 0,

@@ -1,5 +1,20 @@
 # Development log
 
+## v0.14.0 — Adaptive deadline-aware scheduler with GPU execution headroom reservation
+
+- Added `src/adaptive_scheduler.h` and wired it into `src/runtime_state.h` (`runtime_state_version = 13`), `src/main.cpp`, and `src/cli.cpp` (`schema_version: 9`):
+  - Computes dynamic GPU execution headroom reservation (`max(25% of target_period_us, 2.5 * smoothed_present_gpu_us + 800 µs)`) and tracks smoothed `gpu_budget_utilization` against the active deadline and source divider.
+  - Implements a 5-tier hysteresis-protected escalation ladder (`Tier 0`: `full_render /1, vrs=off` → `Tier 1`: `full_render /1, vrs=foveated` → `Tier 2`: `combined /2, vrs=foveated` → `Tier 3`: `combined /3, vrs=uniform_2x2` → `Tier 4`: `combined /4, vrs=uniform_2x2`) that preserves full-rate rendering first, activates Tier 2 foveated VRS second, and engages `combined` synthesis + cadence division under deeper GPU saturation.
+  - Uses VRS gain compensation (`expected_vrs_cost_scale`) and a time-normalized recovery hold (`max(72 frames, 750 ms)`) plus a 24-frame post-transition settle window so stepping down does not oscillate, and gates miss-driven escalation by `gpu_budget_utilization >= 0.45` so isolated CPU/OS timer jitter does not degrade rendering quality when the GPU is idle.
+  - Added hotkey `K` and CLI `set <pid> adaptive on|off` (manual mode/divider/VRS edits cleanly hand back manual control), `RuntimeEventType::scheduler_decision` journal logging, live `ADP T<n>` HUD telemetry, and `adaptive_scheduler` reporting in `status` and `trace`.
+- Verified zero-warning ARM64 Release and Debug builds and live Release stress-ramp experiments on `NVIDIA RTX Spark N1X` (`1264x681`, `occlusion_sweep`, `deadline` pacer):
+  - `120 Hz` (`8,333 µs` deadline): fixed synchronous baseline (`full_render`, `vrs=off`, `async_gpu=off`, `stress=64`) suffered **100 / 100 missed deadlines** (`cpu_present_interval_us` p95 10,882 µs, max 11,851 µs); with `adaptive=on` (`async_gpu=on`), RTX Spark N1X ran `stress=64` at `scene_gpu_us` median 4,479 µs (`72.8%` of the 6,250 µs budget after 2,083 µs reserved headroom) with **0 / 100 missed deadlines** and median **8,333 µs**.
+  - `240 Hz` (`4,166 µs` deadline, `stress` `0 → 64 → 0` stress ramp):
+    - Stage 1 (`stress=0`): held **Tier 0** (`full_render /1, vrs=off`, `decision_count: 0`, `240.10 FPS`).
+    - Stage 2 (`stress=64`): escalated in **26 ms** via a single `scheduler_decision` to **Tier 1** (`foveated VRS`, dropping `scene_gpu_us` to **1,565 µs** median), holding `cpu_present_interval_us` median **4,166 µs**, p95 **4,167 µs** (+1 µs spread), 1 / 120 missed deadline, and zero oscillation.
+    - Stage 3 (`stress=0` recovery): stepped cleanly back to **Tier 0** (`headroom_ok`) after the hysteresis hold with **2 total scheduler decisions** across the full ramp.
+- Honest limitations: the fixed 240 Hz test paces CPU `Present()` entry at 240 Hz on a nominally 120 Hz display (testing scheduler overload behavior, not 240 Hz physical display scanout); VRS cost scaling factors are calibrated for pixel-bound Motion Lab workloads and may need per-workload tuning on geometry- or memory-bound scenes.
+
 ## v0.13.0 — Direct3D 12 Variable Rate Shading (Tier 1 per-draw and Tier 2 foveated image)
 
 - Added hardware Variable Rate Shading support in `src/renderer.h`, `src/renderer.cpp`, `shaders/present.hlsl`, `src/runtime_state.h` (`runtime_state_version = 12`), `src/main.cpp`, and `src/cli.cpp` (`schema_version: 8`):

@@ -10,7 +10,7 @@
 namespace frame_warp_lab {
 
 inline constexpr wchar_t window_class_name[] = L"FrameWarpLabWindow";
-inline constexpr std::uint32_t runtime_state_version = 12;
+inline constexpr std::uint32_t runtime_state_version = 13;
 inline constexpr std::size_t runtime_event_capacity = 64;
 inline constexpr std::size_t runtime_frame_trace_capacity = 256;
 inline constexpr std::size_t hud_graph_sample_count = 128;
@@ -36,6 +36,15 @@ enum class ControlCommand : WPARAM {
     set_target_fps = 13,
     set_async_gpu = 14,
     set_vrs_mode = 15,
+    set_adaptive_scheduler = 16,
+};
+
+enum class SchedulerReason : std::int32_t {
+    manual_override = 0,
+    headroom_ok = 1,
+    gpu_headroom_pressure = 2,
+    deadline_overrun = 3,
+    headroom_recovered = 4,
 };
 
 enum class VrsMode : std::int32_t {
@@ -99,6 +108,7 @@ enum class RuntimeEventType : std::int32_t {
     scene_reset = 6,
     config_updated = 7,
     reprojection_fallback = 8,
+    scheduler_decision = 9,
 };
 
 struct RuntimeEvent {
@@ -131,6 +141,7 @@ struct RuntimeFrameSample {
     std::int32_t camera_path;
     std::int32_t stress_level;
     std::int32_t vrs_mode;
+    std::int32_t adaptive_tier;
     std::int32_t source_divider;
     std::int32_t source_rendered;
     std::int32_t gpu_slot_warped;
@@ -186,6 +197,12 @@ struct RuntimeState {
     std::int32_t vrs_additional_rates_supported;
     std::int32_t vrs_requested_mode;
     std::int32_t vrs_active_mode;
+    std::int32_t adaptive_enabled;
+    std::int32_t adaptive_tier;
+    std::int32_t adaptive_reason;
+    std::int32_t adaptive_utilization_permille;
+    std::int64_t adaptive_reserved_headroom_us;
+    std::int64_t adaptive_decision_count;
     std::int32_t diagnostic_view;
     std::int32_t camera_path;
     std::int32_t stress_level;
@@ -218,6 +235,18 @@ inline const char* runtime_event_name(std::int32_t event_type) {
         case RuntimeEventType::scene_reset: return "scene_reset";
         case RuntimeEventType::config_updated: return "config_updated";
         case RuntimeEventType::reprojection_fallback: return "reprojection_fallback";
+        case RuntimeEventType::scheduler_decision: return "scheduler_decision";
+        default: return "unknown";
+    }
+}
+
+inline const char* scheduler_reason_name(std::int32_t reason) {
+    switch (static_cast<SchedulerReason>(reason)) {
+        case SchedulerReason::manual_override: return "manual_override";
+        case SchedulerReason::headroom_ok: return "headroom_ok";
+        case SchedulerReason::gpu_headroom_pressure: return "gpu_headroom_pressure";
+        case SchedulerReason::deadline_overrun: return "deadline_overrun";
+        case SchedulerReason::headroom_recovered: return "headroom_recovered";
         default: return "unknown";
     }
 }
