@@ -1,10 +1,10 @@
 #include "streamline_backend.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdlib>
 #include <mutex>
-#include <vector>
 
 #if defined(FRAME_WARP_HAS_STREAMLINE) && FRAME_WARP_HAS_STREAMLINE
 #include <sl.h>
@@ -37,7 +37,7 @@ void streamline_log_callback(sl::LogType type, const char* message) {
     }
 }
 
-std::string consume_last_streamline_error() {
+std::string read_last_streamline_error() {
     std::lock_guard<std::mutex> lock(g_streamline_log_mutex);
     return g_streamline_last_error;
 }
@@ -91,24 +91,46 @@ StreamlineBackend::~StreamlineBackend() noexcept {
     shutdown();
 }
 
+bool StreamlineBackend::record_api_result(StreamlineCall call, std::int32_t result_code) {
+    if (result_code == 0) {
+        return true;
+    }
+    ++api_error_count_;
+    last_api_result_ = result_code;
+    last_failed_call_ = call;
+#if defined(FRAME_WARP_HAS_STREAMLINE) && FRAME_WARP_HAS_STREAMLINE
+    const std::string logged = read_last_streamline_error();
+    if (!logged.empty()) {
+        capabilities_.last_error = logged;
+    } else {
+        capabilities_.last_error = std::string(streamline_call_name(static_cast<std::int32_t>(call)))
+            + " failed with code " + std::to_string(result_code);
+    }
+#endif
+    return false;
+}
+
 bool StreamlineBackend::initialize(bool enable_dlssg_feature, bool quiet_logging) {
 #if defined(FRAME_WARP_HAS_STREAMLINE) && FRAME_WARP_HAS_STREAMLINE
     capabilities_ = StreamlineCapabilities{};
     capabilities_.compiled_with_sdk = true;
     dlssg_feature_requested_ = enable_dlssg_feature;
+    api_error_count_ = 0;
+    last_api_result_ = 0;
+    last_failed_call_ = StreamlineCall::none;
 
     {
         std::lock_guard<std::mutex> lock(g_streamline_log_mutex);
         g_streamline_last_error.clear();
     }
 
-    std::vector<sl::Feature> features;
-    features.push_back(sl::kFeaturePCL);
-    features.push_back(sl::kFeatureReflex);
-    features.push_back(sl::kFeatureDLSS);
-    if (enable_dlssg_feature) {
-        features.push_back(sl::kFeatureDLSS_G);
-    }
+    const std::array<sl::Feature, 4> features = {
+        sl::kFeaturePCL,
+        sl::kFeatureReflex,
+        sl::kFeatureDLSS,
+        sl::kFeatureDLSS_G,
+    };
+    const std::uint32_t feature_count = enable_dlssg_feature ? 4U : 3U;
 
     wchar_t log_dir_buffer[1024]{};
     const DWORD log_dir_len = GetEnvironmentVariableW(L"FRAME_WARP_SL_LOG_DIR", log_dir_buffer, static_cast<DWORD>(std::size(log_dir_buffer)));
@@ -125,19 +147,15 @@ bool StreamlineBackend::initialize(bool enable_dlssg_feature, bool quiet_logging
         | sl::PreferenceFlags::eDisableDebugText
         | sl::PreferenceFlags::eUseFrameBasedResourceTagging;
     preferences.featuresToLoad = features.data();
-    preferences.numFeaturesToLoad = static_cast<std::uint32_t>(features.size());
+    preferences.numFeaturesToLoad = feature_count;
     preferences.applicationId = 231313132U;
     preferences.engine = sl::EngineType::eCustom;
-    preferences.engineVersion = "0.17.0";
+    preferences.engineVersion = "0.18.0";
     preferences.projectId = "a0f57b54-1daf-4934-90ae-c4035c19df04";
     preferences.renderAPI = sl::RenderAPI::eD3D12;
 
     const sl::Result result = slInit(preferences, sl::kSDKVersion);
-    if (result != sl::Result::eOk) {
-        capabilities_.last_error = consume_last_streamline_error();
-        if (capabilities_.last_error.empty()) {
-            capabilities_.last_error = "slInit failed with code " + std::to_string(static_cast<int>(result));
-        }
+    if (!record_api_result(StreamlineCall::sl_init, static_cast<std::int32_t>(result))) {
         return false;
     }
 
@@ -164,7 +182,8 @@ bool StreamlineBackend::initialize(bool enable_dlssg_feature, bool quiet_logging
 
 std::string StreamlineBackend::last_error() const {
 #if defined(FRAME_WARP_HAS_STREAMLINE) && FRAME_WARP_HAS_STREAMLINE
-    return consume_last_streamline_error();
+    const std::string logged = read_last_streamline_error();
+    return logged.empty() ? capabilities_.last_error : logged;
 #else
     return {};
 #endif
@@ -202,7 +221,8 @@ void StreamlineBackend::query_adapter(const LUID& adapter_luid) {
         capabilities_.ngx_version_minor = version.versionNGX.minor;
         capabilities_.ngx_version_build = version.versionNGX.build;
     }
-    capabilities_.last_error = consume_last_streamline_error();
+    const std::string logged = read_last_streamline_error();
+    if (!logged.empty()) capabilities_.last_error = logged;
 #else
     (void)adapter_luid;
 #endif
@@ -212,8 +232,7 @@ bool StreamlineBackend::attach_device(ID3D12Device* device) {
 #if defined(FRAME_WARP_HAS_STREAMLINE) && FRAME_WARP_HAS_STREAMLINE
     if (!initialized_ || !device) return false;
     const sl::Result result = slSetD3DDevice(device);
-    if (result != sl::Result::eOk) {
-        capabilities_.last_error = consume_last_streamline_error();
+    if (!record_api_result(StreamlineCall::sl_set_d3d_device, static_cast<std::int32_t>(result))) {
         return false;
     }
     device_attached_ = true;
@@ -225,7 +244,7 @@ bool StreamlineBackend::attach_device(ID3D12Device* device) {
         sl::PCLOptions pcl_options{};
         pcl_options.virtualKey = sl::PCLHotKey::eUsePingMessage;
         pcl_options.idThread = GetCurrentThreadId();
-        slPCLSetOptions(pcl_options);
+        record_api_result(StreamlineCall::sl_pcl_set_options, static_cast<std::int32_t>(slPCLSetOptions(pcl_options)));
     }
 
     if (capabilities_.reflex_supported) {
@@ -234,7 +253,7 @@ bool StreamlineBackend::attach_device(ID3D12Device* device) {
         reflex_options.frameLimitUs = 0;
         reflex_options.useMarkersToOptimize = false;
         reflex_options.idThread = GetCurrentThreadId();
-        if (slReflexSetOptions(reflex_options) == sl::Result::eOk) {
+        if (record_api_result(StreamlineCall::sl_reflex_set_options, static_cast<std::int32_t>(slReflexSetOptions(reflex_options)))) {
             reflex_configured_ = true;
             last_reflex_enabled_ = true;
             last_reflex_limit_us_ = 0;
@@ -246,7 +265,7 @@ bool StreamlineBackend::attach_device(ID3D12Device* device) {
         sl::DLSSGState state{};
         sl::DLSSGOptions probe_options{};
         probe_options.mode = sl::DLSSGMode::eOff;
-        if (slDLSSGGetState(viewport, state, &probe_options) == sl::Result::eOk) {
+        if (record_api_result(StreamlineCall::sl_dlssg_get_state, static_cast<std::int32_t>(slDLSSGGetState(viewport, state, &probe_options)))) {
             capabilities_.max_frames_to_generate = state.numFramesToGenerateMax;
             capabilities_.min_width_or_height = state.minWidthOrHeight;
             capabilities_.estimated_vram_bytes = state.estimatedVRAMUsageInBytes;
@@ -254,7 +273,6 @@ bool StreamlineBackend::attach_device(ID3D12Device* device) {
             capabilities_.vsync_supported = (state.bIsVsyncSupportAvailable == sl::Boolean::eTrue);
         }
     }
-    capabilities_.last_error = consume_last_streamline_error();
     return true;
 #else
     (void)device;
@@ -269,10 +287,10 @@ void StreamlineBackend::shutdown() noexcept {
         const sl::ViewportHandle viewport(0U);
         sl::DLSSGOptions options{};
         options.mode = sl::DLSSGMode::eOff;
-        slDLSSGSetOptions(viewport, options);
+        record_api_result(StreamlineCall::sl_dlssg_set_options, static_cast<std::int32_t>(slDLSSGSetOptions(viewport, options)));
         clear_tags();
     }
-    slShutdown();
+    record_api_result(StreamlineCall::sl_shutdown, static_cast<std::int32_t>(slShutdown()));
     initialized_ = false;
     device_attached_ = false;
     dlssg_enabled_ = false;
@@ -285,7 +303,8 @@ bool StreamlineBackend::begin_frame(std::uint32_t frame_index, bool reflex_enabl
     (void)frame_index;
     if (!initialized_ || !device_attached_) return false;
     sl::FrameToken* token = nullptr;
-    if (slGetNewFrameToken(token, nullptr) != sl::Result::eOk || !token) {
+    const sl::Result token_result = slGetNewFrameToken(token, nullptr);
+    if (!record_api_result(StreamlineCall::sl_get_new_frame_token, static_cast<std::int32_t>(token_result)) || !token) {
         return false;
     }
     current_frame_token_ = token;
@@ -297,13 +316,13 @@ bool StreamlineBackend::begin_frame(std::uint32_t frame_index, bool reflex_enabl
             reflex_options.frameLimitUs = frame_limit_us;
             reflex_options.useMarkersToOptimize = false;
             reflex_options.idThread = GetCurrentThreadId();
-            if (slReflexSetOptions(reflex_options) == sl::Result::eOk) {
+            if (record_api_result(StreamlineCall::sl_reflex_set_options, static_cast<std::int32_t>(slReflexSetOptions(reflex_options)))) {
                 reflex_configured_ = true;
                 last_reflex_enabled_ = reflex_enabled;
                 last_reflex_limit_us_ = frame_limit_us;
             }
         }
-        slReflexSleep(*token);
+        record_api_result(StreamlineCall::sl_reflex_sleep, static_cast<std::int32_t>(slReflexSleep(*token)));
     }
     return true;
 #else
@@ -314,17 +333,19 @@ bool StreamlineBackend::begin_frame(std::uint32_t frame_index, bool reflex_enabl
 #endif
 }
 
-void StreamlineBackend::set_pcl_marker(StreamlinePclMarker marker) {
+bool StreamlineBackend::set_pcl_marker(StreamlinePclMarker marker) {
 #if defined(FRAME_WARP_HAS_STREAMLINE) && FRAME_WARP_HAS_STREAMLINE
-    if (!initialized_ || !device_attached_ || !capabilities_.pcl_supported || !current_frame_token_) return;
+    if (!initialized_ || !device_attached_ || !capabilities_.pcl_supported || !current_frame_token_) return false;
     auto* token = static_cast<sl::FrameToken*>(current_frame_token_);
-    slPCLSetMarker(translate_pcl_marker(marker), *token);
+    const sl::Result result = slPCLSetMarker(translate_pcl_marker(marker), *token);
+    return record_api_result(StreamlineCall::sl_pcl_set_marker, static_cast<std::int32_t>(result));
 #else
     (void)marker;
+    return false;
 #endif
 }
 
-void StreamlineBackend::set_common_constants(
+bool StreamlineBackend::set_common_constants(
     const CameraBasis& current_camera,
     const CameraBasis& previous_camera,
     float aspect_ratio,
@@ -332,7 +353,7 @@ void StreamlineBackend::set_common_constants(
     float far_plane,
     bool reset_history) {
 #if defined(FRAME_WARP_HAS_STREAMLINE) && FRAME_WARP_HAS_STREAMLINE
-    if (!initialized_ || !device_attached_ || !current_frame_token_) return;
+    if (!initialized_ || !device_attached_ || !current_frame_token_) return false;
     auto* token = static_cast<sl::FrameToken*>(current_frame_token_);
     const sl::ViewportHandle viewport(0U);
 
@@ -372,7 +393,8 @@ void StreamlineBackend::set_common_constants(
     constants.motionVectorsDilated = sl::Boolean::eFalse;
     constants.motionVectorsJittered = sl::Boolean::eFalse;
 
-    slSetConstants(constants, *token, viewport);
+    const sl::Result result = slSetConstants(constants, *token, viewport);
+    return record_api_result(StreamlineCall::sl_set_constants, static_cast<std::int32_t>(result));
 #else
     (void)current_camera;
     (void)previous_camera;
@@ -380,10 +402,11 @@ void StreamlineBackend::set_common_constants(
     (void)near_plane;
     (void)far_plane;
     (void)reset_history;
+    return false;
 #endif
 }
 
-void StreamlineBackend::tag_dlssg_resources(
+bool StreamlineBackend::tag_dlssg_resources(
     ID3D12Resource* clip_depth,
     D3D12_RESOURCE_STATES depth_state,
     ID3D12Resource* motion_vectors,
@@ -394,7 +417,7 @@ void StreamlineBackend::tag_dlssg_resources(
     UINT height,
     ID3D12GraphicsCommandList* command_list) {
 #if defined(FRAME_WARP_HAS_STREAMLINE) && FRAME_WARP_HAS_STREAMLINE
-    if (!initialized_ || !device_attached_ || !capabilities_.dlssg_supported || !current_frame_token_) return;
+    if (!initialized_ || !device_attached_ || !capabilities_.dlssg_supported || !current_frame_token_) return false;
     auto* token = static_cast<sl::FrameToken*>(current_frame_token_);
     const sl::ViewportHandle viewport(0U);
     const sl::Extent full_extent{0U, 0U, width, height};
@@ -403,21 +426,14 @@ void StreamlineBackend::tag_dlssg_resources(
     sl::Resource motion_resource{sl::ResourceType::eTex2d, motion_vectors, nullptr, nullptr, static_cast<std::uint32_t>(motion_state)};
     sl::Resource hudless_resource{sl::ResourceType::eTex2d, hudless_color, nullptr, nullptr, static_cast<std::uint32_t>(hudless_state)};
 
-    std::vector<sl::ResourceTag> tags;
-    tags.reserve(3);
-    if (clip_depth) {
-        tags.emplace_back(&depth_resource, sl::kBufferTypeDepth, sl::ResourceLifecycle::eValidUntilPresent, &full_extent);
-    }
-    if (motion_vectors) {
-        tags.emplace_back(&motion_resource, sl::kBufferTypeMotionVectors, sl::ResourceLifecycle::eValidUntilPresent, &full_extent);
-    }
-    if (hudless_color) {
-        tags.emplace_back(&hudless_resource, sl::kBufferTypeHUDLessColor, sl::ResourceLifecycle::eValidUntilPresent, &full_extent);
-    } else {
-        tags.emplace_back(nullptr, sl::kBufferTypeHUDLessColor, sl::ResourceLifecycle::eValidUntilPresent, nullptr);
-    }
+    std::array<sl::ResourceTag, 3> tags = {
+        sl::ResourceTag{clip_depth ? &depth_resource : nullptr, sl::kBufferTypeDepth, sl::ResourceLifecycle::eValidUntilPresent, clip_depth ? &full_extent : nullptr},
+        sl::ResourceTag{motion_vectors ? &motion_resource : nullptr, sl::kBufferTypeMotionVectors, sl::ResourceLifecycle::eValidUntilPresent, motion_vectors ? &full_extent : nullptr},
+        sl::ResourceTag{hudless_color ? &hudless_resource : nullptr, sl::kBufferTypeHUDLessColor, sl::ResourceLifecycle::eValidUntilPresent, hudless_color ? &full_extent : nullptr},
+    };
 
-    slSetTagForFrame(*token, viewport, tags.data(), static_cast<std::uint32_t>(tags.size()), command_list);
+    const sl::Result result = slSetTagForFrame(*token, viewport, tags.data(), static_cast<std::uint32_t>(tags.size()), command_list);
+    return record_api_result(StreamlineCall::sl_set_tag_for_frame, static_cast<std::int32_t>(result));
 #else
     (void)clip_depth;
     (void)depth_state;
@@ -428,20 +444,24 @@ void StreamlineBackend::tag_dlssg_resources(
     (void)width;
     (void)height;
     (void)command_list;
+    return false;
 #endif
 }
 
-void StreamlineBackend::clear_tags() {
+bool StreamlineBackend::clear_tags() {
 #if defined(FRAME_WARP_HAS_STREAMLINE) && FRAME_WARP_HAS_STREAMLINE
-    if (!initialized_ || !device_attached_ || !current_frame_token_) return;
+    if (!initialized_ || !device_attached_ || !current_frame_token_) return false;
     auto* token = static_cast<sl::FrameToken*>(current_frame_token_);
     const sl::ViewportHandle viewport(0U);
-    sl::ResourceTag tags[3] = {
+    const std::array<sl::ResourceTag, 3> tags = {
         sl::ResourceTag{nullptr, sl::kBufferTypeDepth, sl::ResourceLifecycle::eValidUntilPresent, nullptr},
         sl::ResourceTag{nullptr, sl::kBufferTypeMotionVectors, sl::ResourceLifecycle::eValidUntilPresent, nullptr},
         sl::ResourceTag{nullptr, sl::kBufferTypeHUDLessColor, sl::ResourceLifecycle::eValidUntilPresent, nullptr},
     };
-    slSetTagForFrame(*token, viewport, tags, 3U, nullptr);
+    const sl::Result result = slSetTagForFrame(*token, viewport, tags.data(), static_cast<std::uint32_t>(tags.size()), nullptr);
+    return record_api_result(StreamlineCall::sl_set_tag_for_frame, static_cast<std::int32_t>(result));
+#else
+    return false;
 #endif
 }
 
@@ -499,7 +519,7 @@ bool StreamlineBackend::configure_dlssg(
 
     const sl::ViewportHandle viewport(0U);
     const sl::Result result = slDLSSGSetOptions(viewport, options);
-    if (result == sl::Result::eOk) {
+    if (record_api_result(StreamlineCall::sl_dlssg_set_options, static_cast<std::int32_t>(result))) {
         dlssg_enabled_ = enabled;
         dlssg_applied_multiplier_ = clamped_multiplier;
         dlssg_applied_dynamic_ = use_dynamic;
@@ -512,7 +532,6 @@ bool StreamlineBackend::configure_dlssg(
         }
         return dlssg_enabled_;
     }
-    capabilities_.last_error = consume_last_streamline_error();
     dlssg_enabled_ = false;
     return false;
 #else
@@ -534,7 +553,7 @@ void StreamlineBackend::prepare_for_resize() {
     const sl::ViewportHandle viewport(0U);
     sl::DLSSGOptions options{};
     options.mode = sl::DLSSGMode::eOff;
-    slDLSSGSetOptions(viewport, options);
+    record_api_result(StreamlineCall::sl_dlssg_set_options, static_cast<std::int32_t>(slDLSSGSetOptions(viewport, options)));
     clear_tags();
     dlssg_enabled_ = false;
     dlssg_applied_width_ = 0;
@@ -544,18 +563,20 @@ void StreamlineBackend::prepare_for_resize() {
 
 StreamlineFrameState StreamlineBackend::poll_dlssg_state() {
     StreamlineFrameState frame_state{};
-#if defined(FRAME_WARP_HAS_STREAMLINE) && FRAME_WARP_HAS_STREAMLINE
     frame_state.dlssg_active = dlssg_enabled_;
     frame_state.max_frames_to_generate = capabilities_.max_frames_to_generate;
     frame_state.dynamic_mfg_supported = capabilities_.dynamic_mfg_supported;
+    frame_state.last_result_code = last_api_result_;
+    frame_state.last_failed_call = static_cast<std::int32_t>(last_failed_call_);
+    frame_state.api_error_count = api_error_count_;
+#if defined(FRAME_WARP_HAS_STREAMLINE) && FRAME_WARP_HAS_STREAMLINE
     if (!initialized_ || !device_attached_ || !capabilities_.dlssg_supported) {
         return frame_state;
     }
     const sl::ViewportHandle viewport(0U);
     sl::DLSSGState state{};
     const sl::Result result = slDLSSGGetState(viewport, state, nullptr);
-    frame_state.last_result_code = static_cast<std::int32_t>(result);
-    if (result == sl::Result::eOk) {
+    if (record_api_result(StreamlineCall::sl_dlssg_get_state, static_cast<std::int32_t>(result))) {
         frame_state.dlssg_status_flags = static_cast<std::uint32_t>(state.status);
         frame_state.frames_actually_presented = state.numFramesActuallyPresented;
         frame_state.max_frames_to_generate = state.numFramesToGenerateMax;
@@ -567,6 +588,9 @@ StreamlineFrameState StreamlineBackend::poll_dlssg_state() {
         capabilities_.vsync_supported = (state.bIsVsyncSupportAvailable == sl::Boolean::eTrue);
         capabilities_.estimated_vram_bytes = state.estimatedVRAMUsageInBytes;
     }
+    frame_state.last_result_code = last_api_result_;
+    frame_state.last_failed_call = static_cast<std::int32_t>(last_failed_call_);
+    frame_state.api_error_count = api_error_count_;
 #endif
     return frame_state;
 }

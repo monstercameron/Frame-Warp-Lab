@@ -23,6 +23,11 @@ cbuffer PresentConstants : register(b0) {
     float4 homography_col_x;
     float4 homography_col_y;
     float4 homography_col_z;
+    float4 prev_presented_camera_position_tan_y;
+    float4 prev_presented_camera_right_rcp_tan_x;
+    float4 prev_presented_camera_up_rcp_tan_y;
+    float4 prev_presented_camera_forward_reset;
+    float4 dlss_motion_params;
 };
 
 cbuffer HudConstants : register(b1) {
@@ -231,7 +236,7 @@ ReprojectionSample evaluate_reprojection_camera(
     return result;
 }
 
-float3 sample_conservative_hole_fill(float2 sample_uv, float2 texel_size) {
+float3 sample_conservative_hole_fill(float2 sample_uv, float2 texel_size, out float out_bg_depth, out float2 out_bg_uv) {
     float2 clamped_uv = saturate(sample_uv);
     float2 probe_step = texel_size * 3.0;
     float best_depth = scene_depth_texture.SampleLevel(point_clamp_sampler, clamped_uv, 0);
@@ -251,6 +256,8 @@ float3 sample_conservative_hole_fill(float2 sample_uv, float2 texel_size) {
             best_bg_uv = tap_uv;
         }
     }
+    out_bg_depth = best_depth;
+    out_bg_uv = best_bg_uv;
     return pow(saturate(scene_color_texture.SampleLevel(linear_clamp_sampler, best_bg_uv, 0).rgb), 1.0 / 2.2);
 }
 
@@ -550,10 +557,12 @@ float3 composite_overlays(float2 pixel_pos, float2 viewport_size, float3 output_
     return output_color;
 }
 
-#if defined(PRESENT_OUTPUT_HUDLESS) && PRESENT_OUTPUT_HUDLESS
+#if defined(PRESENT_OUTPUT_DLSS_INPUTS) && PRESENT_OUTPUT_DLSS_INPUTS
 struct PresentOutput {
     float4 backbuffer : SV_Target0;
     float4 hudless : SV_Target1;
+    float clip_depth : SV_Target2;
+    float2 motion : SV_Target3;
 };
 
 PresentOutput pixel_main(VertexOutput input) {
@@ -604,9 +613,11 @@ float4 pixel_main(VertexOutput input) : SV_Target {
             reprojection_stats.InterlockedAdd(0, invalid_wave, previous_invalid);
         }
     }
+    float unused_bg_depth = 1000.0;
+    float2 unused_bg_uv = sample_uv;
     float3 output_color = reproj.valid
         ? pow(saturate(scene_color_texture.SampleLevel(linear_clamp_sampler, sample_uv, 0).rgb), 1.0 / 2.2)
-        : sample_conservative_hole_fill(sample_uv, texel_size);
+        : sample_conservative_hole_fill(sample_uv, texel_size, unused_bg_depth, unused_bg_uv);
     return float4(composite_overlays(input.position.xy, viewport_size, output_color), 1.0);
 #else
     int diagnostic_view = (int)(viewport_and_flags.z + 0.5);
@@ -636,6 +647,28 @@ float4 pixel_main(VertexOutput input) : SV_Target {
             true);
         sample_uv = saturate(reproj.source_uv);
         pixel_valid = reproj.valid;
+#if defined(PRESENT_OUTPUT_DLSS_INPUTS) && PRESENT_OUTPUT_DLSS_INPUTS
+        if (!pixel_valid && has_previous_history) {
+            ReprojectionSample hist = evaluate_reprojection_camera(
+                prev_depth_texture,
+                previous_camera_position_tan_y.xyz,
+                previous_camera_right_rcp_tan_x.xyz,
+                previous_camera_up_rcp_tan_y.xyz,
+                previous_camera_forward_tan_x.xyz,
+                previous_camera_forward_tan_x.w,
+                previous_camera_position_tan_y.w,
+                uv,
+                viewport_size,
+                texel_size,
+                4,
+                true);
+            if (hist.valid) {
+                sample_uv = saturate(hist.source_uv);
+                pixel_valid = true;
+                recovered_from_history = true;
+            }
+        }
+#endif
     } else if (synthesis_mode == 2) {
         ReprojectionSample gen = evaluate_frame_gen(uv, viewport_size, texel_size, extrapolation_alpha);
         sample_uv = saturate(gen.source_uv);
@@ -742,6 +775,9 @@ float4 pixel_main(VertexOutput input) : SV_Target {
         }
     }
 
+    float filled_depth = 1000.0;
+    float2 filled_uv = sample_uv;
+    bool used_hole_fill = false;
     float3 output_color = float3(0.0, 0.0, 0.0);
     if (diagnostic_view == 1) {
         float linear_depth = recovered_from_history
@@ -766,7 +802,8 @@ float4 pixel_main(VertexOutput input) : SV_Target {
             if (diagnostic_view == 3) {
                 output_color = float3(1.0, 0.12, 0.78);
             } else {
-                output_color = sample_conservative_hole_fill(sample_uv, texel_size);
+                output_color = sample_conservative_hole_fill(sample_uv, texel_size, filled_depth, filled_uv);
+                used_hole_fill = true;
             }
         }
         if (diagnostic_view == 4) {
@@ -800,11 +837,95 @@ float4 pixel_main(VertexOutput input) : SV_Target {
         }
     }
 
-#if defined(PRESENT_OUTPUT_HUDLESS) && PRESENT_OUTPUT_HUDLESS
-    PresentOutput dual_out;
-    dual_out.backbuffer = float4(composite_overlays(input.position.xy, viewport_size, output_color), 1.0);
-    dual_out.hudless = float4(output_color, 1.0);
-    return dual_out;
+#if defined(PRESENT_OUTPUT_DLSS_INPUTS) && PRESENT_OUTPUT_DLSS_INPUTS
+    float near_z = dlss_motion_params.y;
+    float far_z = dlss_motion_params.z;
+    float object_motion_scale = dlss_motion_params.x;
+    bool reset_dlss_motion = prev_presented_camera_forward_reset.w > 0.5;
+
+    float2 geom_uv = used_hole_fill ? filled_uv : sample_uv;
+    float sample_linear_depth = used_hole_fill
+        ? filled_depth
+        : (recovered_from_history
+            ? prev_depth_texture.SampleLevel(point_clamp_sampler, geom_uv, 0)
+            : scene_depth_texture.SampleLevel(point_clamp_sampler, geom_uv, 0));
+
+    float out_clip_depth = 1.0;
+    float2 out_motion = float2(0.0, 0.0);
+
+    if (sample_linear_depth < 900.0) {
+        float3 world_pos = recovered_from_history
+            ? reconstruct_camera_world_position(
+                geom_uv,
+                sample_linear_depth,
+                previous_camera_position_tan_y.xyz,
+                previous_camera_right_rcp_tan_x.xyz,
+                previous_camera_up_rcp_tan_y.xyz,
+                previous_camera_forward_tan_x.xyz,
+                previous_camera_forward_tan_x.w,
+                previous_camera_position_tan_y.w)
+            : reconstruct_camera_world_position(
+                geom_uv,
+                sample_linear_depth,
+                source_camera_position_tan_y.xyz,
+                source_camera_right_rcp_width.xyz,
+                source_camera_up_rcp_height.xyz,
+                source_camera_forward_tan_x.xyz,
+                source_camera_forward_tan_x.w,
+                source_camera_position_tan_y.w);
+
+        float target_view_z = max(dot(world_pos - target_camera_position_tan_y.xyz, target_camera_forward_tan_x.xyz), near_z);
+        out_clip_depth = saturate((far_z * (target_view_z - near_z)) / ((far_z - near_z) * target_view_z));
+
+        if (!reset_dlss_motion) {
+            float2 prev_pres_uv;
+            float prev_pres_z;
+            if (project_world_to_camera_uv(
+                    world_pos,
+                    prev_presented_camera_position_tan_y.xyz,
+                    prev_presented_camera_right_rcp_tan_x.xyz,
+                    prev_presented_camera_up_rcp_tan_y.xyz,
+                    prev_presented_camera_forward_reset.xyz,
+                    prev_presented_camera_right_rcp_tan_x.w,
+                    prev_presented_camera_up_rcp_tan_y.w,
+                    prev_pres_uv,
+                    prev_pres_z)) {
+                out_motion = prev_pres_uv - uv;
+            }
+            if (!recovered_from_history && !used_hole_fill && pixel_valid) {
+                float2 obj_mv = sample_independent_object_motion(geom_uv);
+                out_motion += obj_mv * object_motion_scale;
+            }
+        }
+    } else if (!reset_dlss_motion) {
+        float2 target_ndc = float2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+        float3 target_ray = normalize(
+            target_camera_right_rcp_tan_x.xyz * (target_ndc.x * target_camera_forward_tan_x.w)
+            + target_camera_up_rcp_tan_y.xyz * (target_ndc.y * target_camera_position_tan_y.w)
+            + target_camera_forward_tan_x.xyz);
+        float3 far_world = target_camera_position_tan_y.xyz + target_ray * far_z;
+        float2 prev_sky_uv;
+        float prev_sky_z;
+        if (project_world_to_camera_uv(
+                far_world,
+                prev_presented_camera_position_tan_y.xyz,
+                prev_presented_camera_right_rcp_tan_x.xyz,
+                prev_presented_camera_up_rcp_tan_y.xyz,
+                prev_presented_camera_forward_reset.xyz,
+                prev_presented_camera_right_rcp_tan_x.w,
+                prev_presented_camera_up_rcp_tan_y.w,
+                prev_sky_uv,
+                prev_sky_z)) {
+            out_motion = prev_sky_uv - uv;
+        }
+    }
+
+    PresentOutput dlss_out;
+    dlss_out.backbuffer = float4(composite_overlays(input.position.xy, viewport_size, output_color), 1.0);
+    dlss_out.hudless = float4(output_color, 1.0);
+    dlss_out.clip_depth = out_clip_depth;
+    dlss_out.motion = out_motion;
+    return dlss_out;
 #else
     return float4(composite_overlays(input.position.xy, viewport_size, output_color), 1.0);
 #endif

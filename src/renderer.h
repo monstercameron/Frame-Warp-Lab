@@ -89,6 +89,7 @@ struct PresentRequest {
     bool dlssg_requested;
     std::int32_t dlssg_multiplier;
     float dlssg_dynamic_target_fps;
+    float dlssg_object_motion_scale;
     bool discontinuity;
 };
 
@@ -133,9 +134,10 @@ public:
 
 private:
     static constexpr UINT swap_chain_buffer_count = 2;
+    static constexpr UINT dlss_input_slot_count = 3;
+    static constexpr UINT rtv_targets_per_dlss_slot = 3;
     static constexpr UINT source_slot_count = 3;
-    static constexpr UINT rtv_targets_per_source_slot = 4;
-    static constexpr UINT srv_targets_per_source_slot = 3;
+    static constexpr UINT targets_per_source_slot = 3;
     static constexpr UINT timestamps_per_pass = 2;
     static constexpr std::size_t scene_constant_buffer_stride = 256;
     static constexpr std::size_t present_constant_buffer_stride = 512;
@@ -156,17 +158,23 @@ private:
         Microsoft::WRL::ComPtr<ID3D12Resource> color_target;
         Microsoft::WRL::ComPtr<ID3D12Resource> depth_target;
         Microsoft::WRL::ComPtr<ID3D12Resource> motion_target;
-        Microsoft::WRL::ComPtr<ID3D12Resource> clip_depth_target;
         Microsoft::WRL::ComPtr<ID3D12CommandAllocator> command_allocator;
         SceneSnapshot snapshot{};
         std::chrono::steady_clock::time_point capture_time{};
         std::uint64_t scene_fence_value = 0;
         std::uint64_t last_read_present_fence = 0;
-        ID3D12Fence* dlssg_inputs_fence = nullptr;
-        std::uint64_t dlssg_inputs_fence_value = 0;
         std::int64_t scene_gpu_us = -1;
         bool in_flight = false;
         bool valid = false;
+    };
+
+    struct DlssInputSlot {
+        Microsoft::WRL::ComPtr<ID3D12Resource> hudless_target;
+        Microsoft::WRL::ComPtr<ID3D12Resource> clip_depth_target;
+        Microsoft::WRL::ComPtr<ID3D12Resource> motion_target;
+        std::uint64_t last_present_fence = 0;
+        ID3D12Fence* dlssg_inputs_fence = nullptr;
+        std::uint64_t dlssg_inputs_fence_value = 0;
     };
 
     void create_pipelines();
@@ -175,8 +183,10 @@ private:
     void create_reprojection_stats_resources();
     void create_vrs_resources();
     void create_swap_chain_targets();
+    void create_dlss_input_targets();
     void create_source_targets();
     std::int32_t find_available_source_slot() const;
+    UINT acquire_dlss_input_slot();
     static constexpr DWORD gpu_wait_timeout_ms = 5000;
     void wait_for_fence(ID3D12Fence* fence, HANDLE event_handle, std::uint64_t value);
 
@@ -192,7 +202,8 @@ private:
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> render_target_heap_;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> shader_resource_heap_;
     std::array<Microsoft::WRL::ComPtr<ID3D12Resource>, swap_chain_buffer_count> render_targets_;
-    Microsoft::WRL::ComPtr<ID3D12Resource> hudless_target_;
+    std::array<DlssInputSlot, dlss_input_slot_count> dlss_input_slots_;
+    UINT next_dlss_input_slot_ = 0;
     std::array<Microsoft::WRL::ComPtr<ID3D12CommandAllocator>, swap_chain_buffer_count> present_command_allocators_;
     Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> present_command_list_;
     Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> scene_command_list_;
@@ -205,7 +216,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> scene_pipeline_;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> present_root_signature_;
     std::array<Microsoft::WRL::ComPtr<ID3D12PipelineState>, 5> present_pipelines_;
-    Microsoft::WRL::ComPtr<ID3D12PipelineState> present_dlss_hudless_pipeline_;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> present_dlss_inputs_pipeline_;
     CameraBasis previous_presented_camera_{};
     bool has_previous_presented_camera_ = false;
     Microsoft::WRL::ComPtr<ID3D12Resource> scene_constant_buffer_;

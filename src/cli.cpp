@@ -285,6 +285,13 @@ int print_status(const WindowInstance& instance) {
     const std::int32_t dlssg_max_frames_to_generate = std::atomic_ref<std::int32_t>(state->dlssg_max_frames_to_generate).load(std::memory_order_acquire);
     const std::int32_t dlssg_requested_multiplier = std::atomic_ref<std::int32_t>(state->dlssg_requested_multiplier).load(std::memory_order_acquire);
     const std::int32_t dlssg_active = std::atomic_ref<std::int32_t>(state->dlssg_active).load(std::memory_order_acquire);
+    const std::int32_t pacing_owner = std::atomic_ref<std::int32_t>(state->pacing_owner).load(std::memory_order_acquire);
+    const std::int32_t adaptive_dlssg_enabled = std::atomic_ref<std::int32_t>(state->adaptive_dlssg_enabled).load(std::memory_order_acquire);
+    const std::int32_t dlssg_last_api_result = std::atomic_ref<std::int32_t>(state->dlssg_last_api_result).load(std::memory_order_acquire);
+    const std::int32_t dlssg_last_failed_call = std::atomic_ref<std::int32_t>(state->dlssg_last_failed_call).load(std::memory_order_acquire);
+    const std::int32_t dlssg_warp_guard_active = std::atomic_ref<std::int32_t>(state->dlssg_warp_guard_active).load(std::memory_order_acquire);
+    const std::int64_t dlssg_api_error_count = std::atomic_ref<std::int64_t>(state->dlssg_api_error_count).load(std::memory_order_acquire);
+    const std::int64_t dlssg_warp_guard_trips = std::atomic_ref<std::int64_t>(state->dlssg_warp_guard_trips).load(std::memory_order_acquire);
     const std::uint32_t dlssg_status_flags = std::atomic_ref<std::uint32_t>(state->dlssg_status_flags).load(std::memory_order_acquire);
     const std::uint32_t dlssg_last_frames_presented = std::atomic_ref<std::uint32_t>(state->dlssg_last_frames_presented).load(std::memory_order_acquire);
     const std::int64_t dlssg_total_frames_presented = std::atomic_ref<std::int64_t>(state->dlssg_total_frames_presented).load(std::memory_order_acquire);
@@ -294,7 +301,7 @@ int print_status(const WindowInstance& instance) {
 
     RECT client_rectangle{};
     const bool has_client_size = GetClientRect(instance.window, &client_rectangle) != 0;
-    std::cout << "{\"ok\":true,\"schema_version\":11,\"process_id\":" << instance.process_id
+    std::cout << "{\"ok\":true,\"schema_version\":12,\"process_id\":" << instance.process_id
               << ",\"running\":" << (running ? "true" : "false")
               << ",\"present_calls_completed\":" << present_count
               << ",\"display_frame_id\":" << display_frame_id
@@ -312,6 +319,7 @@ int print_status(const WindowInstance& instance) {
     print_display(instance.window);
     std::cout << ",\"presentation\":{\"mode\":\"" << frame_warp_lab::presentation_mode_name(presentation_mode)
               << "\",\"pacer_mode\":\"" << frame_warp_lab::pacer_mode_name(pacer_mode)
+              << "\",\"pacing_owner\":\"" << frame_warp_lab::pacing_owner_name(pacing_owner)
               << "\",\"target_fps\":" << target_fps
               << ",\"target_period_us\":" << target_period_us
               << ",\"missed_deadlines\":" << missed_deadlines
@@ -369,6 +377,7 @@ int print_status(const WindowInstance& instance) {
               << ",\"requested_mode\":\"" << frame_warp_lab::vrs_mode_name(vrs_requested_mode)
               << "\",\"active_mode\":\"" << frame_warp_lab::vrs_mode_name(vrs_active_mode) << "\"}"
               << ",\"adaptive_scheduler\":{\"enabled\":" << (adaptive_enabled ? "true" : "false")
+              << ",\"dlssg_policy_enabled\":" << (adaptive_dlssg_enabled ? "true" : "false")
               << ",\"tier\":" << adaptive_tier
               << ",\"reason\":\"" << frame_warp_lab::scheduler_reason_name(adaptive_reason)
               << "\",\"reserved_headroom_us\":" << adaptive_reserved_headroom_us
@@ -387,12 +396,17 @@ int print_status(const WindowInstance& instance) {
     std::cout << ",\"active\":" << (dlssg_active ? "true" : "false")
               << ",\"window_focused\":" << (window_focused ? "true" : "false")
               << ",\"status_flags\":" << dlssg_status_flags
+              << ",\"api_error_count\":" << dlssg_api_error_count
+              << ",\"last_api_result\":" << dlssg_last_api_result
+              << ",\"last_failed_call\":\"" << frame_warp_lab::streamline_call_name(dlssg_last_failed_call) << "\""
+              << ",\"warp_guard_active\":" << (dlssg_warp_guard_active ? "true" : "false")
+              << ",\"warp_guard_trips\":" << dlssg_warp_guard_trips
               << ",\"last_frames_presented\":" << dlssg_last_frames_presented
               << ",\"total_frames_presented\":" << dlssg_total_frames_presented
               << ",\"total_generated_frames\":" << dlssg_total_generated_frames << "}"
-              << ",\"features\":{\"scene\":\"cpu_camera_gbuffer\",\"hud\":\"2d_frametime_graph_and_readout\",\"async_gpu\":\"dual_queue_3slot_ring\",\"reprojection\":\"depth_camera_warp\",\"nvidia_pcl_markers\":\"etw_and_streamline_pcl\",\"frame_generation\":\"mv_extrapolation_temporal_and_dlss_g\",\"vrs\":\""
+              << ",\"features\":{\"scene\":\"cpu_camera_gbuffer\",\"hud\":\"2d_frametime_graph_and_readout\",\"async_gpu\":\"dual_queue_3slot_ring\",\"reprojection\":\"depth_camera_warp\",\"nvidia_pcl_markers\":\"etw_and_streamline_pcl\",\"frame_generation\":\"mv_extrapolation_temporal_and_dlss_g\",\"dlss_g_inputs\":\"3slot_aligned_hudless_clipdepth_motion\",\"vrs\":\""
               << (vrs_tier >= 2 ? "tier1_and_tier2_foveated_image" : vrs_tier == 1 ? "tier1_per_draw" : "unsupported")
-              << "\",\"adaptive_scheduler\":\"deadline_headroom_ladder\",\"ipc\":\"seqlock_v16\",\"shaders\":\"dxc_sm6_0_wave_specialized\"}}\n";
+              << "\",\"adaptive_scheduler\":\"unified_vrs_dlss_warp_ladder\",\"ipc\":\"seqlock_v17\",\"shaders\":\"dxc_sm6_0_wave_specialized\"}}\n";
     return 0;
 }
 
@@ -405,7 +419,7 @@ int print_events(const WindowInstance& instance) {
     const std::int32_t event_count = std::atomic_ref<std::int32_t>(state->event_count).load(std::memory_order_acquire);
     const std::int32_t first_sequence = event_count > static_cast<std::int32_t>(frame_warp_lab::runtime_event_capacity)
         ? event_count - static_cast<std::int32_t>(frame_warp_lab::runtime_event_capacity) + 1 : 1;
-    std::cout << "{\"ok\":true,\"schema_version\":11,\"process_id\":" << instance.process_id
+    std::cout << "{\"ok\":true,\"schema_version\":12,\"process_id\":" << instance.process_id
               << ",\"capacity\":" << frame_warp_lab::runtime_event_capacity << ",\"total_events\":" << event_count << ",\"events\":[";
     bool first_event = true;
     for (std::int32_t sequence = first_sequence; sequence <= event_count; ++sequence) {
@@ -496,7 +510,7 @@ int print_trace(const WindowInstance& instance, std::size_t max_samples, bool in
         if (copy.missed_deadline) ++missed_deadline_count;
     }
 
-    std::cout << "{\"ok\":true,\"schema_version\":11,\"process_id\":" << instance.process_id
+    std::cout << "{\"ok\":true,\"schema_version\":12,\"process_id\":" << instance.process_id
               << ",\"capacity\":" << frame_warp_lab::runtime_frame_trace_capacity
               << ",\"total_frames_recorded\":" << total_samples
               << ",\"sample_count\":" << captured.size()
@@ -682,6 +696,11 @@ int apply_setting(const WindowInstance& instance, const std::wstring& key, const
         if (value == L"on" || value == L"1" || value == L"true") parameter = 1;
         else if (value == L"off" || value == L"0" || value == L"false") parameter = 0;
         else return fail("invalid_value", "Expected adaptive in {on, off}");
+    } else if (key == L"adaptive_dlssg") {
+        command = frame_warp_lab::ControlCommand::set_adaptive_dlssg;
+        if (value == L"on" || value == L"1" || value == L"true") parameter = 1;
+        else if (value == L"off" || value == L"0" || value == L"false") parameter = 0;
+        else return fail("invalid_value", "Expected adaptive_dlssg in {on, off}");
     } else if (key == L"instrumentation") {
         command = frame_warp_lab::ControlCommand::set_instrumentation_level;
         if (value == L"minimal") parameter = static_cast<LPARAM>(frame_warp_lab::InstrumentationLevel::minimal);
@@ -689,7 +708,7 @@ int apply_setting(const WindowInstance& instance, const std::wstring& key, const
         else if (value == L"diagnostic") parameter = static_cast<LPARAM>(frame_warp_lab::InstrumentationLevel::diagnostic);
         else return fail("invalid_value", "Expected instrumentation in {minimal, standard, diagnostic}");
     } else {
-        return fail("unknown_setting", "Supported settings are: mode, dlssg_mult, pacer, target_fps, async_gpu, vrs, adaptive, instrumentation, divider, vsync, view, path, stress, overlay, flash");
+        return fail("unknown_setting", "Supported settings are: mode, dlssg_mult, pacer, target_fps, async_gpu, vrs, adaptive, adaptive_dlssg, instrumentation, divider, vsync, view, path, stress, overlay, flash");
     }
 
     if (!PostMessageW(instance.window, frame_warp_lab::control_message, static_cast<WPARAM>(command), parameter)) {
@@ -817,14 +836,14 @@ int print_capabilities() {
 
 int wmain(int argument_count, wchar_t** arguments) {
     if (argument_count == 2 && std::wstring(arguments[1]) == L"help") {
-        std::cout << "{\"ok\":true,\"schema_version\":11,\"commands\":[\"help\",\"start\",\"instances\",\"status <pid>\",\"events <pid>\",\"trace <pid> [limit] [summary]\",\"set <pid> <key> <value>\",\"pause <pid>\",\"resume <pid>\",\"reset <pid>\",\"stop <pid>\",\"capabilities\"],\"settings\":{\"mode\":[\"full_render\",\"repeat\",\"reproject\",\"frame_gen\",\"combined\",\"dlss_g\",\"dlss_g_warp\"],\"dlssg_mult\":[\"2\",\"3\",\"4\",\"5\",\"6\",\"dynamic\"],\"pacer\":[\"deadline\",\"vsync_only\",\"unlocked\"],\"target_fps\":\"0 or 30..500\",\"async_gpu\":[\"on\",\"off\"],\"vrs\":[\"off\",\"uniform_2x2\",\"foveated\"],\"adaptive\":[\"on\",\"off\"],\"instrumentation\":[\"minimal\",\"standard\",\"diagnostic\"],\"divider\":\"1..8\",\"vsync\":[\"on\",\"off\"],\"view\":[\"final\",\"depth\",\"motion\",\"holes\",\"vrs\"],\"path\":[\"corridor_sway\",\"fast_pan\",\"occlusion_sweep\",\"camera_cut\",\"manual\",\"pure_rotation\"],\"stress\":\"0..64\",\"overlay\":[\"on\",\"off\"],\"flash\":[\"on\",\"off\"]}}\n";
+        std::cout << "{\"ok\":true,\"schema_version\":12,\"commands\":[\"help\",\"start\",\"instances\",\"status <pid>\",\"events <pid>\",\"trace <pid> [limit] [summary]\",\"set <pid> <key> <value>\",\"pause <pid>\",\"resume <pid>\",\"reset <pid>\",\"stop <pid>\",\"capabilities\"],\"settings\":{\"mode\":[\"full_render\",\"repeat\",\"reproject\",\"frame_gen\",\"combined\",\"dlss_g\",\"dlss_g_warp\"],\"dlssg_mult\":[\"2\",\"3\",\"4\",\"5\",\"6\",\"dynamic\"],\"pacer\":[\"deadline\",\"vsync_only\",\"unlocked\"],\"target_fps\":\"0 or 30..500\",\"async_gpu\":[\"on\",\"off\"],\"vrs\":[\"off\",\"uniform_2x2\",\"foveated\"],\"adaptive\":[\"on\",\"off\"],\"adaptive_dlssg\":[\"on\",\"off\"],\"instrumentation\":[\"minimal\",\"standard\",\"diagnostic\"],\"divider\":\"1..8\",\"vsync\":[\"on\",\"off\"],\"view\":[\"final\",\"depth\",\"motion\",\"holes\",\"vrs\"],\"path\":[\"corridor_sway\",\"fast_pan\",\"occlusion_sweep\",\"camera_cut\",\"manual\",\"pure_rotation\"],\"stress\":\"0..64\",\"overlay\":[\"on\",\"off\"],\"flash\":[\"on\",\"off\"]}}\n";
         return 0;
     }
     if (argument_count == 2 && std::wstring(arguments[1]) == L"capabilities") return print_capabilities();
     if (argument_count == 2 && std::wstring(arguments[1]) == L"start") return start_instance();
     const auto instances = find_instances();
     if (argument_count == 2 && std::wstring(arguments[1]) == L"instances") {
-        std::cout << "{\"ok\":true,\"schema_version\":11,\"instances\":[";
+        std::cout << "{\"ok\":true,\"schema_version\":12,\"instances\":[";
         for (std::size_t index = 0; index < instances.size(); ++index) {
             if (index) std::cout << ',';
             std::cout << "{\"process_id\":" << instances[index].process_id << "}";

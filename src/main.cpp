@@ -117,10 +117,24 @@ public:
         std::atomic_ref<std::int32_t>(state_->flash_indicator_enabled).store(flash_indicator_enabled ? 1 : 0, std::memory_order_release);
     }
 
-    void update_dlssg(std::int32_t requested_multiplier, bool window_focused, const frame_warp_lab::StreamlineFrameState& dlssg) {
+    void update_dlssg(
+        std::int32_t requested_multiplier,
+        bool window_focused,
+        frame_warp_lab::PacingOwner pacing_owner,
+        bool adaptive_dlssg_enabled,
+        bool warp_guard_active,
+        std::int64_t warp_guard_trips,
+        const frame_warp_lab::StreamlineFrameState& dlssg) {
         std::atomic_ref<std::int32_t>(state_->window_focused).store(window_focused ? 1 : 0, std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->pacing_owner).store(static_cast<std::int32_t>(pacing_owner), std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->adaptive_dlssg_enabled).store(adaptive_dlssg_enabled ? 1 : 0, std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->dlssg_requested_multiplier).store(requested_multiplier, std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->dlssg_active).store(dlssg.dlssg_active ? 1 : 0, std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->dlssg_last_api_result).store(dlssg.last_result_code, std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->dlssg_last_failed_call).store(dlssg.last_failed_call, std::memory_order_release);
+        std::atomic_ref<std::int64_t>(state_->dlssg_api_error_count).store(dlssg.api_error_count, std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->dlssg_warp_guard_active).store(warp_guard_active ? 1 : 0, std::memory_order_release);
+        std::atomic_ref<std::int64_t>(state_->dlssg_warp_guard_trips).store(warp_guard_trips, std::memory_order_release);
         std::atomic_ref<std::uint32_t>(state_->dlssg_status_flags).store(dlssg.dlssg_status_flags, std::memory_order_release);
         std::atomic_ref<std::uint32_t>(state_->dlssg_last_frames_presented).store(dlssg.frames_actually_presented, std::memory_order_release);
         if (dlssg.max_frames_to_generate > 0U) {
@@ -590,6 +604,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         frame_warp_lab::SceneSimulation simulation;
 
         ShowWindow(window, show == SW_HIDE ? SW_SHOWNORMAL : show);
+        SetForegroundWindow(window);
+        SetActiveWindow(window);
         RECT previous_client_rectangle{};
         GetClientRect(window, &previous_client_rectangle);
 
@@ -598,6 +614,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         frame_warp_lab::PresentationMode presentation_mode = frame_warp_lab::PresentationMode::full_render;
         std::int32_t source_divider = 1;
         std::int32_t dlssg_multiplier = 2;
+        bool adaptive_dlssg_enabled = renderer.streamline_capabilities().dlssg_supported;
+        std::int32_t dlss_warp_guard_frames = 0;
+        std::int64_t dlss_warp_guard_trips = 0;
         bool vsync_enabled = !renderer.allow_tearing_enabled();
         bool async_gpu_enabled = true;
         frame_warp_lab::VrsMode vrs_mode = frame_warp_lab::VrsMode::off;
@@ -739,11 +758,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                         adaptive_scheduler.set_enabled(enable_adaptive);
                         if (enable_adaptive) {
                             adaptive_scheduler.reset();
-                            const auto initial_policy = frame_warp_lab::AdaptiveScheduler::policy_for_tier(0, renderer.vrs_tier());
+                            const bool use_dlssg_policy = adaptive_dlssg_enabled && renderer.streamline_capabilities().dlssg_supported;
+                            const auto initial_policy = frame_warp_lab::AdaptiveScheduler::policy_for_tier(0, renderer.vrs_tier(), use_dlssg_policy);
                             presentation_mode = initial_policy.mode;
                             source_divider = initial_policy.divider;
                             vrs_mode = initial_policy.vrs;
                             async_gpu_enabled = initial_policy.async_gpu;
+                            dlssg_multiplier = initial_policy.dlssg_multiplier;
                             cadence_counter = 0;
                         }
                         config_changed = true;
@@ -894,14 +915,19 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                         adaptive_scheduler.set_enabled(enable_adaptive);
                         if (enable_adaptive) {
                             adaptive_scheduler.reset();
-                            const auto initial_policy = frame_warp_lab::AdaptiveScheduler::policy_for_tier(0, renderer.vrs_tier());
+                            const bool use_dlssg_policy = adaptive_dlssg_enabled && renderer.streamline_capabilities().dlssg_supported;
+                            const auto initial_policy = frame_warp_lab::AdaptiveScheduler::policy_for_tier(0, renderer.vrs_tier(), use_dlssg_policy);
                             presentation_mode = initial_policy.mode;
                             source_divider = initial_policy.divider;
                             vrs_mode = initial_policy.vrs;
                             async_gpu_enabled = initial_policy.async_gpu;
+                            dlssg_multiplier = initial_policy.dlssg_multiplier;
                             cadence_counter = 0;
                         }
                         runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, enable_adaptive ? 1 : 0, frame_warp_lab::ConfigKey::adaptive_scheduler);
+                    } else if (command == frame_warp_lab::ControlCommand::set_adaptive_dlssg) {
+                        adaptive_dlssg_enabled = message.lParam != 0;
+                        runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, adaptive_dlssg_enabled ? 1 : 0, frame_warp_lab::ConfigKey::adaptive_dlssg);
                     } else if (command == frame_warp_lab::ControlCommand::set_instrumentation_level) {
                         const auto raw = static_cast<std::int32_t>(message.lParam);
                         if (raw >= 0 && raw <= 2) {
@@ -978,9 +1004,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
 
             ++display_frame_id;
             const auto frame_id_u64 = static_cast<std::uint64_t>(display_frame_id);
-            const std::uint32_t reflex_limit_us = (dlssg_can_run && pacer.target_fps_override() > 0)
-                ? static_cast<std::uint32_t>(1000000 / pacer.target_fps_override())
-                : 0U;
+            const std::uint32_t reflex_limit_us = [&]() -> std::uint32_t {
+                if (!dlssg_can_run || pacer.target_fps_override() <= 0) return 0U;
+                const std::int32_t fg_mult = dlssg_multiplier >= 2 ? dlssg_multiplier : 1;
+                return static_cast<std::uint32_t>((1000000LL * static_cast<std::int64_t>(fg_mult)) / static_cast<std::int64_t>(pacer.target_fps_override()));
+            }();
             renderer.begin_streamline_frame(frame_id_u64, dlssg_can_run, reflex_limit_us);
             const auto sim_begin_time = std::chrono::steady_clock::now();
             latency_monitor.emit_marker(frame_warp_lab::LatencyMarker::simulation_start, frame_id_u64);
@@ -1080,12 +1108,15 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 const auto now_for_age = std::chrono::steady_clock::now();
                 const std::int64_t pending_source_age_us = std::chrono::duration_cast<std::chrono::microseconds>(
                     now_for_age - active_source.capture_time).count();
+                const std::int64_t max_safe_age_us = presentation_mode == frame_warp_lab::PresentationMode::dlss_g_warp
+                    ? frame_warp_lab::max_dlss_warp_source_age_us
+                    : frame_warp_lab::max_reprojection_source_age_us;
                 if (current_cut_segment != active_source.snapshot.cut_segment) {
                     frame_kind = frame_warp_lab::FrameKind::fallback;
                     fallback_reason = frame_warp_lab::FallbackReason::camera_cut;
                     frame_discontinuity = true;
                     runtime_state.record_event(frame_warp_lab::RuntimeEventType::reprojection_fallback, static_cast<std::int32_t>(fallback_reason));
-                } else if (pending_source_age_us > frame_warp_lab::max_reprojection_source_age_us) {
+                } else if (pending_source_age_us > max_safe_age_us) {
                     frame_kind = frame_warp_lab::FrameKind::fallback;
                     fallback_reason = frame_warp_lab::FallbackReason::stale_source;
                     runtime_state.record_event(frame_warp_lab::RuntimeEventType::reprojection_fallback, static_cast<std::int32_t>(fallback_reason));
@@ -1102,10 +1133,18 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                         frame_kind = frame_warp_lab::FrameKind::warped;
                         synthesis_mode = frame_warp_lab::SynthesisMode::reproject;
                     } else if (presentation_mode == frame_warp_lab::PresentationMode::dlss_g_warp) {
-                        frame_kind = dlssg_can_run ? frame_warp_lab::FrameKind::dlss_warped : frame_warp_lab::FrameKind::warped;
-                        synthesis_mode = source_is_fresh_this_frame
-                            ? frame_warp_lab::SynthesisMode::passthrough
-                            : frame_warp_lab::SynthesisMode::reproject;
+                        const bool guard_forcing_passthrough = dlss_warp_guard_frames > 0;
+                        if (guard_forcing_passthrough) {
+                            --dlss_warp_guard_frames;
+                            frame_kind = dlssg_can_run ? frame_warp_lab::FrameKind::dlss_generated : frame_warp_lab::FrameKind::rendered;
+                            synthesis_mode = frame_warp_lab::SynthesisMode::passthrough;
+                            target_camera = active_source.snapshot.camera;
+                        } else {
+                            frame_kind = dlssg_can_run ? frame_warp_lab::FrameKind::dlss_warped : frame_warp_lab::FrameKind::warped;
+                            synthesis_mode = source_is_fresh_this_frame
+                                ? frame_warp_lab::SynthesisMode::passthrough
+                                : frame_warp_lab::SynthesisMode::reproject;
+                        }
                     } else if (presentation_mode == frame_warp_lab::PresentationMode::frame_gen) {
                         frame_kind = frame_warp_lab::FrameKind::generated;
                         synthesis_mode = frame_warp_lab::SynthesisMode::frame_gen;
@@ -1149,6 +1188,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 }
             }
 
+            const float dlss_object_motion_scale = presentation_mode == frame_warp_lab::PresentationMode::dlss_g_warp
+                ? (1.0f / static_cast<float>(std::max<std::int32_t>(1, effective_divider)))
+                : 1.0f;
             const frame_warp_lab::FrameExecutionMetrics gpu_metrics = renderer.present_from_source(
                 frame_warp_lab::PresentRequest{
                     frame_id_u64,
@@ -1171,6 +1213,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                     dlssg_can_run,
                     dlssg_multiplier,
                     static_cast<float>(pacer.target_fps_override()),
+                    dlss_object_motion_scale,
                     frame_discontinuity,
                 },
                 latency_monitor,
@@ -1205,6 +1248,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
             if (gpu_metrics.completed_scene_gpu_us >= 0) last_scene_gpu_us = gpu_metrics.completed_scene_gpu_us;
             if (gpu_metrics.completed_present_gpu_us >= 0) last_present_gpu_us = gpu_metrics.completed_present_gpu_us;
 
+            const bool window_focused = GetForegroundWindow() == window;
+            const bool use_dlssg_adaptive_policy = adaptive_dlssg_enabled && renderer.streamline_capabilities().dlssg_supported && window_focused;
             frame_warp_lab::AdaptivePolicyTarget adapted_policy{};
             if (adaptive_scheduler.update(
                     pacer.target_period_us(),
@@ -1214,12 +1259,19 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                     scene_overran_cadence,
                     renderer.vrs_tier(),
                     active_vrs_mode,
+                    presentation_mode,
                     effective_divider,
+                    dlssg_multiplier,
+                    use_dlssg_adaptive_policy,
                     adapted_policy)) {
                 presentation_mode = adapted_policy.mode;
                 source_divider = adapted_policy.divider;
                 vrs_mode = adapted_policy.vrs;
                 async_gpu_enabled = adapted_policy.async_gpu;
+                if (adapted_policy.mode == frame_warp_lab::PresentationMode::dlss_g
+                    || adapted_policy.mode == frame_warp_lab::PresentationMode::dlss_g_warp) {
+                    dlssg_multiplier = adapted_policy.dlssg_multiplier;
+                }
                 cadence_counter = 0;
                 runtime_state.record_event(
                     frame_warp_lab::RuntimeEventType::scheduler_decision,
@@ -1231,6 +1283,15 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
             if (gpu_metrics.completed_slot_warped) {
                 last_invalid_pixels = gpu_metrics.completed_invalid_pixel_count;
                 last_total_pixels = gpu_metrics.completed_total_pixel_count;
+                if (presentation_mode == frame_warp_lab::PresentationMode::dlss_g_warp
+                    && gpu_metrics.completed_total_pixel_count > 0U) {
+                    const double hole_ratio = static_cast<double>(gpu_metrics.completed_invalid_pixel_count)
+                        / static_cast<double>(gpu_metrics.completed_total_pixel_count);
+                    if (hole_ratio > 0.015 && dlss_warp_guard_frames == 0) {
+                        dlss_warp_guard_frames = 8;
+                        ++dlss_warp_guard_trips;
+                    }
+                }
             } else if (!mode_uses_synthesis) {
                 last_invalid_pixels = 0;
                 last_total_pixels = gpu_metrics.completed_total_pixel_count;
@@ -1256,8 +1317,22 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 yaw_deg,
                 pitch_deg,
                 latency_monitor);
+            const frame_warp_lab::PacingOwner active_pacing_owner = gpu_metrics.dlssg_state.dlssg_active
+                ? frame_warp_lab::PacingOwner::streamline_reflex_dlssg
+                : (pacer.mode() == frame_warp_lab::PacerMode::deadline
+                    ? frame_warp_lab::PacingOwner::app_deadline_pacer
+                    : (pacer.mode() == frame_warp_lab::PacerMode::vsync_only
+                        ? frame_warp_lab::PacingOwner::dxgi_vsync
+                        : frame_warp_lab::PacingOwner::unlocked));
             runtime_state.update_present_variant(gpu_metrics.selected_present_variant);
-            runtime_state.update_dlssg(dlssg_multiplier, GetForegroundWindow() == window, gpu_metrics.dlssg_state);
+            runtime_state.update_dlssg(
+                dlssg_multiplier,
+                window_focused,
+                active_pacing_owner,
+                adaptive_dlssg_enabled,
+                dlss_warp_guard_frames > 0,
+                dlss_warp_guard_trips,
+                gpu_metrics.dlssg_state);
             runtime_state.record_frame(
                 frame_warp_lab::RuntimeFrameSample{
                     0,

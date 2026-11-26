@@ -12,6 +12,7 @@ struct AdaptivePolicyTarget {
     std::int32_t divider;
     VrsMode vrs;
     bool async_gpu;
+    std::int32_t dlssg_multiplier;
 };
 
 struct AdaptiveTelemetry {
@@ -55,17 +56,27 @@ public:
         reset_counters();
     }
 
-    static AdaptivePolicyTarget policy_for_tier(std::int32_t tier, std::int32_t vrs_tier) {
+    static AdaptivePolicyTarget policy_for_tier(std::int32_t tier, std::int32_t vrs_tier, bool use_dlssg_policy = false) {
         const VrsMode foveated_or_tier1 = vrs_tier >= 2
             ? VrsMode::foveated
             : (vrs_tier >= 1 ? VrsMode::uniform_2x2 : VrsMode::off);
         const VrsMode coarse_vrs = vrs_tier >= 1 ? VrsMode::uniform_2x2 : VrsMode::off;
-        switch (std::clamp(tier, 0, max_tier)) {
-            case 0: return AdaptivePolicyTarget{PresentationMode::full_render, 1, VrsMode::off, true};
-            case 1: return AdaptivePolicyTarget{PresentationMode::full_render, 1, foveated_or_tier1, true};
-            case 2: return AdaptivePolicyTarget{PresentationMode::combined, 2, foveated_or_tier1, true};
-            case 3: return AdaptivePolicyTarget{PresentationMode::combined, 3, coarse_vrs, true};
-            default: return AdaptivePolicyTarget{PresentationMode::combined, 4, coarse_vrs, true};
+        const std::int32_t clamped = std::clamp(tier, 0, max_tier);
+        if (use_dlssg_policy) {
+            switch (clamped) {
+                case 0: return AdaptivePolicyTarget{PresentationMode::full_render, 1, VrsMode::off, true, 2};
+                case 1: return AdaptivePolicyTarget{PresentationMode::full_render, 1, foveated_or_tier1, true, 2};
+                case 2: return AdaptivePolicyTarget{PresentationMode::dlss_g, 1, foveated_or_tier1, true, 2};
+                case 3: return AdaptivePolicyTarget{PresentationMode::dlss_g_warp, 2, foveated_or_tier1, true, 2};
+                default: return AdaptivePolicyTarget{PresentationMode::dlss_g_warp, 2, coarse_vrs, true, 3};
+            }
+        }
+        switch (clamped) {
+            case 0: return AdaptivePolicyTarget{PresentationMode::full_render, 1, VrsMode::off, true, 2};
+            case 1: return AdaptivePolicyTarget{PresentationMode::full_render, 1, foveated_or_tier1, true, 2};
+            case 2: return AdaptivePolicyTarget{PresentationMode::combined, 2, foveated_or_tier1, true, 2};
+            case 3: return AdaptivePolicyTarget{PresentationMode::combined, 3, coarse_vrs, true, 2};
+            default: return AdaptivePolicyTarget{PresentationMode::combined, 4, coarse_vrs, true, 2};
         }
     }
 
@@ -78,6 +89,15 @@ public:
         }
     }
 
+    static double effective_cadence_multiplier(PresentationMode mode, std::int32_t divider, std::int32_t dlssg_mult) {
+        const double safe_div = static_cast<double>(std::max<std::int32_t>(1, divider));
+        if (mode == PresentationMode::dlss_g || mode == PresentationMode::dlss_g_warp) {
+            const double fg_mult = static_cast<double>(std::max<std::int32_t>(2, dlssg_mult));
+            return safe_div * fg_mult;
+        }
+        return safe_div;
+    }
+
     bool update(
         std::int64_t target_period_us,
         std::int64_t scene_gpu_us,
@@ -86,7 +106,10 @@ public:
         bool scene_overran_cadence,
         std::int32_t vrs_tier,
         VrsMode active_vrs_mode,
+        PresentationMode current_mode,
         std::int32_t current_divider,
+        std::int32_t current_dlssg_mult,
+        bool use_dlssg_policy,
         AdaptivePolicyTarget& out_target) {
         const double period_us = static_cast<double>(std::max<std::int64_t>(target_period_us, 1000LL));
         if (present_gpu_us >= 0) {
@@ -104,8 +127,8 @@ public:
         const double dynamic_headroom_us = std::max(period_us * 0.25, smoothed_present_gpu_us_ * 2.5 + 800.0);
         reserved_headroom_us_ = static_cast<std::int64_t>(dynamic_headroom_us);
 
-        const std::int32_t safe_divider = std::max<std::int32_t>(1, current_divider);
-        const double effective_budget_us = std::max(1000.0, period_us * static_cast<double>(safe_divider) - dynamic_headroom_us);
+        const double current_cadence = effective_cadence_multiplier(current_mode, current_divider, current_dlssg_mult);
+        const double effective_budget_us = std::max(1000.0, period_us * current_cadence - dynamic_headroom_us);
         const double total_gpu_us = smoothed_scene_gpu_us_ + smoothed_present_gpu_us_;
         gpu_budget_utilization_ = has_gpu_sample_ ? (total_gpu_us / effective_budget_us) : 0.0;
 
@@ -139,19 +162,20 @@ public:
             ++tier_;
             reason_ = deadline_pressure ? SchedulerReason::deadline_overrun : SchedulerReason::gpu_headroom_pressure;
             ++decision_count_;
-            out_target = policy_for_tier(tier_, vrs_tier);
+            out_target = policy_for_tier(tier_, vrs_tier, use_dlssg_policy);
             reset_counters();
             settle_frames_remaining_ = 24;
             return true;
         }
 
         if (tier_ > 0) {
-            const AdaptivePolicyTarget lower_policy = policy_for_tier(tier_ - 1, vrs_tier);
+            const AdaptivePolicyTarget lower_policy = policy_for_tier(tier_ - 1, vrs_tier, use_dlssg_policy);
             const double current_scale = std::max(0.20, expected_vrs_cost_scale(active_vrs_mode));
             const double lower_scale = expected_vrs_cost_scale(lower_policy.vrs);
             const double estimated_full_rate_us = smoothed_scene_gpu_us_ / current_scale;
             const double estimated_lower_scene_us = estimated_full_rate_us * lower_scale;
-            const double lower_budget_us = std::max(1000.0, period_us * static_cast<double>(lower_policy.divider) - dynamic_headroom_us);
+            const double lower_cadence = effective_cadence_multiplier(lower_policy.mode, lower_policy.divider, lower_policy.dlssg_multiplier);
+            const double lower_budget_us = std::max(1000.0, period_us * lower_cadence - dynamic_headroom_us);
             const double lower_utilization = (estimated_lower_scene_us + smoothed_present_gpu_us_) / lower_budget_us;
             if (lower_utilization < 0.68 && recent_misses_ == 0 && recent_overruns_ == 0) {
                 ++low_pressure_streak_;

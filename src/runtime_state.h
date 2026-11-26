@@ -10,7 +10,7 @@
 namespace frame_warp_lab {
 
 inline constexpr wchar_t window_class_name[] = L"FrameWarpLabWindow";
-inline constexpr std::uint32_t runtime_state_version = 16;
+inline constexpr std::uint32_t runtime_state_version = 17;
 inline constexpr std::size_t runtime_event_capacity = 64;
 inline constexpr std::size_t runtime_frame_trace_capacity = 256;
 inline constexpr std::size_t hud_graph_sample_count = 128;
@@ -18,6 +18,7 @@ inline constexpr std::int32_t max_stress_level = 64;
 inline constexpr std::int32_t max_source_divider = 8;
 inline constexpr std::int32_t max_target_fps = 500;
 inline constexpr std::int64_t max_reprojection_source_age_us = 250000;
+inline constexpr std::int64_t max_dlss_warp_source_age_us = 40000;
 inline constexpr UINT control_message = WM_APP + 1;
 
 enum class ControlCommand : WPARAM {
@@ -39,6 +40,14 @@ enum class ControlCommand : WPARAM {
     set_adaptive_scheduler = 16,
     set_instrumentation_level = 17,
     set_dlssg_multiplier = 18,
+    set_adaptive_dlssg = 19,
+};
+
+enum class PacingOwner : std::int32_t {
+    app_deadline_pacer = 0,
+    dxgi_vsync = 1,
+    unlocked = 2,
+    streamline_reflex_dlssg = 3,
 };
 
 enum class InstrumentationLevel : std::int32_t {
@@ -138,6 +147,7 @@ enum class ConfigKey : std::int32_t {
     instrumentation_level = 14,
     hotkey = 15,
     dlssg_multiplier = 16,
+    adaptive_dlssg = 17,
 };
 
 enum class RuntimeEventType : std::int32_t {
@@ -271,6 +281,13 @@ struct RuntimeState {
     std::int32_t dlssg_max_frames_to_generate;
     std::int32_t dlssg_requested_multiplier;
     std::int32_t dlssg_active;
+    std::int32_t pacing_owner;
+    std::int32_t adaptive_dlssg_enabled;
+    std::int32_t dlssg_last_api_result;
+    std::int32_t dlssg_last_failed_call;
+    std::int32_t dlssg_warp_guard_active;
+    std::int64_t dlssg_api_error_count;
+    std::int64_t dlssg_warp_guard_trips;
     std::uint32_t dlssg_status_flags;
     std::uint32_t dlssg_last_frames_presented;
     std::int64_t dlssg_total_frames_presented;
@@ -345,6 +362,17 @@ inline const char* config_key_name(std::int32_t key) {
         case ConfigKey::instrumentation_level: return "instrumentation";
         case ConfigKey::hotkey: return "hotkey";
         case ConfigKey::dlssg_multiplier: return "dlssg_mult";
+        case ConfigKey::adaptive_dlssg: return "adaptive_dlssg";
+        default: return "unknown";
+    }
+}
+
+inline const char* pacing_owner_name(std::int32_t owner) {
+    switch (static_cast<PacingOwner>(owner)) {
+        case PacingOwner::app_deadline_pacer: return "app_deadline_pacer";
+        case PacingOwner::dxgi_vsync: return "dxgi_vsync";
+        case PacingOwner::unlocked: return "unlocked";
+        case PacingOwner::streamline_reflex_dlssg: return "streamline_reflex_dlssg";
         default: return "unknown";
     }
 }

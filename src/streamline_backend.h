@@ -10,6 +10,41 @@
 
 namespace frame_warp_lab {
 
+enum class StreamlineCall : std::int32_t {
+    none = 0,
+    sl_init = 1,
+    sl_set_d3d_device = 2,
+    sl_pcl_set_options = 3,
+    sl_reflex_set_options = 4,
+    sl_get_new_frame_token = 5,
+    sl_reflex_sleep = 6,
+    sl_pcl_set_marker = 7,
+    sl_set_constants = 8,
+    sl_set_tag_for_frame = 9,
+    sl_dlssg_set_options = 10,
+    sl_dlssg_get_state = 11,
+    sl_shutdown = 12,
+};
+
+inline const char* streamline_call_name(std::int32_t call) {
+    switch (static_cast<StreamlineCall>(call)) {
+        case StreamlineCall::none: return "none";
+        case StreamlineCall::sl_init: return "slInit";
+        case StreamlineCall::sl_set_d3d_device: return "slSetD3DDevice";
+        case StreamlineCall::sl_pcl_set_options: return "slPCLSetOptions";
+        case StreamlineCall::sl_reflex_set_options: return "slReflexSetOptions";
+        case StreamlineCall::sl_get_new_frame_token: return "slGetNewFrameToken";
+        case StreamlineCall::sl_reflex_sleep: return "slReflexSleep";
+        case StreamlineCall::sl_pcl_set_marker: return "slPCLSetMarker";
+        case StreamlineCall::sl_set_constants: return "slSetConstants";
+        case StreamlineCall::sl_set_tag_for_frame: return "slSetTagForFrame";
+        case StreamlineCall::sl_dlssg_set_options: return "slDLSSGSetOptions";
+        case StreamlineCall::sl_dlssg_get_state: return "slDLSSGGetState";
+        case StreamlineCall::sl_shutdown: return "slShutdown";
+        default: return "unknown";
+    }
+}
+
 struct StreamlineCapabilities {
     bool compiled_with_sdk = false;
     bool initialized = false;
@@ -41,6 +76,8 @@ struct StreamlineFrameState {
     std::uint32_t max_frames_to_generate = 0;
     bool dynamic_mfg_supported = false;
     std::int32_t last_result_code = 0;
+    std::int32_t last_failed_call = 0;
+    std::int64_t api_error_count = 0;
     ID3D12Fence* inputs_completion_fence = nullptr;
     std::uint64_t inputs_completion_fence_value = 0;
 };
@@ -77,17 +114,20 @@ public:
     bool initialized() const { return initialized_; }
     const StreamlineCapabilities& capabilities() const { return capabilities_; }
     std::string last_error() const;
+    std::int64_t api_error_count() const { return api_error_count_; }
+    std::int32_t last_api_result() const { return last_api_result_; }
+    StreamlineCall last_failed_call() const { return last_failed_call_; }
 
     bool begin_frame(std::uint32_t frame_index, bool reflex_enabled, std::uint32_t frame_limit_us);
-    void set_pcl_marker(StreamlinePclMarker marker);
-    void set_common_constants(
+    bool set_pcl_marker(StreamlinePclMarker marker);
+    bool set_common_constants(
         const CameraBasis& current_camera,
         const CameraBasis& previous_camera,
         float aspect_ratio,
         float near_plane,
         float far_plane,
         bool reset_history);
-    void tag_dlssg_resources(
+    bool tag_dlssg_resources(
         ID3D12Resource* clip_depth,
         D3D12_RESOURCE_STATES depth_state,
         ID3D12Resource* motion_vectors,
@@ -97,7 +137,7 @@ public:
         UINT width,
         UINT height,
         ID3D12GraphicsCommandList* command_list);
-    void clear_tags();
+    bool clear_tags();
     bool configure_dlssg(
         bool enabled,
         std::uint32_t multiplier,
@@ -111,6 +151,8 @@ public:
     StreamlineFrameState poll_dlssg_state();
 
 private:
+    bool record_api_result(StreamlineCall call, std::int32_t result_code);
+
     bool initialized_ = false;
     bool device_attached_ = false;
     bool dlssg_feature_requested_ = false;
@@ -124,6 +166,9 @@ private:
     UINT dlssg_applied_width_ = 0;
     UINT dlssg_applied_height_ = 0;
     bool dlssg_applied_hudless_ = false;
+    std::int64_t api_error_count_ = 0;
+    std::int32_t last_api_result_ = 0;
+    StreamlineCall last_failed_call_ = StreamlineCall::none;
     void* current_frame_token_ = nullptr;
     StreamlineCapabilities capabilities_{};
 };

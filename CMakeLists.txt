@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(FrameWarpLab VERSION 0.17.0 LANGUAGES CXX)
+project(FrameWarpLab VERSION 0.18.0 LANGUAGES CXX)
 
 if(NOT WIN32)
     message(FATAL_ERROR "Frame Warp Lab currently requires Windows and Direct3D 12.")
@@ -94,7 +94,7 @@ add_dxc_shader(COMPILED_SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/present.hls
 add_dxc_shader(COMPILED_SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/present.hlsl" pixel_main ps_6_0 present_depth_fast_ps.cso -DPRESENT_VARIANT=2)
 add_dxc_shader(COMPILED_SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/present.hlsl" pixel_main ps_6_0 present_depth_full_ps.cso -DPRESENT_VARIANT=3)
 add_dxc_shader(COMPILED_SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/present.hlsl" pixel_main ps_6_0 present_synthesis_ps.cso -DPRESENT_VARIANT=4)
-add_dxc_shader(COMPILED_SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/present.hlsl" pixel_main ps_6_0 present_dlss_hudless_ps.cso -DPRESENT_VARIANT=4 -DPRESENT_OUTPUT_HUDLESS=1)
+add_dxc_shader(COMPILED_SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/present.hlsl" pixel_main ps_6_0 present_dlss_inputs_ps.cso -DPRESENT_VARIANT=4 -DPRESENT_OUTPUT_DLSS_INPUTS=1)
 
 add_custom_target(frame_warp_shaders ALL DEPENDS ${COMPILED_SHADERS})
 add_dependencies(frame_warp_lab frame_warp_shaders)

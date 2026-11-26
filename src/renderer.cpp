@@ -52,6 +52,11 @@ struct PresentConstantsData {
     float homography_col_x[4];
     float homography_col_y[4];
     float homography_col_z[4];
+    float prev_presented_camera_position_tan_y[4];
+    float prev_presented_camera_right_rcp_tan_x[4];
+    float prev_presented_camera_up_rcp_tan_y[4];
+    float prev_presented_camera_forward_reset[4];
+    float dlss_motion_params[4];
 };
 
 struct HudConstantsData {
@@ -296,13 +301,15 @@ Renderer::Renderer(HWND window)
 
     D3D12_DESCRIPTOR_HEAP_DESC rtv_heap_description{};
     rtv_heap_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-    rtv_heap_description.NumDescriptors = swap_chain_buffer_count + 1U + source_slot_count * rtv_targets_per_source_slot;
+    rtv_heap_description.NumDescriptors = swap_chain_buffer_count
+        + dlss_input_slot_count * rtv_targets_per_dlss_slot
+        + source_slot_count * targets_per_source_slot;
     check(device_->CreateDescriptorHeap(&rtv_heap_description, IID_PPV_ARGS(&render_target_heap_)), "Create RTV heap");
     render_target_descriptor_stride_ = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
 
     D3D12_DESCRIPTOR_HEAP_DESC srv_heap_description{};
     srv_heap_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    srv_heap_description.NumDescriptors = source_slot_count * srv_targets_per_source_slot;
+    srv_heap_description.NumDescriptors = source_slot_count * targets_per_source_slot;
     srv_heap_description.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     check(device_->CreateDescriptorHeap(&srv_heap_description, IID_PPV_ARGS(&shader_resource_heap_)), "Create SRV heap");
     shader_resource_descriptor_stride_ = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
@@ -326,6 +333,7 @@ Renderer::Renderer(HWND window)
     viewport_width_ = initial_width;
     viewport_height_ = initial_height;
     create_swap_chain_targets();
+    create_dlss_input_targets();
     create_source_targets();
     create_constant_buffers();
     create_timestamp_resources();
@@ -436,8 +444,6 @@ void Renderer::invalidate_source_history() {
         slot.valid = false;
         slot.scene_fence_value = 0;
         slot.last_read_present_fence = 0;
-        slot.dlssg_inputs_fence = nullptr;
-        slot.dlssg_inputs_fence_value = 0;
         slot.scene_gpu_us = -1;
     }
     latest_completed_slot_ = -1;
@@ -449,16 +455,7 @@ std::int32_t Renderer::find_available_source_slot() const {
     const std::uint64_t completed_present = present_fence_->GetCompletedValue();
     const std::uint64_t completed_scene = scene_fence_->GetCompletedValue();
     auto slot_is_free = [&](const SourceSlot& slot) {
-        if (slot.in_flight || completed_scene < slot.scene_fence_value || completed_present < slot.last_read_present_fence) {
-            return false;
-        }
-        if (slot.dlssg_inputs_fence && slot.dlssg_inputs_fence_value > 0) {
-            const std::uint64_t completed_dlssg = slot.dlssg_inputs_fence->GetCompletedValue();
-            if (completed_dlssg != UINT64_MAX && completed_dlssg < slot.dlssg_inputs_fence_value) {
-                return false;
-            }
-        }
-        return true;
+        return !slot.in_flight && completed_scene >= slot.scene_fence_value && completed_present >= slot.last_read_present_fence;
     };
     for (UINT slot_index = 0; slot_index < source_slot_count; ++slot_index) {
         const auto signed_index = static_cast<std::int32_t>(slot_index);
@@ -475,6 +472,19 @@ std::int32_t Renderer::find_available_source_slot() const {
         }
     }
     return -1;
+}
+
+UINT Renderer::acquire_dlss_input_slot() {
+    const UINT slot_index = next_dlss_input_slot_ % dlss_input_slot_count;
+    next_dlss_input_slot_ = (slot_index + 1U) % dlss_input_slot_count;
+    auto& slot = dlss_input_slots_[slot_index];
+    wait_for_fence(present_fence_.Get(), present_fence_event_.get(), slot.last_present_fence);
+    if (slot.dlssg_inputs_fence && slot.dlssg_inputs_fence_value > 0) {
+        wait_for_fence(slot.dlssg_inputs_fence, present_fence_event_.get(), slot.dlssg_inputs_fence_value);
+        slot.dlssg_inputs_fence = nullptr;
+        slot.dlssg_inputs_fence_value = 0;
+    }
+    return slot_index;
 }
 
 VrsMode Renderer::resolve_effective_vrs_mode(VrsMode requested) const {
@@ -547,17 +557,19 @@ bool Renderer::submit_scene_async(
         scene_command_list_->EndQuery(scene_timestamp_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, query_base + 0);
     }
 
-    const std::array<D3D12_RESOURCE_BARRIER, rtv_targets_per_source_slot> to_rtv = {
+    const std::array<D3D12_RESOURCE_BARRIER, targets_per_source_slot> to_rtv = {
         transition_barrier(slot.color_target.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET),
         transition_barrier(slot.depth_target.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET),
         transition_barrier(slot.motion_target.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET),
-        transition_barrier(slot.clip_depth_target.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET),
     };
     scene_command_list_->ResourceBarrier(static_cast<UINT>(to_rtv.size()), to_rtv.data());
 
     auto offscreen_rtv = render_target_heap_->GetCPUDescriptorHandleForHeapStart();
-    offscreen_rtv.ptr += static_cast<SIZE_T>(swap_chain_buffer_count + 1U + static_cast<UINT>(slot_index) * rtv_targets_per_source_slot) * render_target_descriptor_stride_;
-    scene_command_list_->OMSetRenderTargets(rtv_targets_per_source_slot, &offscreen_rtv, TRUE, nullptr);
+    offscreen_rtv.ptr += static_cast<SIZE_T>(
+        swap_chain_buffer_count
+        + dlss_input_slot_count * rtv_targets_per_dlss_slot
+        + static_cast<UINT>(slot_index) * targets_per_source_slot) * render_target_descriptor_stride_;
+    scene_command_list_->OMSetRenderTargets(targets_per_source_slot, &offscreen_rtv, TRUE, nullptr);
     scene_command_list_->SetGraphicsRootSignature(scene_root_signature_.Get());
     scene_command_list_->SetPipelineState(scene_pipeline_.Get());
     scene_command_list_->SetGraphicsRootConstantBufferView(0, scene_constant_buffer_->GetGPUVirtualAddress() + constant_offset);
@@ -584,11 +596,10 @@ bool Renderer::submit_scene_async(
     }
     scene_command_list_->DrawInstanced(3, 1, 0, 0);
 
-    const std::array<D3D12_RESOURCE_BARRIER, rtv_targets_per_source_slot> to_srv = {
+    const std::array<D3D12_RESOURCE_BARRIER, targets_per_source_slot> to_srv = {
         transition_barrier(slot.color_target.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
         transition_barrier(slot.depth_target.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
         transition_barrier(slot.motion_target.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
-        transition_barrier(slot.clip_depth_target.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
     };
     scene_command_list_->ResourceBarrier(static_cast<UINT>(to_srv.size()), to_srv.data());
 
@@ -676,12 +687,14 @@ FrameExecutionMetrics Renderer::present_from_source(const PresentRequest& reques
     const bool emit_etw = request.instrumentation_level != InstrumentationLevel::minimal;
     const bool collect_stats = synthesis_active
         && (request.instrumentation_level == InstrumentationLevel::diagnostic
-            || request.diagnostic_view == DiagnosticView::reprojection_holes);
+            || request.diagnostic_view == DiagnosticView::reprojection_holes
+            || request.dlssg_requested);
     const bool render_overlay = request.overlay_enabled && request.instrumentation_level != InstrumentationLevel::minimal;
-    const bool want_hudless_output = request.dlssg_requested && render_overlay && hudless_target_ && present_dlss_hudless_pipeline_;
+    const bool dlss_inputs_ready = dlss_input_slots_[0].hudless_target != nullptr && present_dlss_inputs_pipeline_ != nullptr;
+    const bool want_hudless_output = request.dlssg_requested && render_overlay && dlss_inputs_ready;
     const bool dlssg_dynamic = request.dlssg_multiplier == 0;
     const std::uint32_t dlssg_mult = dlssg_dynamic ? 2U : static_cast<std::uint32_t>(std::max(2, request.dlssg_multiplier));
-    const bool dlssg_active = streamline_.configure_dlssg(
+    const bool dlssg_active = dlss_inputs_ready && streamline_.configure_dlssg(
         request.dlssg_requested,
         dlssg_mult,
         dlssg_dynamic,
@@ -699,13 +712,15 @@ FrameExecutionMetrics Renderer::present_from_source(const PresentRequest& reques
     streamline_.set_pcl_marker(synthesis_active ? StreamlinePclMarker::late_warp_render_submit_start : StreamlinePclMarker::render_submit_start);
 
     const float aspect_ratio = static_cast<float>(viewport_width_) / static_cast<float>(viewport_height_);
+    const CameraBasis presented_camera = synthesis_active ? request.target_camera : request.source_snapshot.camera;
+    const CameraBasis prev_presented_camera = has_previous_presented_camera_
+        ? previous_presented_camera_
+        : request.source_snapshot.previous_camera;
+    const bool dlss_reset_history = request.discontinuity || request.source_snapshot.discontinuity || !has_previous_presented_camera_;
+    UINT dlss_slot_index = 0;
     if (dlssg_active) {
-        const CameraBasis& presented_camera = synthesis_active ? request.target_camera : request.source_snapshot.camera;
-        const CameraBasis& previous_camera = has_previous_presented_camera_
-            ? previous_presented_camera_
-            : request.source_snapshot.previous_camera;
-        const bool reset_history = request.discontinuity || request.source_snapshot.discontinuity || !has_previous_presented_camera_;
-        streamline_.set_common_constants(presented_camera, previous_camera, aspect_ratio, 0.05f, 100.0f, reset_history);
+        dlss_slot_index = acquire_dlss_input_slot();
+        streamline_.set_common_constants(presented_camera, prev_presented_camera, aspect_ratio, 0.05f, 100.0f, dlss_reset_history);
         previous_presented_camera_ = presented_camera;
         has_previous_presented_camera_ = true;
     } else {
@@ -776,6 +791,13 @@ FrameExecutionMetrics Renderer::present_from_source(const PresentRequest& reques
     simd::store_float4(present_constants->homography_col_x, dot3(tgt_col_x, src_proj_x), dot3(tgt_col_x, src_proj_y), dot3(tgt_col_x, src_proj_z), 0.0f);
     simd::store_float4(present_constants->homography_col_y, dot3(tgt_col_y, src_proj_x), dot3(tgt_col_y, src_proj_y), dot3(tgt_col_y, src_proj_z), 0.0f);
     simd::store_float4(present_constants->homography_col_z, dot3(tgt_col_z, src_proj_x), dot3(tgt_col_z, src_proj_y), dot3(tgt_col_z, src_proj_z), 0.0f);
+    const float prev_pres_tan_y = prev_presented_camera.tan_half_fov_y;
+    const float prev_pres_tan_x = prev_pres_tan_y * aspect_ratio;
+    write_float4(present_constants->prev_presented_camera_position_tan_y, prev_presented_camera.position, prev_pres_tan_y);
+    write_float4(present_constants->prev_presented_camera_right_rcp_tan_x, prev_presented_camera.right, 1.0f / prev_pres_tan_x);
+    write_float4(present_constants->prev_presented_camera_up_rcp_tan_y, prev_presented_camera.up, 1.0f / prev_pres_tan_y);
+    write_float4(present_constants->prev_presented_camera_forward_reset, prev_presented_camera.forward, dlss_reset_history ? 1.0f : 0.0f);
+    simd::store_float4(present_constants->dlss_motion_params, request.dlssg_object_motion_scale, 0.05f, 100.0f, 0.0f);
 
     PresentVariant chosen_variant = PresentVariant::synthesis;
     if (request.diagnostic_view == DiagnosticView::final_color) {
@@ -824,19 +846,24 @@ FrameExecutionMetrics Renderer::present_from_source(const PresentRequest& reques
         present_command_list_->EndQuery(present_timestamp_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, query_base + 0);
     }
 
-    const bool dual_hudless_pass = dlssg_active && want_hudless_output;
-    if (dual_hudless_pass) {
-        const std::array<D3D12_RESOURCE_BARRIER, 2> to_rtv = {
+    if (dlssg_active) {
+        auto& dlss_slot = dlss_input_slots_[dlss_slot_index];
+        const std::array<D3D12_RESOURCE_BARRIER, 4> to_rtv = {
             transition_barrier(render_targets_[buffer_index].Get(), D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET),
-            transition_barrier(hudless_target_.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET),
+            transition_barrier(dlss_slot.hudless_target.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET),
+            transition_barrier(dlss_slot.clip_depth_target.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET),
+            transition_barrier(dlss_slot.motion_target.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET),
         };
         present_command_list_->ResourceBarrier(static_cast<UINT>(to_rtv.size()), to_rtv.data());
         auto back_buffer_rtv = render_target_heap_->GetCPUDescriptorHandleForHeapStart();
         back_buffer_rtv.ptr += static_cast<SIZE_T>(buffer_index) * render_target_descriptor_stride_;
-        auto hudless_rtv = render_target_heap_->GetCPUDescriptorHandleForHeapStart();
-        hudless_rtv.ptr += static_cast<SIZE_T>(swap_chain_buffer_count) * render_target_descriptor_stride_;
-        const D3D12_CPU_DESCRIPTOR_HANDLE rtvs[2] = {back_buffer_rtv, hudless_rtv};
-        present_command_list_->OMSetRenderTargets(2, rtvs, FALSE, nullptr);
+        auto dlss_rtv_base = render_target_heap_->GetCPUDescriptorHandleForHeapStart();
+        dlss_rtv_base.ptr += static_cast<SIZE_T>(swap_chain_buffer_count + dlss_slot_index * rtv_targets_per_dlss_slot) * render_target_descriptor_stride_;
+        D3D12_CPU_DESCRIPTOR_HANDLE hudless_rtv = dlss_rtv_base;
+        D3D12_CPU_DESCRIPTOR_HANDLE clip_depth_rtv{dlss_rtv_base.ptr + render_target_descriptor_stride_};
+        D3D12_CPU_DESCRIPTOR_HANDLE motion_rtv{dlss_rtv_base.ptr + 2U * render_target_descriptor_stride_};
+        const D3D12_CPU_DESCRIPTOR_HANDLE rtvs[4] = {back_buffer_rtv, hudless_rtv, clip_depth_rtv, motion_rtv};
+        present_command_list_->OMSetRenderTargets(4, rtvs, FALSE, nullptr);
     } else {
         const auto back_buffer_to_rtv = transition_barrier(render_targets_[buffer_index].Get(), D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
         present_command_list_->ResourceBarrier(1, &back_buffer_to_rtv);
@@ -849,12 +876,12 @@ FrameExecutionMetrics Renderer::present_from_source(const PresentRequest& reques
     present_command_list_->SetDescriptorHeaps(1, heaps);
     present_command_list_->SetGraphicsRootSignature(present_root_signature_.Get());
     present_command_list_->SetPipelineState(
-        dual_hudless_pass
-            ? present_dlss_hudless_pipeline_.Get()
+        dlssg_active
+            ? present_dlss_inputs_pipeline_.Get()
             : present_pipelines_[static_cast<std::size_t>(chosen_variant)].Get());
     present_command_list_->SetGraphicsRootConstantBufferView(0, present_constant_buffer_->GetGPUVirtualAddress() + constant_offset);
     auto source_srv_gpu = shader_resource_heap_->GetGPUDescriptorHandleForHeapStart();
-    source_srv_gpu.ptr += static_cast<UINT64>(request.source_slot_index) * srv_targets_per_source_slot * shader_resource_descriptor_stride_;
+    source_srv_gpu.ptr += static_cast<UINT64>(request.source_slot_index) * targets_per_source_slot * shader_resource_descriptor_stride_;
     present_command_list_->SetGraphicsRootDescriptorTable(1, source_srv_gpu);
     present_command_list_->SetGraphicsRootUnorderedAccessView(2, reprojection_stats_uav_->GetGPUVirtualAddress());
     present_command_list_->SetGraphicsRootConstantBufferView(3, hud_constant_buffer_->GetGPUVirtualAddress() + hud_offset);
@@ -862,33 +889,32 @@ FrameExecutionMetrics Renderer::present_from_source(const PresentRequest& reques
         ? request.previous_source_slot_index
         : request.source_slot_index;
     auto prev_srv_gpu = shader_resource_heap_->GetGPUDescriptorHandleForHeapStart();
-    prev_srv_gpu.ptr += static_cast<UINT64>(history_slot_index) * srv_targets_per_source_slot * shader_resource_descriptor_stride_;
+    prev_srv_gpu.ptr += static_cast<UINT64>(history_slot_index) * targets_per_source_slot * shader_resource_descriptor_stride_;
     present_command_list_->SetGraphicsRootDescriptorTable(4, prev_srv_gpu);
     present_command_list_->DrawInstanced(3, 1, 0, 0);
 
-    if (dual_hudless_pass) {
-        const std::array<D3D12_RESOURCE_BARRIER, 2> after_draw = {
+    if (dlssg_active) {
+        auto& dlss_slot = dlss_input_slots_[dlss_slot_index];
+        const std::array<D3D12_RESOURCE_BARRIER, 4> after_draw = {
             transition_barrier(render_targets_[buffer_index].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT),
-            transition_barrier(hudless_target_.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
+            transition_barrier(dlss_slot.hudless_target.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
+            transition_barrier(dlss_slot.clip_depth_target.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
+            transition_barrier(dlss_slot.motion_target.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
         };
         present_command_list_->ResourceBarrier(static_cast<UINT>(after_draw.size()), after_draw.data());
-    } else {
-        const auto back_buffer_to_present = transition_barrier(render_targets_[buffer_index].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
-        present_command_list_->ResourceBarrier(1, &back_buffer_to_present);
-    }
-
-    if (dlssg_active) {
-        const auto& tagged_slot = source_slots_[static_cast<std::size_t>(request.source_slot_index)];
         streamline_.tag_dlssg_resources(
-            tagged_slot.clip_depth_target.Get(),
+            dlss_slot.clip_depth_target.Get(),
             D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
-            tagged_slot.motion_target.Get(),
+            dlss_slot.motion_target.Get(),
             D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
-            dual_hudless_pass ? hudless_target_.Get() : nullptr,
+            want_hudless_output ? dlss_slot.hudless_target.Get() : nullptr,
             D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
             viewport_width_,
             viewport_height_,
             present_command_list_.Get());
+    } else {
+        const auto back_buffer_to_present = transition_barrier(render_targets_[buffer_index].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
+        present_command_list_->ResourceBarrier(1, &back_buffer_to_present);
     }
 
     if (present_timestamp_heap_) {
@@ -958,14 +984,21 @@ FrameExecutionMetrics Renderer::present_from_source(const PresentRequest& reques
     if (dlssg_active) {
         metrics.dlssg_state = streamline_.poll_dlssg_state();
         if (metrics.dlssg_state.inputs_completion_fence && metrics.dlssg_state.inputs_completion_fence_value > 0) {
-            source_slots_[static_cast<std::size_t>(request.source_slot_index)].dlssg_inputs_fence = metrics.dlssg_state.inputs_completion_fence;
-            source_slots_[static_cast<std::size_t>(request.source_slot_index)].dlssg_inputs_fence_value = metrics.dlssg_state.inputs_completion_fence_value;
+            dlss_input_slots_[dlss_slot_index].dlssg_inputs_fence = metrics.dlssg_state.inputs_completion_fence;
+            dlss_input_slots_[dlss_slot_index].dlssg_inputs_fence_value = metrics.dlssg_state.inputs_completion_fence_value;
         }
+    } else {
+        metrics.dlssg_state.last_result_code = streamline_.last_api_result();
+        metrics.dlssg_state.last_failed_call = static_cast<std::int32_t>(streamline_.last_failed_call());
+        metrics.dlssg_state.api_error_count = streamline_.api_error_count();
     }
 
     const auto fence_value = next_present_fence_value_++;
     check(present_queue_->Signal(present_fence_.Get(), fence_value), "Signal present fence");
     buffer_fence_values_[buffer_index] = fence_value;
+    if (dlssg_active) {
+        dlss_input_slots_[dlss_slot_index].last_present_fence = fence_value;
+    }
     buffer_display_frame_ids_[buffer_index] = static_cast<std::int64_t>(request.display_frame_id);
     buffer_source_frame_ids_[buffer_index] = request.source_snapshot.source_frame_id;
     buffer_has_data_[buffer_index] = true;
@@ -986,18 +1019,23 @@ void Renderer::resize(UINT width, UINT height) {
     flush();
     has_acquired_slot_ = false;
     for (auto& target : render_targets_) target.Reset();
-    hudless_target_.Reset();
+    for (auto& dlss_slot : dlss_input_slots_) {
+        dlss_slot.hudless_target.Reset();
+        dlss_slot.clip_depth_target.Reset();
+        dlss_slot.motion_target.Reset();
+        dlss_slot.last_present_fence = 0;
+        dlss_slot.dlssg_inputs_fence = nullptr;
+        dlss_slot.dlssg_inputs_fence_value = 0;
+    }
+    next_dlss_input_slot_ = 0;
     for (auto& slot : source_slots_) {
         slot.color_target.Reset();
         slot.depth_target.Reset();
         slot.motion_target.Reset();
-        slot.clip_depth_target.Reset();
         slot.in_flight = false;
         slot.valid = false;
         slot.scene_fence_value = 0;
         slot.last_read_present_fence = 0;
-        slot.dlssg_inputs_fence = nullptr;
-        slot.dlssg_inputs_fence_value = 0;
         slot.scene_gpu_us = -1;
     }
     latest_completed_slot_ = -1;
@@ -1015,6 +1053,7 @@ void Renderer::resize(UINT width, UINT height) {
     buffer_total_pixels_.fill(0);
     vrs_image_.Reset();
     create_swap_chain_targets();
+    create_dlss_input_targets();
     create_source_targets();
     create_vrs_resources();
 }
@@ -1030,11 +1069,11 @@ void Renderer::flush() {
         check(present_queue_->Signal(present_fence_.Get(), present_value), "Signal present flush fence");
         wait_for_fence(present_fence_.Get(), present_fence_event_.get(), present_value);
     }
-    for (auto& slot : source_slots_) {
-        if (slot.dlssg_inputs_fence && slot.dlssg_inputs_fence_value > 0) {
-            wait_for_fence(slot.dlssg_inputs_fence, present_fence_event_.get(), slot.dlssg_inputs_fence_value);
-            slot.dlssg_inputs_fence = nullptr;
-            slot.dlssg_inputs_fence_value = 0;
+    for (auto& dlss_slot : dlss_input_slots_) {
+        if (dlss_slot.dlssg_inputs_fence && dlss_slot.dlssg_inputs_fence_value > 0) {
+            wait_for_fence(dlss_slot.dlssg_inputs_fence, present_fence_event_.get(), dlss_slot.dlssg_inputs_fence_value);
+            dlss_slot.dlssg_inputs_fence = nullptr;
+            dlss_slot.dlssg_inputs_fence_value = 0;
         }
     }
 }
@@ -1051,7 +1090,7 @@ void Renderer::create_pipelines() {
         load_shader_bytecode(shaders / L"present_depth_full_ps.cso"),
         load_shader_bytecode(shaders / L"present_synthesis_ps.cso"),
     };
-    const auto present_dlss_hudless_ps = load_shader_bytecode(shaders / L"present_dlss_hudless_ps.cso");
+    const auto present_dlss_inputs_ps = load_shader_bytecode(shaders / L"present_dlss_inputs_ps.cso");
 
     D3D12_ROOT_PARAMETER scene_parameter{};
     scene_parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
@@ -1072,7 +1111,7 @@ void Renderer::create_pipelines() {
     scene_pipeline_desc.pRootSignature = scene_root_signature_.Get();
     scene_pipeline_desc.VS = {scene_vs.data(), scene_vs.size()};
     scene_pipeline_desc.PS = {scene_ps.data(), scene_ps.size()};
-    for (UINT i = 0; i < rtv_targets_per_source_slot; ++i) {
+    for (UINT i = 0; i < targets_per_source_slot; ++i) {
         scene_pipeline_desc.BlendState.RenderTarget[i].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
     }
     scene_pipeline_desc.SampleMask = UINT_MAX;
@@ -1082,23 +1121,22 @@ void Renderer::create_pipelines() {
     scene_pipeline_desc.DepthStencilState.DepthEnable = FALSE;
     scene_pipeline_desc.DepthStencilState.StencilEnable = FALSE;
     scene_pipeline_desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-    scene_pipeline_desc.NumRenderTargets = rtv_targets_per_source_slot;
+    scene_pipeline_desc.NumRenderTargets = targets_per_source_slot;
     scene_pipeline_desc.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
     scene_pipeline_desc.RTVFormats[1] = DXGI_FORMAT_R32_FLOAT;
     scene_pipeline_desc.RTVFormats[2] = DXGI_FORMAT_R16G16_FLOAT;
-    scene_pipeline_desc.RTVFormats[3] = DXGI_FORMAT_R32_FLOAT;
     scene_pipeline_desc.SampleDesc.Count = 1;
     check(device_->CreateGraphicsPipelineState(&scene_pipeline_desc, IID_PPV_ARGS(&scene_pipeline_)), "Create scene graphics pipeline");
 
     D3D12_DESCRIPTOR_RANGE srv_range{};
     srv_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    srv_range.NumDescriptors = srv_targets_per_source_slot;
+    srv_range.NumDescriptors = targets_per_source_slot;
     srv_range.BaseShaderRegister = 0;
     srv_range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
 
     D3D12_DESCRIPTOR_RANGE prev_srv_range{};
     prev_srv_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    prev_srv_range.NumDescriptors = srv_targets_per_source_slot;
+    prev_srv_range.NumDescriptors = targets_per_source_slot;
     prev_srv_range.BaseShaderRegister = 3;
     prev_srv_range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
 
@@ -1165,11 +1203,15 @@ void Renderer::create_pipelines() {
         present_pipeline_desc.PS = {present_ps_variants[variant].data(), present_ps_variants[variant].size()};
         check(device_->CreateGraphicsPipelineState(&present_pipeline_desc, IID_PPV_ARGS(&present_pipelines_[variant])), "Create present graphics pipeline variant");
     }
-    present_pipeline_desc.BlendState.RenderTarget[1].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-    present_pipeline_desc.NumRenderTargets = 2;
+    for (UINT i = 1; i < 4U; ++i) {
+        present_pipeline_desc.BlendState.RenderTarget[i].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    }
+    present_pipeline_desc.NumRenderTargets = 4;
     present_pipeline_desc.RTVFormats[1] = DXGI_FORMAT_R8G8B8A8_UNORM;
-    present_pipeline_desc.PS = {present_dlss_hudless_ps.data(), present_dlss_hudless_ps.size()};
-    check(device_->CreateGraphicsPipelineState(&present_pipeline_desc, IID_PPV_ARGS(&present_dlss_hudless_pipeline_)), "Create present DLSS HUD-less pipeline");
+    present_pipeline_desc.RTVFormats[2] = DXGI_FORMAT_R32_FLOAT;
+    present_pipeline_desc.RTVFormats[3] = DXGI_FORMAT_R16G16_FLOAT;
+    present_pipeline_desc.PS = {present_dlss_inputs_ps.data(), present_dlss_inputs_ps.size()};
+    check(device_->CreateGraphicsPipelineState(&present_pipeline_desc, IID_PPV_ARGS(&present_dlss_inputs_pipeline_)), "Create present DLSS inputs pipeline");
 }
 
 void Renderer::create_constant_buffers() {
@@ -1357,13 +1399,29 @@ void Renderer::create_swap_chain_targets() {
         device_->CreateRenderTargetView(render_targets_[i].Get(), nullptr, handle);
         handle.ptr += render_target_descriptor_stride_;
     }
-    hudless_target_ = create_offscreen_texture(device_.Get(), viewport_width_, viewport_height_, DXGI_FORMAT_R8G8B8A8_UNORM, "Create HUD-less color target");
-    device_->CreateRenderTargetView(hudless_target_.Get(), nullptr, handle);
+}
+
+void Renderer::create_dlss_input_targets() {
+    if (!streamline_.capabilities().dlssg_supported) return;
+    auto handle = render_target_heap_->GetCPUDescriptorHandleForHeapStart();
+    handle.ptr += static_cast<SIZE_T>(swap_chain_buffer_count) * render_target_descriptor_stride_;
+    for (UINT slot_index = 0; slot_index < dlss_input_slot_count; ++slot_index) {
+        auto& slot = dlss_input_slots_[slot_index];
+        slot.hudless_target = create_offscreen_texture(device_.Get(), viewport_width_, viewport_height_, DXGI_FORMAT_R8G8B8A8_UNORM, "Create DLSS HUD-less target");
+        slot.clip_depth_target = create_offscreen_texture(device_.Get(), viewport_width_, viewport_height_, DXGI_FORMAT_R32_FLOAT, "Create DLSS warped clip-depth target");
+        slot.motion_target = create_offscreen_texture(device_.Get(), viewport_width_, viewport_height_, DXGI_FORMAT_R16G16_FLOAT, "Create DLSS warped motion target");
+        device_->CreateRenderTargetView(slot.hudless_target.Get(), nullptr, handle);
+        handle.ptr += render_target_descriptor_stride_;
+        device_->CreateRenderTargetView(slot.clip_depth_target.Get(), nullptr, handle);
+        handle.ptr += render_target_descriptor_stride_;
+        device_->CreateRenderTargetView(slot.motion_target.Get(), nullptr, handle);
+        handle.ptr += render_target_descriptor_stride_;
+    }
 }
 
 void Renderer::create_source_targets() {
     auto rtv = render_target_heap_->GetCPUDescriptorHandleForHeapStart();
-    rtv.ptr += static_cast<SIZE_T>(swap_chain_buffer_count + 1U) * render_target_descriptor_stride_;
+    rtv.ptr += static_cast<SIZE_T>(swap_chain_buffer_count + dlss_input_slot_count * rtv_targets_per_dlss_slot) * render_target_descriptor_stride_;
     auto srv = shader_resource_heap_->GetCPUDescriptorHandleForHeapStart();
 
     D3D12_SHADER_RESOURCE_VIEW_DESC srv_desc{};
@@ -1376,15 +1434,12 @@ void Renderer::create_source_targets() {
         slot.color_target = create_offscreen_texture(device_.Get(), viewport_width_, viewport_height_, DXGI_FORMAT_R16G16B16A16_FLOAT, "Create source color target");
         slot.depth_target = create_offscreen_texture(device_.Get(), viewport_width_, viewport_height_, DXGI_FORMAT_R32_FLOAT, "Create source depth target");
         slot.motion_target = create_offscreen_texture(device_.Get(), viewport_width_, viewport_height_, DXGI_FORMAT_R16G16_FLOAT, "Create source motion target");
-        slot.clip_depth_target = create_offscreen_texture(device_.Get(), viewport_width_, viewport_height_, DXGI_FORMAT_R32_FLOAT, "Create source clip-depth target");
 
         device_->CreateRenderTargetView(slot.color_target.Get(), nullptr, rtv);
         rtv.ptr += render_target_descriptor_stride_;
         device_->CreateRenderTargetView(slot.depth_target.Get(), nullptr, rtv);
         rtv.ptr += render_target_descriptor_stride_;
         device_->CreateRenderTargetView(slot.motion_target.Get(), nullptr, rtv);
-        rtv.ptr += render_target_descriptor_stride_;
-        device_->CreateRenderTargetView(slot.clip_depth_target.Get(), nullptr, rtv);
         rtv.ptr += render_target_descriptor_stride_;
 
         srv_desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
