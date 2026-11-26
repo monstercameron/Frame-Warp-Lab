@@ -170,6 +170,10 @@ public:
         bool auto_budget_enabled,
         bool cache_sharpen_enabled,
         bool coarse_fallback_enabled,
+        std::int32_t render_scale_pct,
+        std::int32_t render_width,
+        std::int32_t render_height,
+        frame_warp_lab::UpscaleFilter upscale_filter,
         std::int32_t fixed_dt_us,
         std::int64_t target_scene_budget_us,
         const frame_warp_lab::TileCacheStats& stats) {
@@ -179,6 +183,10 @@ public:
         std::atomic_ref<std::int32_t>(state_->auto_tile_budget_enabled).store(auto_budget_enabled ? 1 : 0, std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->cache_sharpen_enabled).store(cache_sharpen_enabled ? 1 : 0, std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->coarse_fallback_enabled).store(coarse_fallback_enabled ? 1 : 0, std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->render_scale_pct).store(render_scale_pct, std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->render_width).store(render_width, std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->render_height).store(render_height, std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->upscale_filter).store(static_cast<std::int32_t>(upscale_filter), std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->fixed_dt_us).store(fixed_dt_us, std::memory_order_release);
         std::atomic_ref<std::int64_t>(state_->last_target_scene_budget_us).store(target_scene_budget_us, std::memory_order_release);
         std::atomic_ref<std::uint32_t>(state_->last_tile_total_count).store(stats.total_tiles, std::memory_order_release);
@@ -675,6 +683,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         bool auto_tile_budget_enabled = false;
         bool cache_sharpen_enabled = false;
         bool coarse_fallback_enabled = false;
+        std::int32_t render_scale_pct = 100;
+        UINT render_override_width = 0;
+        UINT render_override_height = 0;
+        frame_warp_lab::UpscaleFilter upscale_filter = frame_warp_lab::UpscaleFilter::bilinear;
         std::int32_t fixed_dt_us = 0;
         std::int32_t pending_step_frames = 0;
         std::uint32_t pending_capture_tag = 0;
@@ -739,6 +751,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 auto_tile_budget_enabled,
                 cache_sharpen_enabled,
                 coarse_fallback_enabled,
+                render_scale_pct,
+                static_cast<std::int32_t>(renderer.render_width()),
+                static_cast<std::int32_t>(renderer.render_height()),
+                upscale_filter,
                 fixed_dt_us,
                 auto_tile_budget.last_target_scene_budget_us(),
                 renderer.latest_completed_source().tile_stats);
@@ -1043,6 +1059,33 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                     } else if (command == frame_warp_lab::ControlCommand::set_coarse_fallback) {
                         coarse_fallback_enabled = message.lParam != 0;
                         runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, coarse_fallback_enabled ? 1 : 0, frame_warp_lab::ConfigKey::coarse_fallback);
+                    } else if (command == frame_warp_lab::ControlCommand::set_render_scale) {
+                        render_scale_pct = std::clamp(static_cast<std::int32_t>(message.lParam), 25, 200);
+                        render_override_width = 0;
+                        render_override_height = 0;
+                        renderer.set_render_resolution(0, 0, render_scale_pct);
+                        cadence_counter = 0;
+                        runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, render_scale_pct, frame_warp_lab::ConfigKey::render_scale);
+                    } else if (command == frame_warp_lab::ControlCommand::set_render_size) {
+                        const auto packed = static_cast<std::uint32_t>(message.lParam);
+                        const UINT req_w = static_cast<UINT>(packed & 0xFFFFU);
+                        const UINT req_h = static_cast<UINT>((packed >> 16U) & 0xFFFFU);
+                        if (req_w == 0U || req_h == 0U) {
+                            render_override_width = 0;
+                            render_override_height = 0;
+                        } else {
+                            render_override_width = std::clamp<UINT>(req_w, 160U, 7680U);
+                            render_override_height = std::clamp<UINT>(req_h, 120U, 4320U);
+                        }
+                        renderer.set_render_resolution(render_override_width, render_override_height, render_scale_pct);
+                        cadence_counter = 0;
+                        runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, static_cast<std::int32_t>(renderer.render_width()), frame_warp_lab::ConfigKey::render_size);
+                    } else if (command == frame_warp_lab::ControlCommand::set_upscale_filter) {
+                        const auto raw = static_cast<std::int32_t>(message.lParam);
+                        if (raw >= 0 && raw <= 3) {
+                            upscale_filter = static_cast<frame_warp_lab::UpscaleFilter>(raw);
+                            runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, raw, frame_warp_lab::ConfigKey::upscale_filter);
+                        }
                     } else if (command == frame_warp_lab::ControlCommand::resize_window) {
                         const auto packed = static_cast<std::uint32_t>(message.lParam);
                         const LONG requested_width = static_cast<LONG>(packed & 0xFFFFU);
@@ -1359,6 +1402,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                     diagnostic_view,
                     synthesis_mode,
                     active_vrs_mode,
+                    upscale_filter,
                     instrumentation_level,
                     extrapolation_alpha,
                     has_previous_history,
@@ -1509,6 +1553,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 auto_tile_budget_enabled,
                 cache_sharpen_enabled,
                 coarse_fallback_enabled,
+                render_scale_pct,
+                static_cast<std::int32_t>(renderer.render_width()),
+                static_cast<std::int32_t>(renderer.render_height()),
+                upscale_filter,
                 fixed_dt_us,
                 auto_tile_budget.last_target_scene_budget_us(),
                 active_source.tile_stats);

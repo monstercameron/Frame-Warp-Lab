@@ -67,6 +67,72 @@ VertexOutput vertex_main(uint vertex_id : SV_VertexID) {
     return output;
 }
 
+float3 sample_catmull_rom_5tap_tex(Texture2D<float4> tex, float2 uv, float2 tex_size, float2 inv_tex_size) {
+    float2 sample_pos = uv * tex_size;
+    float2 tc1 = floor(sample_pos - 0.5) + 0.5;
+    float2 f = sample_pos - tc1;
+    float2 f2 = f * f;
+    float2 f3 = f2 * f;
+
+    float2 w0 = f2 - 0.5 * (f3 + f);
+    float2 w1 = 1.5 * f3 - 2.5 * f2 + 1.0;
+    float2 w3 = 0.5 * (f3 - f2);
+    float2 w2 = 1.0 - w0 - w1 - w3;
+
+    float2 w12 = w1 + w2;
+    float2 offset12 = w2 / max(w12, float2(1e-4, 1e-4));
+
+    float2 tc0 = saturate((tc1 - 1.0) * inv_tex_size);
+    float2 tc3 = saturate((tc1 + 2.0) * inv_tex_size);
+    float2 tc12 = saturate((tc1 + offset12) * inv_tex_size);
+
+    float3 s0 = tex.SampleLevel(linear_clamp_sampler, float2(tc12.x, tc0.y), 0).rgb;
+    float3 s1 = tex.SampleLevel(linear_clamp_sampler, float2(tc0.x, tc12.y), 0).rgb;
+    float3 s2 = tex.SampleLevel(linear_clamp_sampler, float2(tc12.x, tc12.y), 0).rgb;
+    float3 s3 = tex.SampleLevel(linear_clamp_sampler, float2(tc3.x, tc12.y), 0).rgb;
+    float3 s4 = tex.SampleLevel(linear_clamp_sampler, float2(tc12.x, tc3.y), 0).rgb;
+
+    float wt0 = w12.x * w0.y;
+    float wt1 = w0.x * w12.y;
+    float wt2 = w12.x * w12.y;
+    float wt3 = w3.x * w12.y;
+    float wt4 = w12.x * w3.y;
+    float3 bicubic = (s0 * wt0 + s1 * wt1 + s2 * wt2 + s3 * wt3 + s4 * wt4) / max(wt0 + wt1 + wt2 + wt3 + wt4, 1e-4);
+    float3 box_min = min(min(s0, s1), min(s2, min(s3, s4)));
+    float3 box_max = max(max(s0, s1), max(s2, max(s3, s4)));
+    return clamp(bicubic, box_min, box_max);
+}
+
+float3 sample_cas_upscale_tex(Texture2D<float4> tex, float2 uv, float2 tex_size, float2 inv_tex_size) {
+    float3 e = sample_catmull_rom_5tap_tex(tex, uv, tex_size, inv_tex_size);
+    float3 b = tex.SampleLevel(linear_clamp_sampler, saturate(uv + float2(0.0, -inv_tex_size.y)), 0).rgb;
+    float3 d = tex.SampleLevel(linear_clamp_sampler, saturate(uv + float2(-inv_tex_size.x, 0.0)), 0).rgb;
+    float3 f = tex.SampleLevel(linear_clamp_sampler, saturate(uv + float2(inv_tex_size.x, 0.0)), 0).rgb;
+    float3 h = tex.SampleLevel(linear_clamp_sampler, saturate(uv + float2(0.0, inv_tex_size.y)), 0).rgb;
+
+    float3 min_rgb = min(min(min(d, e), min(f, b)), h);
+    float3 max_rgb = max(max(max(d, e), max(f, b)), h);
+    float3 rcp_max = rcp(max(max_rgb, float3(1e-4, 1e-4, 1e-4)));
+    float3 amp = saturate(min(min_rgb, 1.0 - max_rgb) * rcp_max);
+    amp = sqrt(amp);
+    float3 w = amp * (-0.185);
+    float3 result = (e + (b + d + f + h) * w) * rcp(1.0 + 4.0 * w);
+    return clamp(result, min_rgb * 0.92, max_rgb * 1.06 + 0.01);
+}
+
+float3 sample_upscaled_color(Texture2D<float4> tex, float2 uv, float2 source_size, float2 source_texel_size, int filter_mode) {
+    if (filter_mode == 1) {
+        return sample_catmull_rom_5tap_tex(tex, uv, source_size, source_texel_size);
+    }
+    if (filter_mode == 2) {
+        return sample_cas_upscale_tex(tex, uv, source_size, source_texel_size);
+    }
+    if (filter_mode == 3) {
+        return tex.SampleLevel(point_clamp_sampler, uv, 0).rgb;
+    }
+    return tex.SampleLevel(linear_clamp_sampler, uv, 0).rgb;
+}
+
 #if PRESENT_VARIANT != 0
 
 bool project_world_to_camera_uv(
@@ -571,11 +637,14 @@ PresentOutput pixel_main(VertexOutput input) {
 float4 pixel_main(VertexOutput input) : SV_Target {
 #endif
     float2 viewport_size = viewport_and_flags.xy;
-    float2 texel_size = float2(source_camera_right_rcp_width.w, source_camera_up_rcp_height.w);
-    float2 uv = input.position.xy * texel_size;
+    float2 display_texel_size = float2(source_camera_right_rcp_width.w, source_camera_up_rcp_height.w);
+    float2 uv = input.position.xy * display_texel_size;
+    float2 source_size = max(float2(homography_col_x.w, homography_col_y.w), float2(1.0, 1.0));
+    float2 texel_size = rcp(source_size);
+    int upscale_filter = (int)(homography_col_z.w + 0.5);
 
 #if PRESENT_VARIANT == 0
-    float3 linear_color = scene_color_texture.SampleLevel(linear_clamp_sampler, uv, 0).rgb;
+    float3 linear_color = sample_upscaled_color(scene_color_texture, uv, source_size, texel_size, upscale_filter);
     float3 output_color = pow(saturate(linear_color), 1.0 / 2.2);
     return float4(composite_overlays(input.position.xy, viewport_size, output_color), 1.0);
 #elif PRESENT_VARIANT == 1
@@ -589,7 +658,7 @@ float4 pixel_main(VertexOutput input) : SV_Target {
             reprojection_stats.InterlockedAdd(0, invalid_wave, previous_invalid);
         }
     }
-    float3 output_color = pow(saturate(scene_color_texture.SampleLevel(linear_clamp_sampler, sample_uv, 0).rgb), 1.0 / 2.2);
+    float3 output_color = pow(saturate(sample_upscaled_color(scene_color_texture, sample_uv, source_size, texel_size, upscale_filter)), 1.0 / 2.2);
     return float4(composite_overlays(input.position.xy, viewport_size, output_color), 1.0);
 #elif PRESENT_VARIANT == 2 || PRESENT_VARIANT == 3
     ReprojectionSample reproj = evaluate_reprojection_camera(
@@ -617,7 +686,7 @@ float4 pixel_main(VertexOutput input) : SV_Target {
     float unused_bg_depth = 1000.0;
     float2 unused_bg_uv = sample_uv;
     float3 output_color = reproj.valid
-        ? pow(saturate(scene_color_texture.SampleLevel(linear_clamp_sampler, sample_uv, 0).rgb), 1.0 / 2.2)
+        ? pow(saturate(sample_upscaled_color(scene_color_texture, sample_uv, source_size, texel_size, upscale_filter)), 1.0 / 2.2)
         : sample_conservative_hole_fill(sample_uv, texel_size, unused_bg_depth, unused_bg_uv);
     return float4(composite_overlays(input.position.xy, viewport_size, output_color), 1.0);
 #else
@@ -794,8 +863,8 @@ float4 pixel_main(VertexOutput input) : SV_Target {
         output_color = float3(saturate(scaled.x * 0.5 + 0.5), saturate(scaled.y * 0.5 + 0.5), saturate(length(scaled)));
     } else {
         float3 linear_color = recovered_from_history
-            ? prev_color_texture.SampleLevel(linear_clamp_sampler, sample_uv, 0).rgb
-            : scene_color_texture.SampleLevel(linear_clamp_sampler, sample_uv, 0).rgb;
+            ? sample_upscaled_color(prev_color_texture, sample_uv, source_size, texel_size, upscale_filter)
+            : sample_upscaled_color(scene_color_texture, sample_uv, source_size, texel_size, upscale_filter);
         output_color = pow(saturate(linear_color), 1.0 / 2.2);
         if (synthesis_active && recovered_from_history && diagnostic_view == 3) {
             output_color = float3(0.08, 0.95, 0.85);
@@ -837,7 +906,8 @@ float4 pixel_main(VertexOutput input) : SV_Target {
             }
         }
         if (diagnostic_view == 5) {
-            uint2 tile_coord = (uint2)floor(input.position.xy / 16.0);
+            float2 src_pixel = uv * source_size;
+            uint2 tile_coord = (uint2)floor(src_pixel / 16.0);
             uint tile_state = scene_tile_map_texture.Load(int3(tile_coord, 0)) & 3u;
             float3 tile_tint = float3(0.16, 0.84, 0.42);
             if (tile_state == 1u) {
@@ -848,13 +918,14 @@ float4 pixel_main(VertexOutput input) : SV_Target {
                 tile_tint = float3(0.96, 0.18, 0.82);
             }
             output_color = lerp(output_color, tile_tint, 0.46);
-            float2 in_tile = fmod(input.position.xy, 16.0);
+            float2 in_tile = fmod(src_pixel, 16.0);
             if (in_tile.x < 1.0 || in_tile.y < 1.0) {
                 output_color = lerp(output_color, float3(0.05, 0.07, 0.09), 0.55);
             }
         }
         if (diagnostic_view == 6) {
-            uint2 tile_coord = (uint2)floor(input.position.xy / 16.0);
+            float2 src_pixel = uv * source_size;
+            uint2 tile_coord = (uint2)floor(src_pixel / 16.0);
             uint packed_word = scene_tile_map_texture.Load(int3(tile_coord, 0));
             float prio = float((packed_word >> 2u) & 63u) * (1.0 / 63.0);
             float3 heat = prio < 0.33
@@ -863,7 +934,7 @@ float4 pixel_main(VertexOutput input) : SV_Target {
                     ? lerp(float3(0.10, 0.78, 0.88), float3(0.98, 0.88, 0.16), (prio - 0.33) * 3.0)
                     : lerp(float3(0.98, 0.88, 0.16), float3(1.0, 0.14, 0.12), (prio - 0.66) * 3.0));
             output_color = lerp(output_color, heat, 0.56);
-            float2 in_tile = fmod(input.position.xy, 16.0);
+            float2 in_tile = fmod(src_pixel, 16.0);
             if (in_tile.x < 1.0 || in_tile.y < 1.0) {
                 output_color = lerp(output_color, float3(0.05, 0.07, 0.09), 0.50);
             }

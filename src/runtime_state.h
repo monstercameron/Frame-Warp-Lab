@@ -10,7 +10,7 @@
 namespace frame_warp_lab {
 
 inline constexpr wchar_t window_class_name[] = L"FrameWarpLabWindow";
-inline constexpr std::uint32_t runtime_state_version = 21;
+inline constexpr std::uint32_t runtime_state_version = 22;
 inline constexpr std::size_t runtime_event_capacity = 64;
 inline constexpr std::size_t runtime_frame_trace_capacity = 256;
 inline constexpr std::size_t hud_graph_sample_count = 128;
@@ -51,6 +51,16 @@ enum class ControlCommand : WPARAM {
     step_frames = 27,
     set_coarse_fallback = 28,
     resize_window = 29,
+    set_render_scale = 30,
+    set_render_size = 31,
+    set_upscale_filter = 32,
+};
+
+enum class UpscaleFilter : std::int32_t {
+    bilinear = 0,
+    catmull_rom = 1,
+    cas = 2,
+    nearest = 3,
 };
 
 enum class TilePolicy : std::int32_t {
@@ -172,6 +182,9 @@ enum class ConfigKey : std::int32_t {
     cache_sharpen = 22,
     fixed_dt_us = 23,
     coarse_fallback = 24,
+    render_scale = 25,
+    render_size = 26,
+    upscale_filter = 27,
 };
 
 enum class RuntimeEventType : std::int32_t {
@@ -329,6 +342,10 @@ struct RuntimeState {
     std::int32_t auto_tile_budget_enabled;
     std::int32_t cache_sharpen_enabled;
     std::int32_t coarse_fallback_enabled;
+    std::int32_t render_scale_pct;
+    std::int32_t render_width;
+    std::int32_t render_height;
+    std::int32_t upscale_filter;
     std::int32_t fixed_dt_us;
     std::int64_t last_target_scene_budget_us;
     std::uint32_t last_tile_total_count;
@@ -417,6 +434,19 @@ inline const char* config_key_name(std::int32_t key) {
         case ConfigKey::cache_sharpen: return "cache_sharpen";
         case ConfigKey::fixed_dt_us: return "fixed_dt_us";
         case ConfigKey::coarse_fallback: return "coarse_fallback";
+        case ConfigKey::render_scale: return "render_scale";
+        case ConfigKey::render_size: return "render_size";
+        case ConfigKey::upscale_filter: return "upscale_filter";
+        default: return "unknown";
+    }
+}
+
+inline const char* upscale_filter_name(std::int32_t filter) {
+    switch (static_cast<UpscaleFilter>(filter)) {
+        case UpscaleFilter::bilinear: return "bilinear";
+        case UpscaleFilter::catmull_rom: return "catmull_rom";
+        case UpscaleFilter::cas: return "cas";
+        case UpscaleFilter::nearest: return "nearest";
         default: return "unknown";
     }
 }

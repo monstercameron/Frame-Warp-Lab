@@ -358,6 +358,7 @@ Renderer::Renderer(HWND window)
 
     viewport_width_ = initial_width;
     viewport_height_ = initial_height;
+    resolve_render_dimensions(render_width_, render_height_);
     create_swap_chain_targets();
     create_dlss_input_targets();
     create_source_targets();
@@ -554,7 +555,7 @@ bool Renderer::submit_scene_async(
     std::uint64_t frame_id,
     LatencyMonitor& latency_monitor,
     bool wait_for_completion) {
-    if (viewport_width_ == 0 || viewport_height_ == 0) return false;
+    if (viewport_width_ == 0 || viewport_height_ == 0 || render_width_ == 0 || render_height_ == 0) return false;
     poll_completed_scenes();
     if (has_scene_in_flight()) return false;
 
@@ -586,8 +587,8 @@ bool Renderer::submit_scene_async(
         ? source_slots_[static_cast<std::size_t>(prev_slot_index)].snapshot.ball_center
         : snapshot.previous_ball_center;
 
-    const UINT tiles_x = std::max<UINT>(1U, (viewport_width_ + 15U) / 16U);
-    const UINT tiles_y = std::max<UINT>(1U, (viewport_height_ + 15U) / 16U);
+    const UINT tiles_x = std::max<UINT>(1U, (render_width_ + 15U) / 16U);
+    const UINT tiles_y = std::max<UINT>(1U, (render_height_ + 15U) / 16U);
     const UINT total_tiles = tiles_x * tiles_y;
     const std::int32_t clamped_budget_pct = std::clamp(tile_budget_pct, 5, 100);
     const UINT tile_budget = (clamped_budget_pct >= 100)
@@ -595,8 +596,8 @@ bool Renderer::submit_scene_async(
         : std::max<UINT>(1U, (total_tiles * static_cast<UINT>(clamped_budget_pct) + 99U) / 100U);
 
     const float aspect_ratio = static_cast<float>(viewport_width_) / static_cast<float>(viewport_height_);
-    const float rcp_width = 1.0f / static_cast<float>(viewport_width_);
-    const float rcp_height = 1.0f / static_cast<float>(viewport_height_);
+    const float rcp_width = 1.0f / static_cast<float>(render_width_);
+    const float rcp_height = 1.0f / static_cast<float>(render_height_);
     const std::size_t constant_offset = static_cast<std::size_t>(slot_index) * scene_constant_buffer_stride;
     auto* scene_constants = reinterpret_cast<SceneConstantsData*>(mapped_scene_constants_ + constant_offset);
     const float tan_y = snapshot.camera.tan_half_fov_y;
@@ -623,8 +624,8 @@ bool Renderer::submit_scene_async(
         scene_constants->cache_params,
         can_use_prev_cache ? 1U : 0U,
         16U,
-        viewport_width_,
-        viewport_height_);
+        render_width_,
+        render_height_);
     simd::store_uint4(
         scene_constants->policy_params,
         tile_policy == TilePolicy::priority_stbn ? 1U : 0U,
@@ -733,8 +734,8 @@ bool Renderer::submit_scene_async(
         scene_command_list_->ResourceBarrier(1, &args_restore_uav);
         slot.used_selective_tiles = true;
     } else {
-        const D3D12_VIEWPORT viewport{0.0f, 0.0f, static_cast<float>(viewport_width_), static_cast<float>(viewport_height_), 0.0f, 1.0f};
-        const D3D12_RECT scissor{0, 0, static_cast<LONG>(viewport_width_), static_cast<LONG>(viewport_height_)};
+        const D3D12_VIEWPORT viewport{0.0f, 0.0f, static_cast<float>(render_width_), static_cast<float>(render_height_), 0.0f, 1.0f};
+        const D3D12_RECT scissor{0, 0, static_cast<LONG>(render_width_), static_cast<LONG>(render_height_)};
         scene_command_list_->RSSetViewports(1, &viewport);
         scene_command_list_->RSSetScissorRects(1, &scissor);
         scene_command_list_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -972,9 +973,9 @@ FrameExecutionMetrics Renderer::present_from_source(const PresentRequest& reques
     const Float3 tgt_col_x = scale3(request.target_camera.right, target_tan_x);
     const Float3 tgt_col_y = scale3(request.target_camera.up, target_tan_y);
     const Float3 tgt_col_z = request.target_camera.forward;
-    simd::store_float4(present_constants->homography_col_x, dot3(tgt_col_x, src_proj_x), dot3(tgt_col_x, src_proj_y), dot3(tgt_col_x, src_proj_z), 0.0f);
-    simd::store_float4(present_constants->homography_col_y, dot3(tgt_col_y, src_proj_x), dot3(tgt_col_y, src_proj_y), dot3(tgt_col_y, src_proj_z), 0.0f);
-    simd::store_float4(present_constants->homography_col_z, dot3(tgt_col_z, src_proj_x), dot3(tgt_col_z, src_proj_y), dot3(tgt_col_z, src_proj_z), 0.0f);
+    simd::store_float4(present_constants->homography_col_x, dot3(tgt_col_x, src_proj_x), dot3(tgt_col_x, src_proj_y), dot3(tgt_col_x, src_proj_z), static_cast<float>(render_width_));
+    simd::store_float4(present_constants->homography_col_y, dot3(tgt_col_y, src_proj_x), dot3(tgt_col_y, src_proj_y), dot3(tgt_col_y, src_proj_z), static_cast<float>(render_height_));
+    simd::store_float4(present_constants->homography_col_z, dot3(tgt_col_z, src_proj_x), dot3(tgt_col_z, src_proj_y), dot3(tgt_col_z, src_proj_z), static_cast<float>(static_cast<std::int32_t>(request.upscale_filter)));
     const float prev_pres_tan_y = prev_presented_camera.tan_half_fov_y;
     const float prev_pres_tan_x = prev_pres_tan_y * aspect_ratio;
     write_float4(present_constants->prev_presented_camera_position_tan_y, prev_presented_camera.position, prev_pres_tan_y);
@@ -1321,6 +1322,7 @@ void Renderer::resize(UINT width, UINT height) {
     check(swap_chain_->ResizeBuffers(swap_chain_buffer_count, width, height, DXGI_FORMAT_R8G8B8A8_UNORM, swap_chain_flags_), "Resize swap chain");
     viewport_width_ = width;
     viewport_height_ = height;
+    resolve_render_dimensions(render_width_, render_height_);
     buffer_fence_values_.fill(0);
     buffer_display_frame_ids_.fill(-1);
     buffer_source_frame_ids_.fill(-1);
@@ -1333,6 +1335,63 @@ void Renderer::resize(UINT width, UINT height) {
     capture_readback_row_pitch_ = 0;
     create_swap_chain_targets();
     create_dlss_input_targets();
+    create_source_targets();
+    create_vrs_resources();
+}
+
+void Renderer::resolve_render_dimensions(UINT& out_width, UINT& out_height) const {
+    if (viewport_width_ == 0 || viewport_height_ == 0) {
+        out_width = 0;
+        out_height = 0;
+        return;
+    }
+    if (render_override_width_ > 0 && render_override_height_ > 0) {
+        out_width = std::clamp<UINT>(render_override_width_, 160U, 7680U);
+        out_height = std::clamp<UINT>(render_override_height_, 120U, 4320U);
+        return;
+    }
+    if (render_scale_pct_ == 100) {
+        out_width = viewport_width_;
+        out_height = viewport_height_;
+        return;
+    }
+    const UINT raw_w = static_cast<UINT>(std::lround(static_cast<double>(viewport_width_) * static_cast<double>(render_scale_pct_) / 100.0));
+    const UINT raw_h = static_cast<UINT>(std::lround(static_cast<double>(viewport_height_) * static_cast<double>(render_scale_pct_) / 100.0));
+    out_width = std::clamp<UINT>(raw_w & ~1U, 160U, 7680U);
+    out_height = std::clamp<UINT>(raw_h & ~1U, 120U, 4320U);
+}
+
+void Renderer::set_render_resolution(UINT override_width, UINT override_height, std::int32_t scale_pct) {
+    render_override_width_ = override_width;
+    render_override_height_ = override_height;
+    render_scale_pct_ = std::clamp(scale_pct, 25, 200);
+    UINT new_width = 0;
+    UINT new_height = 0;
+    resolve_render_dimensions(new_width, new_height);
+    if (new_width == 0 || new_height == 0 || (new_width == render_width_ && new_height == render_height_)) {
+        return;
+    }
+    flush();
+    for (auto& slot : source_slots_) {
+        slot.color_target.Reset();
+        slot.depth_target.Reset();
+        slot.motion_target.Reset();
+        slot.vis_target.Reset();
+        slot.tile_map_target.Reset();
+        slot.tile_stats = TileCacheStats{};
+        slot.used_selective_tiles = false;
+        slot.in_flight = false;
+        slot.valid = false;
+        slot.scene_fence_value = 0;
+        slot.last_read_present_fence = 0;
+        slot.scene_gpu_us = -1;
+    }
+    latest_completed_slot_ = -1;
+    previous_completed_slot_ = -1;
+    has_previous_presented_camera_ = false;
+    vrs_image_.Reset();
+    render_width_ = new_width;
+    render_height_ = new_height;
     create_source_targets();
     create_vrs_resources();
 }
@@ -1728,12 +1787,12 @@ void Renderer::create_selective_tile_resources() {
 
 void Renderer::create_vrs_resources() {
     vrs_image_.Reset();
-    if (vrs_tier_ < static_cast<std::int32_t>(D3D12_VARIABLE_SHADING_RATE_TIER_2) || vrs_tile_size_px_ <= 0 || viewport_width_ == 0 || viewport_height_ == 0) {
+    if (vrs_tier_ < static_cast<std::int32_t>(D3D12_VARIABLE_SHADING_RATE_TIER_2) || vrs_tile_size_px_ <= 0 || render_width_ == 0 || render_height_ == 0) {
         return;
     }
     const UINT tile_size = static_cast<UINT>(vrs_tile_size_px_);
-    const UINT image_width = std::max<UINT>(1U, (viewport_width_ + tile_size - 1U) / tile_size);
-    const UINT image_height = std::max<UINT>(1U, (viewport_height_ + tile_size - 1U) / tile_size);
+    const UINT image_width = std::max<UINT>(1U, (render_width_ + tile_size - 1U) / tile_size);
+    const UINT image_height = std::max<UINT>(1U, (render_height_ + tile_size - 1U) / tile_size);
 
     D3D12_HEAP_PROPERTIES default_heap{};
     default_heap.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -1849,8 +1908,8 @@ void Renderer::create_source_targets() {
     tile_map_srv.ptr += static_cast<SIZE_T>(source_slot_count * targets_per_source_slot) * shader_resource_descriptor_stride_;
     auto compute_cpu = scene_compute_heap_->GetCPUDescriptorHandleForHeapStart();
 
-    const UINT tiles_x = std::max<UINT>(1U, (viewport_width_ + 15U) / 16U);
-    const UINT tiles_y = std::max<UINT>(1U, (viewport_height_ + 15U) / 16U);
+    const UINT tiles_x = std::max<UINT>(1U, (render_width_ + 15U) / 16U);
+    const UINT tiles_y = std::max<UINT>(1U, (render_height_ + 15U) / 16U);
     const D3D12_RESOURCE_FLAGS rt_uav_flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
 
     D3D12_SHADER_RESOURCE_VIEW_DESC srv_desc{};
@@ -1864,10 +1923,10 @@ void Renderer::create_source_targets() {
 
     for (UINT slot_index = 0; slot_index < source_slot_count; ++slot_index) {
         auto& slot = source_slots_[slot_index];
-        slot.color_target = create_offscreen_texture(device_.Get(), viewport_width_, viewport_height_, DXGI_FORMAT_R16G16B16A16_FLOAT, "Create source color target", rt_uav_flags, source_slot_readable_state);
-        slot.depth_target = create_offscreen_texture(device_.Get(), viewport_width_, viewport_height_, DXGI_FORMAT_R32_FLOAT, "Create source depth target", rt_uav_flags, source_slot_readable_state);
-        slot.motion_target = create_offscreen_texture(device_.Get(), viewport_width_, viewport_height_, DXGI_FORMAT_R16G16_FLOAT, "Create source motion target", rt_uav_flags, source_slot_readable_state);
-        slot.vis_target = create_offscreen_texture(device_.Get(), viewport_width_, viewport_height_, DXGI_FORMAT_R32_UINT, "Create source visibility target", D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, source_slot_readable_state);
+        slot.color_target = create_offscreen_texture(device_.Get(), render_width_, render_height_, DXGI_FORMAT_R16G16B16A16_FLOAT, "Create source color target", rt_uav_flags, source_slot_readable_state);
+        slot.depth_target = create_offscreen_texture(device_.Get(), render_width_, render_height_, DXGI_FORMAT_R32_FLOAT, "Create source depth target", rt_uav_flags, source_slot_readable_state);
+        slot.motion_target = create_offscreen_texture(device_.Get(), render_width_, render_height_, DXGI_FORMAT_R16G16_FLOAT, "Create source motion target", rt_uav_flags, source_slot_readable_state);
+        slot.vis_target = create_offscreen_texture(device_.Get(), render_width_, render_height_, DXGI_FORMAT_R32_UINT, "Create source visibility target", D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, source_slot_readable_state);
         slot.tile_map_target = create_offscreen_texture(device_.Get(), tiles_x, tiles_y, DXGI_FORMAT_R8_UINT, "Create source tile map target", D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, source_slot_readable_state);
 
         device_->CreateRenderTargetView(slot.color_target.Get(), nullptr, rtv);

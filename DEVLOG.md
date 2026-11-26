@@ -1,5 +1,27 @@
 # Development log
 
+## v0.23.0 — Decoupled offscreen render resolution, spatial upscaling filters (`bilinear`/`catmull_rom`/`cas`/`nearest`), and true `1440p`/`4K` scaling proof
+
+- Decoupled internal offscreen scene rendering (`render_width_ × render_height_`) from swap-chain display output (`viewport_width_ × viewport_height_`) across the entire D3D12 scene, VRS, PAR selective-tile, and presentation pipelines (`shaders/present.hlsl`, `src/runtime_state.h`, `src/renderer.h`, `src/renderer.cpp`, `src/main.cpp`, `src/cli.cpp`, `CMakeLists.txt`, `scripts/run_upscaling_research.ps1`):
+  1. **Decoupled Offscreen Render Targets (`Renderer::set_render_resolution`)**: `SourceSlot` targets (`color`, `depth`, `motion`, `vis`, `tile_map`) and `vrs_image_` now allocate at `render_width_ × render_height_` (`160×120` up to `7680×4320`), completely independent of the swap-chain backbuffer and DLSS-G input targets (`viewport_width_ × viewport_height_`). Added CLI `set <pid> render_scale 25..200` and exact override `render_size <pid> <width> <height>` (`0 0` resets to `render_scale`), exposed under `status.offscreen_render` (`RuntimeState` v22 / CLI schema v17).
+  2. **Selectable GPU Upscaling Filters in `shaders/present.hlsl` (`set <pid> upscale_filter bilinear|catmull_rom|cas|nearest`)**: added `sample_upscaled_color` across all 5 specialized presentation variants + DLSS-G inputs, using source-texel-aware `5-tap clamped Catmull-Rom` and `CAS` (Contrast-Adaptive Sharpening), updated depth/motion neighbor probes to step by `1 / source_size`, and fixed `view=tiles` / `view=priority` tile-map lookup to scale by `uv * source_size` at arbitrary internal resolutions.
+  3. **Runnable Upscaling & True `1440p`/`4K` Research Script (`scripts/run_upscaling_research.ps1`)**: compares spatial upscaling (`50%`, `67%`, `75%`, `bilinear`/`catmull_rom`/`cas`), Hardware VRS Tier 2, Native `1080p` `PAR 15%`, and Stacked `67% + PAR 15%` against `1920×1080` Ground Truth, and benchmarks true offscreen `2560×1440` and `3840×2160` (`4K`).
+- Verified zero code comments, zero-warning ARM64 Release + Debug builds (all 12 DXIL SM 6.0 shaders), Debug D3D12 Debug Layer validation (`50%` CAS `632×340` + PAR `view=tiles` and true `4K` `3840×2160` `32,400` tiles, `0` D3D12 errors), and full Release research sweeps on **NVIDIA RTX Spark N1X**:
+  - **1. Spatial Upscaling vs. VRS vs. Progressive Raster (`PAR 15%`) @ `1080p` Display Output (`Frame #98` @ 240 Hz, `stress=32`)**:
+    - **`occlusion_sweep`** (vs. `6,938 µs` `1080p` GT):
+      - `50%` (`960×540`) `bilinear`: `1,620 µs`, **`34.21 dB`**, `0.9526` SSIM, `P99=29`.
+      - `50%` (`960×540`) `catmull_rom`: `1,607 µs`, **`34.26 dB`**, `0.9561` SSIM, `97.9%` sharp.
+      - `67%` (`1286×724`) `catmull_rom`: `2,875 µs`, **`35.62 dB`**, `0.9687` SSIM, `P99=24`.
+      - `VRS Tier 2` (`1080p`): `2,079 µs`, **`34.53 dB`**, `0.9641` SSIM, `P99=15`.
+      - **`PAR 15%` Full Native `1080p`**: **`970 µs` (`7.15×` faster than GT, `2.96×` faster than `67%` upscale, `1.66×` faster than `50%` upscale!)**, **`37.91 dB` (`+2.29 dB` over `67%` upscale, `+3.65 dB` over `50%` upscale, `+3.38 dB` over VRS!)**, **`0.9810` SSIM**, **`102.9%` sharp**, **`P99=15`**.
+      - **`STACKED 67% CAS + PAR 15%`**: **`453 µs` (`15.3×` faster than GT!)**, `33.83 dB`, `0.9530` SSIM.
+    - **`fast_pan`** (vs. `6,544 µs` `1080p` GT): **`PAR 15%` Full Native `1080p`** ran in **`905 µs` (`7.23×` faster)** at **`37.42 dB` / `0.9769` SSIM / `101.1%` sharp / `P99=19`** — beating `67%` upscale (`35.86 dB` @ `2,677 µs`), `50%` upscale (`34.00 dB` @ `1,536 µs`), and VRS Tier 2 (`33.43 dB` @ `2,012 µs`).
+    - Honest filter note: `cas` gain `-0.185` oversharpened edges to `130–137%`, lowering PSNR by `~1.0 dB` relative to `catmull_rom`; temporal accumulation (`TAAU` / `DLSS-SR`) is the next logical upscaling comparison.
+  - **2. True Offscreen `1440p` (`2560×1440`) & `4K` (`3840×2160`) Scaling (`occlusion_sweep`, `120 Hz`)**:
+    - **`1440p`**: `stress=32` Native **`13,653 µs`** → VRS `4,835 µs` → **PAR `15%` `2,853 µs` (`4.79×` faster, `0` misses)**; `stress=64` Native **`22,833 µs`** → VRS `7,844 µs` → **PAR `15%` `4,584 µs` (`4.98×` faster, well inside `8.33 ms` `120 Hz` budget)**.
+    - **`4K` (`3840×2160`, `32,400` tiles)**: `stress=32` Native **`27,287 µs`** → VRS `9,782 µs` (misses `120 Hz`) → **PAR `15%` `6,649 µs` (`4.10×` faster — the ONLY mode under `8.33 ms` `120 Hz` at `4K`!)**; `stress=64` Native **`54,031 µs` (`18.5 FPS`, `20` misses)** → VRS `18,857 µs` → **PAR `15%` `11,215 µs` (`4.82×` faster, `0` misses)**.
+    - `stress=0` fixed visibility floor: `1440p` `990 µs` vs Native `662 µs` (`1.50×`), `4K` `2,402 µs` vs Native `1,627 µs` (`1.48×`).
+
 ## v0.22.0 — Unshaded cache provenance fix (`age=255`), 4×4 coarse-to-fine camera-cut recovery, and CLI resize / 1080p scaling envelope
 
 - Fixed a subtle temporal-cache provenance bug and added coarse-to-fine progressive fallback + programmatic window resizing (`shaders/selective_tiles.hlsl`, `src/runtime_state.h`, `src/renderer.h`, `src/renderer.cpp`, `src/main.cpp`, `src/cli.cpp`, `CMakeLists.txt`, `scripts/run_cut_and_scaling_experiments.ps1`):

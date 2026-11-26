@@ -90,6 +90,7 @@ struct PresentRequest {
     DiagnosticView diagnostic_view;
     SynthesisMode synthesis_mode;
     VrsMode active_vrs_mode;
+    UpscaleFilter upscale_filter;
     InstrumentationLevel instrumentation_level;
     float extrapolation_alpha;
     bool has_previous_history;
@@ -136,6 +137,9 @@ public:
     void invalidate_source_history();
     FrameExecutionMetrics present_from_source(const PresentRequest& request, LatencyMonitor& latency_monitor, FramePacer& pacer);
     void resize(UINT width, UINT height);
+    void set_render_resolution(UINT override_width, UINT override_height, std::int32_t scale_pct);
+    UINT render_width() const { return render_width_; }
+    UINT render_height() const { return render_height_; }
     void flush();
     bool gpu_timing_available() const { return present_timestamp_frequency_ > 0; }
     bool allow_tearing_enabled() const { return allow_tearing_supported_; }
@@ -211,6 +215,7 @@ private:
     void create_swap_chain_targets();
     void create_dlss_input_targets();
     void create_source_targets();
+    void resolve_render_dimensions(UINT& out_width, UINT& out_height) const;
     std::int32_t find_available_source_slot() const;
     UINT acquire_dlss_input_slot();
     static constexpr DWORD gpu_wait_timeout_ms = 5000;
@@ -301,6 +306,11 @@ private:
     UINT shader_resource_descriptor_stride_ = 0;
     UINT viewport_width_ = 0;
     UINT viewport_height_ = 0;
+    UINT render_width_ = 0;
+    UINT render_height_ = 0;
+    UINT render_override_width_ = 0;
+    UINT render_override_height_ = 0;
+    std::int32_t render_scale_pct_ = 100;
 };
 
 }
