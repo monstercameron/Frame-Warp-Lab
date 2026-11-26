@@ -94,6 +94,7 @@ SceneOutput pixel_main(VertexOutput input) {
 
     float scene_time = previous_camera_forward_unused.w;
     uint packed_flags = (uint)(previous_ball_center_unused.w + 0.5);
+    uint opaque_flags = packed_flags & ~128u;
     float3 color = ((packed_flags & 256u) != 0u)
         ? pbr_aces_filmic(pbr_env_cubemap.SampleLevel(linear_clamp_sampler, direction, 0.0).rgb * 0.45)
         : float3(0.035, 0.055, 0.07);
@@ -110,7 +111,7 @@ SceneOutput pixel_main(VertexOutput input) {
             material,
             ball_center,
             scene_time,
-            packed_flags,
+            opaque_flags,
             linear_clamp_sampler);
         linear_view_depth = max(dot(world_position - camera_position, camera_forward), 0.01);
         if (previous_camera_up_cut.w < 0.5) {
@@ -121,8 +122,6 @@ SceneOutput pixel_main(VertexOutput input) {
             float2 previous_uv = project_to_previous_uv(previous_world_position);
             motion_vector = previous_uv - current_uv;
         }
-    } else if ((packed_flags & 128u) != 0u) {
-        color = apply_transparent_glass(color, camera_position, direction, 36.0, scene_time);
     }
 
     int stress_level = (int)(ball_center_stress.w + 0.5);
@@ -135,4 +134,30 @@ SceneOutput pixel_main(VertexOutput input) {
     output.depth = linear_view_depth;
     output.motion = motion_vector;
     return output;
+}
+
+Texture2D<float> corridor_opaque_depth_tex : register(t1);
+
+float4 corridor_transparent_ps_main(VertexOutput input) : SV_Target0 {
+    float2 cur_uv = input.position.xy * float2(camera_up_rcp_width.w, camera_forward_rcp_height.w);
+    float2 ndc = float2(cur_uv.x * 2.0 - 1.0, 1.0 - cur_uv.y * 2.0);
+    float3 cam_pos = camera_position_tan_y.xyz;
+    float3 cam_r = camera_right_tan_x.xyz;
+    float3 cam_u = camera_up_rcp_width.xyz;
+    float3 cam_f = camera_forward_rcp_height.xyz;
+    float3 ray_dir = normalize(cam_r * (ndc.x * camera_right_tan_x.w) + cam_u * (ndc.y * camera_position_tan_y.w) + cam_f);
+    if (abs(ray_dir.z) < 1e-4) discard;
+    float t_glass = (8.6 - cam_pos.z) / ray_dir.z;
+    float opaque_view_z = corridor_opaque_depth_tex.Load(int3(int2(input.position.xy), 0));
+    float ray_cos = max(dot(ray_dir, cam_f), 1e-4);
+    float opaque_dist = opaque_view_z / ray_cos;
+    if (t_glass <= 0.08 || t_glass >= opaque_dist) discard;
+    float3 hit = cam_pos + ray_dir * t_glass;
+    if (abs(hit.x) > 2.3 || hit.y < 0.15 || hit.y > 3.05) discard;
+    float scene_time = previous_camera_forward_unused.w;
+    float stripe = step(0.82, frac((hit.x + hit.y) * 2.5 + scene_time * 0.25));
+    float fresnel = pow(1.0 - saturate(abs(ray_dir.z)), 3.0);
+    float3 glass_col = lerp(float3(0.18, 0.62, 0.78), float3(0.88, 0.96, 1.0), saturate(stripe * 0.55 + fresnel * 0.75));
+    float alpha = saturate(0.36 + stripe * 0.20 + fresnel * 0.30);
+    return float4(glass_col, alpha);
 }

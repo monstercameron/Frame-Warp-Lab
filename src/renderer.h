@@ -142,6 +142,7 @@ public:
         bool subtile_interleave_enabled,
         bool reactive_invalidation_enabled,
         bool shadow_delta_invalidation_enabled,
+        bool forward_transparency_enabled,
         std::uint64_t frame_id,
         LatencyMonitor& latency_monitor,
         bool wait_for_completion,
@@ -202,6 +203,7 @@ private:
 
     struct SourceSlot {
         Microsoft::WRL::ComPtr<ID3D12Resource> color_target;
+        Microsoft::WRL::ComPtr<ID3D12Resource> opaque_cache_target;
         Microsoft::WRL::ComPtr<ID3D12Resource> depth_target;
         Microsoft::WRL::ComPtr<ID3D12Resource> motion_target;
         Microsoft::WRL::ComPtr<ID3D12Resource> vis_target;
@@ -272,6 +274,8 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Fence> scene_fence_;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> scene_root_signature_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> scene_pipeline_;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> corridor_transparent_root_signature_;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> corridor_transparent_pipeline_;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> tile_compute_root_signature_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> tile_vis_classify_pipeline_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> tile_admit_pipeline_;
@@ -287,6 +291,8 @@ private:
     Microsoft::WRL::ComPtr<ID3D12RootSignature> range_root_signature_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> range_pipeline_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> range_vis_pipeline_;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> range_transparent_root_signature_;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> range_transparent_pipeline_;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> range_vis_compute_root_signature_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> range_vis_classify_pipeline_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> range_vis_admit_pipeline_;

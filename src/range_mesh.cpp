@@ -457,6 +457,38 @@ RangeGeometryPackage build_tactical_range_geometry() {
         end_sub(RangeMeshKind::impact_spark, s);
     }
 
+    {
+        const auto s = begin_sub(RangeMeshKind::transparent_glass);
+        mb.add_quad(
+            {-3.45f, 1.02f, 7.15f},
+            {-3.45f, 2.75f, 7.15f},
+            { 3.45f, 2.75f, 7.15f},
+            { 3.45f, 1.02f, 7.15f},
+            {0.0f, 0.0f, -1.0f},
+            {1.0f, 0.0f, 0.0f},
+            0.0f, 0.0f, 1.0f, 1.0f,
+            1U, 0.0f);
+        mb.add_quad(
+            {-2.10f, 1.06f, 2.65f},
+            {-2.10f, 2.38f, 2.65f},
+            {-2.10f, 2.38f, 4.10f},
+            {-2.10f, 1.06f, 4.10f},
+            {1.0f, 0.0f, 0.0f},
+            {0.0f, 0.0f, 1.0f},
+            0.0f, 0.0f, 1.0f, 1.0f,
+            1U, 0.0f);
+        mb.add_quad(
+            { 2.10f, 1.06f, 4.10f},
+            { 2.10f, 2.38f, 4.10f},
+            { 2.10f, 2.38f, 2.65f},
+            { 2.10f, 1.06f, 2.65f},
+            {-1.0f, 0.0f, 0.0f},
+            {0.0f, 0.0f, -1.0f},
+            0.0f, 0.0f, 1.0f, 1.0f,
+            1U, 0.0f);
+        end_sub(RangeMeshKind::transparent_glass, s);
+    }
+
     return pkg;
 }
 

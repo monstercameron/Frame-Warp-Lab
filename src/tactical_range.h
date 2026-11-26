@@ -36,7 +36,8 @@ enum class RangeMeshKind : std::uint32_t {
     brass_casing = 10,
     bullet_tracer = 11,
     impact_spark = 12,
-    count = 13,
+    transparent_glass = 13,
+    count = 14,
 };
 
 struct RangeDrawCall {

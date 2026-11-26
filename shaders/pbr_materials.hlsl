@@ -487,11 +487,12 @@ float3 evaluate_pbr_shader_color(
 
     float3 fog_linear = float3(0.032, 0.048, 0.068);
     color = lerp(color, fog_linear, saturate(distance_travelled * (1.0 / 52.0)));
+    float3 ldr = pbr_aces_filmic(color * 1.15);
     if ((shader_flags & 128u) != 0u) {
-        color = apply_transparent_glass(color, ray_origin, ray_dir, distance_travelled, scene_time);
+        ldr = apply_transparent_glass(ldr, ray_origin, ray_dir, distance_travelled, scene_time);
     }
 
-    return pbr_aces_filmic(color * 1.15);
+    return ldr;
 }
 
 float3 evaluate_shader_color_unified(

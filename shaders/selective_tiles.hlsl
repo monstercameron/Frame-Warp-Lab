@@ -363,6 +363,9 @@ void vis_classify_main(
             if (((g_coarse_block_mask >> block_idx) & 1u) != 0u && in_bounds && mat_id > 0u) {
                 float3 ball_center = ball_center_stress.xyz;
                 uint packed_flags = (uint)(previous_ball_center_unused.w + 0.5);
+                if ((policy_params.x & 16u) != 0u) {
+                    packed_flags &= ~128u;
+                }
                 if ((packed_flags & 256u) != 0u) {
                     float2 c_uv = (float2(dispatch_thread_id.xy) + 0.5) * float2(camera_up_rcp_width.w, camera_forward_rcp_height.w);
                     float2 c_ndc = float2(c_uv.x * 2.0 - 1.0, 1.0 - c_uv.y * 2.0);
@@ -707,6 +710,9 @@ void tile_shade_main(
         + camera_forward);
     float scene_time = previous_camera_forward_unused.w;
     uint packed_flags = (uint)(previous_ball_center_unused.w + 0.5);
+    if ((policy_params.x & 16u) != 0u) {
+        packed_flags &= ~128u;
+    }
     float3 color = evaluate_shader_color_unified(
         world_position,
         camera_position,

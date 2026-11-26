@@ -1,5 +1,19 @@
 # Development log
 
+## v0.33.0 — Priority 4: Independent Forward Transparency Pass with Clean Opaque Temporal Cache Separation
+
+- Decoupled multilayer transparency from single-layer opaque temporal caching (`PAR-3`) via a dedicated per-slot `opaque_cache_target` and hardware alpha-blended post-opaque forward transparency passes (`src/range_mesh.cpp`, `src/tactical_range.h`, `shaders/range_mesh.hlsl`, `shaders/motion_lab.hlsl`, `shaders/pbr_materials.hlsl`, `shaders/selective_tiles.hlsl`, `src/renderer.h`, `src/renderer.cpp`, `src/runtime_state.h`, `src/main.cpp`, `src/cli.cpp`, `CMakeLists.txt`, `scripts/run_transparency_experiment.ps1`):
+  - **Per-Slot Opaque Cache Separation (`slot.opaque_cache_target`)**:
+    - Routed `PAR-3` compute history reads (`t0`) and writes (`u0`) exclusively to `slot.opaque_cache_target` (`DXGI_FORMAT_R16G16B16A16_FLOAT`), copying pure opaque radiance into `slot.color_target` prior to independent forward transparency blending so glass layers never double-blend or drag along background opaque motion vectors.
+  - **Independent Forward Transparency Pipelines (`range_transparent_pipeline_`, `corridor_transparent_pipeline_`)**:
+    - Added laminated ballistic safety-glass geometry (`RangeMeshKind::transparent_glass`: full-lane downrange blast shield across all 8 swinging targets plus stall bay side observation windows) rendered with hardware `SRC_ALPHA / INV_SRC_ALPHA` blending, `DepthWriteMask = ZERO`, and exact per-pixel occlusion testing against opaque linear depth (`slot.depth_target` `t1`, properly occluding glass behind both world geometry and the viewmodel Service Pistol).
+    - Added `corridor_transparent_ps_main` rendering the corridor moving glass partition independently post-`PAR-3` at native 1×1 resolution.
+  - **Runtime & CLI Control (`RuntimeState` v31)**:
+    - Added `set <pid> forward_transparency on|off` (`policy_params.x` bit 4, exposed in `status.selective_tiles`) for clean A/B comparison against naive opaque-cache mixed transparency.
+- Verified zero code comments, ARM64 Release + Debug builds, Debug D3D12 Debug Layer (`fwd_trans=True`, `range_ok=True`, `corr_ok=True`, `0` errors), visual capture comparison (`range_glass_naive.png` vs `range_glass_p4_indep.png`), and `scripts/run_transparency_experiment.ps1` on **NVIDIA RTX Spark N1X**:
+  - **14-Light PBR Gun Range (Ballistic Safety Glass Shield, `PAR-3 15%`, `GT=847 µs`)**: `Naive Mixed 19.91 dB / SSIM 0.8374 / tRMSE 9.08 / P99 71.0 (492 µs)` → **`P4 Indep ON 28.63 dB (+8.72 dB!) / SSIM 0.8951 / tRMSE 7.30 / P99 38.8 (382 µs, 2.22× faster than GT!)`**.
+  - **8-Shader Corridor (Moving Glass Partition, `PAR-3 15%`, `GT=498 µs`)**: `Naive Mixed 30.78 dB / SSIM 0.9482 / tRMSE 9.46 / P99 32.3` → **`P4 Indep ON 32.96 dB (+2.17 dB!) / SSIM 0.9577 / tRMSE 8.22 / P99 25.9`**.
+
 ## v0.32.0 — Priorities 2 & 3: Material Revision IDs / Reactive Masks and Shadow-Delta Invalidation
 
 - Solved animated-material stale caching (Priority 2) and nonlocal moving-shadow invalidation on stationary surfaces (Priority 3) across both the **14-Light PBR Gun Range (Hardware VisBuffer + `PAR-3`)** and the **8-Shader Theory Corridor** (`shaders/range_lighting.hlsl`, `shaders/range_mesh.hlsl`, `shaders/range_vis_par.hlsl`, `shaders/selective_tiles.hlsl`, `src/runtime_state.h`, `src/renderer.h`, `src/renderer.cpp`, `src/main.cpp`, `src/cli.cpp`, `CMakeLists.txt`, `scripts/run_invalidation_experiment.ps1`):

@@ -165,3 +165,47 @@ VisBufferOut range_vis_ps_main(RangeVertexOut input, uint prim_id : SV_Primitive
     o.motion = motion_vector;
     return o;
 }
+
+Texture2D<float> range_opaque_depth_tex : register(t1);
+
+float4 range_transparent_ps_main(RangeVertexOut input) : SV_Target0 {
+    float view_z = max(dot(input.world_pos - camera_position_tan_y.xyz, camera_forward_rcp_height.xyz), 0.04);
+    float opaque_z = range_opaque_depth_tex.Load(int3(int2(input.clip_pos.xy), 0));
+    if (view_z >= opaque_z - 0.01) discard;
+
+    float3 n = normalize(input.world_normal);
+    float3 view_dir = normalize(camera_position_tan_y.xyz - input.world_pos);
+    if (dot(n, view_dir) < 0.0) n = -n;
+    float nov = max(dot(n, view_dir), 1e-4);
+    float fresnel = 0.04 + 0.96 * pow(saturate(1.0 - nov), 5.0);
+
+    float3 refl = reflect(-view_dir, n);
+    float3 env_refl = pbr_env_cubemap.SampleLevel(linear_clamp_sampler, refl, 0.35).rgb;
+
+    float3 spec_sum = float3(0.0, 0.0, 0.0);
+    static const float area_z[3] = { 5.4, 10.6, 15.8 };
+    [unroll]
+    for (int i = 0; i < 3; ++i) {
+        float3 lp = float3(clamp(input.world_pos.x, -1.4, 1.4), 4.55, area_z[i]);
+        float3 to_l = lp - input.world_pos;
+        float d2 = max(dot(to_l, to_l), 0.35);
+        float3 l = to_l * rsqrt(d2);
+        float3 h = normalize(view_dir + l);
+        float noh = saturate(dot(n, h));
+        float ggx = pbr_d_ggx(noh, 0.035);
+        spec_sum += float3(1.0, 1.05, 1.15) * (ggx * 0.22 / (1.0 + 0.18 * d2));
+    }
+
+    float edge_x = min(input.uv.x, 1.0 - input.uv.x);
+    float edge_y = min(input.uv.y, 1.0 - input.uv.y);
+    float frame_edge = smoothstep(0.032, 0.008, min(edge_x, edge_y));
+    float safety_band = smoothstep(0.018, 0.004, abs(input.uv.y - 0.50)) * step(0.35, frac(input.uv.x * 16.0));
+    float sheen = smoothstep(0.18, 0.0, abs(frac((input.uv.x * 0.8 + input.uv.y * 0.45)) - 0.5)) * 0.16;
+
+    float3 tint = float3(0.10, 0.34, 0.40);
+    float3 glass_hdr = tint * 0.55 + env_refl * (0.45 + 1.15 * fresnel) + spec_sum + float3(0.75, 0.90, 0.98) * (sheen + safety_band * 0.35);
+    glass_hdr = lerp(glass_hdr, float3(0.06, 0.10, 0.12), frame_edge * 0.78);
+    float3 glass_ldr = pbr_aces_filmic(glass_hdr * 1.10);
+    float alpha = saturate(0.22 + fresnel * 0.52 + frame_edge * 0.58 + safety_band * 0.24 + min(dot(spec_sum, float3(0.33, 0.33, 0.33)), 0.35));
+    return float4(glass_ldr, alpha);
+}
