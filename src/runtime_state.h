@@ -10,7 +10,7 @@
 namespace frame_warp_lab {
 
 inline constexpr wchar_t window_class_name[] = L"FrameWarpLabWindow";
-inline constexpr std::uint32_t runtime_state_version = 9;
+inline constexpr std::uint32_t runtime_state_version = 10;
 inline constexpr std::size_t runtime_event_capacity = 64;
 inline constexpr std::size_t runtime_frame_trace_capacity = 256;
 inline constexpr std::size_t hud_graph_sample_count = 128;
@@ -34,6 +34,7 @@ enum class ControlCommand : WPARAM {
     set_flash_indicator = 11,
     set_pacer_mode = 12,
     set_target_fps = 13,
+    set_async_gpu = 14,
 };
 
 enum class PacerMode : std::int32_t {
@@ -119,6 +120,7 @@ struct RuntimeFrameSample {
     std::int32_t source_divider;
     std::int32_t source_rendered;
     std::int32_t gpu_slot_warped;
+    std::int32_t async_overlapped;
     std::int32_t missed_deadline;
     std::int32_t discontinuity;
 };
@@ -137,6 +139,7 @@ struct RuntimeState {
     std::int64_t repeated_frame_count;
     std::int64_t warped_frame_count;
     std::int64_t fallback_frame_count;
+    std::int64_t async_overlap_count;
     std::int64_t missed_deadline_count;
     std::int64_t target_period_us;
     std::int64_t last_present_interval_us;
@@ -159,6 +162,8 @@ struct RuntimeState {
     std::int32_t vsync_enabled;
     std::int32_t allow_tearing_enabled;
     std::int32_t waitable_swap_chain;
+    std::int32_t async_gpu_enabled;
+    std::int32_t high_priority_present_queue;
     std::int32_t diagnostic_view;
     std::int32_t camera_path;
     std::int32_t stress_level;

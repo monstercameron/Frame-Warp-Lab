@@ -34,7 +34,12 @@ private:
 
 class RuntimeStatePublisher {
 public:
-    RuntimeStatePublisher(bool gpu_timing_available, bool allow_tearing_enabled, bool waitable_swap_chain, bool raw_input_enabled)
+    RuntimeStatePublisher(
+        bool gpu_timing_available,
+        bool allow_tearing_enabled,
+        bool waitable_swap_chain,
+        bool raw_input_enabled,
+        bool high_priority_present_queue)
         : mapping_(CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0,
                                       sizeof(frame_warp_lab::RuntimeState),
                                       frame_warp_lab::runtime_mapping_name(GetCurrentProcessId()).c_str()),
@@ -48,6 +53,7 @@ public:
         std::atomic_ref<std::int32_t>(state_->source_divider).store(1, std::memory_order_relaxed);
         std::atomic_ref<std::int32_t>(state_->allow_tearing_enabled).store(allow_tearing_enabled ? 1 : 0, std::memory_order_relaxed);
         std::atomic_ref<std::int32_t>(state_->waitable_swap_chain).store(waitable_swap_chain ? 1 : 0, std::memory_order_relaxed);
+        std::atomic_ref<std::int32_t>(state_->high_priority_present_queue).store(high_priority_present_queue ? 1 : 0, std::memory_order_relaxed);
         std::atomic_ref<std::int32_t>(state_->raw_input_enabled).store(raw_input_enabled ? 1 : 0, std::memory_order_relaxed);
         std::atomic_ref<std::int32_t>(state_->gpu_timing_available).store(gpu_timing_available ? 1 : 0, std::memory_order_relaxed);
         std::atomic_ref<std::int64_t>(state_->last_input_to_present_us).store(-1, std::memory_order_relaxed);
@@ -70,6 +76,7 @@ public:
         std::int64_t target_period_us,
         std::int32_t source_divider,
         bool vsync_enabled,
+        bool async_gpu_enabled,
         frame_warp_lab::DiagnosticView view,
         frame_warp_lab::CameraPath path,
         std::int32_t stress_level,
@@ -81,6 +88,7 @@ public:
         std::atomic_ref<std::int64_t>(state_->target_period_us).store(target_period_us, std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->source_divider).store(source_divider, std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->vsync_enabled).store(vsync_enabled ? 1 : 0, std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->async_gpu_enabled).store(async_gpu_enabled ? 1 : 0, std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->diagnostic_view).store(static_cast<std::int32_t>(view), std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->camera_path).store(static_cast<std::int32_t>(path), std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->stress_level).store(stress_level, std::memory_order_release);
@@ -123,6 +131,9 @@ public:
             case frame_warp_lab::FrameKind::fallback:
                 std::atomic_ref<std::int64_t>(state_->fallback_frame_count).fetch_add(1, std::memory_order_release);
                 break;
+        }
+        if (sample.async_overlapped) {
+            std::atomic_ref<std::int64_t>(state_->async_overlap_count).fetch_add(1, std::memory_order_release);
         }
         if (sample.missed_deadline) {
             std::atomic_ref<std::int64_t>(state_->missed_deadline_count).fetch_add(1, std::memory_order_release);
@@ -171,6 +182,7 @@ public:
         slot.source_divider = sample.source_divider;
         slot.source_rendered = sample.source_rendered;
         slot.gpu_slot_warped = sample.gpu_slot_warped;
+        slot.async_overlapped = sample.async_overlapped;
         slot.missed_deadline = sample.missed_deadline;
         slot.discontinuity = sample.discontinuity;
         std::atomic_ref<std::int64_t>(slot.sequence).store(sequence, std::memory_order_release);
@@ -332,9 +344,9 @@ void format_hud_lines(
     frame_warp_lab::PresentationMode mode,
     frame_warp_lab::PacerMode pacer_mode,
     std::int32_t source_divider,
+    bool async_gpu_enabled,
     frame_warp_lab::CameraPath path,
     std::int32_t stress_level,
-    bool pcl_listener_active,
     bool mouse_look_locked) {
     const double frame_ms = smoothed_interval_us > 1.0 ? smoothed_interval_us / 1000.0 : 0.0;
     const double fps = frame_ms > 0.01 ? 1000.0 / frame_ms : 0.0;
@@ -347,8 +359,8 @@ void format_hud_lines(
 
     std::snprintf(hud.lines[0], sizeof(hud.lines[0]), "FPS %5.1f  FT %5.2f MS  %s /%d  PACE %s", fps, frame_ms, short_mode_label(mode), source_divider, short_pacer_label(pacer_mode));
     std::snprintf(hud.lines[1], sizeof(hud.lines[1]), "GPU SCN %4.2f  WRP %4.2f  IN-PR %4.2f  MS", scene_ms, warp_ms, input_ms);
-    std::snprintf(hud.lines[2], sizeof(hud.lines[2]), "HOLE %4.2f%%  MISS %lld  PCL %s  STR %d", holes_pct, static_cast<long long>(missed_deadlines), pcl_listener_active ? "LIVE" : "RDY", stress_level);
-    std::snprintf(hud.lines[3], sizeof(hud.lines[3]), "%s  PATH %s  1-3 MODE  L PACE  H HOLE", mouse_look_locked ? "RMB/ESC UNLK" : "LMB/RMB LOOK", short_path_label(path));
+    std::snprintf(hud.lines[2], sizeof(hud.lines[2]), "HOLE %4.2f%%  MISS %lld  ASYNC %s  STR %d", holes_pct, static_cast<long long>(missed_deadlines), async_gpu_enabled ? "ON" : "OFF", stress_level);
+    std::snprintf(hud.lines[3], sizeof(hud.lines[3]), "%s  PATH %s  1-3 MODE  G ASYNC  L PACE", mouse_look_locked ? "RMB/ESC UNLK" : "LMB/RMB LOOK", short_path_label(path));
 }
 
 LRESULT CALLBACK window_procedure(HWND window, UINT message, WPARAM message_parameter, LPARAM message_data) {
@@ -473,7 +485,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
             renderer.gpu_timing_available(),
             renderer.allow_tearing_enabled(),
             renderer.waitable_swap_chain_enabled(),
-            input_state.raw_input_registered);
+            input_state.raw_input_registered,
+            renderer.high_priority_present_queue());
         frame_warp_lab::SceneSimulation simulation;
 
         ShowWindow(window, show == SW_HIDE ? SW_SHOWNORMAL : show);
@@ -485,6 +498,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         frame_warp_lab::PresentationMode presentation_mode = frame_warp_lab::PresentationMode::full_render;
         std::int32_t source_divider = 1;
         bool vsync_enabled = !renderer.allow_tearing_enabled();
+        bool async_gpu_enabled = true;
         frame_warp_lab::DiagnosticView diagnostic_view = frame_warp_lab::DiagnosticView::final_color;
         std::int32_t stress_level = 0;
         bool overlay_enabled = true;
@@ -495,14 +509,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         std::int64_t source_frame_id = 0;
         std::int64_t cadence_counter = 0;
         std::int64_t missed_deadlines = 0;
-        bool has_completed_source = false;
-        frame_warp_lab::SceneSnapshot latest_source_snapshot{};
-        auto latest_source_capture_time = std::chrono::steady_clock::now();
-        auto previous_tick = latest_source_capture_time;
-        auto previous_present_tick = latest_source_capture_time;
+        auto previous_tick = std::chrono::steady_clock::now();
+        auto previous_present_tick = previous_tick;
         bool has_previous_present = false;
         double smoothed_present_interval_us = 0.0;
-        double smoothed_cpu_work_us = 900.0;
+        double smoothed_cpu_work_us = 700.0;
         std::int64_t last_scene_gpu_us = -1;
         std::int64_t last_present_gpu_us = -1;
         std::int64_t last_input_to_present_us = -1;
@@ -521,6 +532,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 pacer.target_period_us(),
                 source_divider,
                 vsync_enabled,
+                async_gpu_enabled,
                 diagnostic_view,
                 simulation.path(),
                 stress_level,
@@ -566,6 +578,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                         pacer.set_mode(next_pacer);
                         vsync_enabled = next_pacer == frame_warp_lab::PacerMode::vsync_only;
                         config_changed = true;
+                    } else if (message.wParam == 'G') {
+                        async_gpu_enabled = !async_gpu_enabled;
+                        config_changed = true;
                     } else if (message.wParam == 'H') {
                         diagnostic_view = diagnostic_view == frame_warp_lab::DiagnosticView::reprojection_holes
                             ? frame_warp_lab::DiagnosticView::final_color
@@ -588,14 +603,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                             scene_paused ? 1 : 0);
                     } else if (message.wParam == 'R') {
                         simulation.reset();
-                        has_completed_source = false;
+                        renderer.invalidate_source_history();
                         cadence_counter = 0;
                         pacer.reset();
                         runtime_state.record_event(frame_warp_lab::RuntimeEventType::scene_reset, 0);
                     } else if (message.wParam == 'C') {
                         const auto next_path = static_cast<frame_warp_lab::CameraPath>((static_cast<std::int32_t>(simulation.path()) + 1) % 5);
                         simulation.set_path(next_path);
-                        has_completed_source = false;
+                        renderer.invalidate_source_history();
                         config_changed = true;
                     } else if (message.wParam == VK_OEM_4) {
                         source_divider = std::max(1, source_divider - 1);
@@ -627,7 +642,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                         runtime_state.record_event(frame_warp_lab::RuntimeEventType::scene_resumed, 0);
                     } else if (command == frame_warp_lab::ControlCommand::scene_reset) {
                         simulation.reset();
-                        has_completed_source = false;
+                        renderer.invalidate_source_history();
                         cadence_counter = 0;
                         pacer.reset();
                         runtime_state.record_event(frame_warp_lab::RuntimeEventType::scene_reset, 0);
@@ -641,7 +656,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                         const auto raw = static_cast<std::int32_t>(message.lParam);
                         if (raw >= 0 && raw <= 4) {
                             simulation.set_path(static_cast<frame_warp_lab::CameraPath>(raw));
-                            has_completed_source = false;
+                            renderer.invalidate_source_history();
                             runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, 100 + raw);
                         }
                     } else if (command == frame_warp_lab::ControlCommand::set_stress_level) {
@@ -684,6 +699,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                         pacer.set_target_fps(raw, window);
                         hud_state.target_frame_ms = pacer.target_frame_ms();
                         runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, 900 + raw);
+                    } else if (command == frame_warp_lab::ControlCommand::set_async_gpu) {
+                        async_gpu_enabled = message.lParam != 0;
+                        runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, async_gpu_enabled ? 1001 : 1000);
                     }
                     previous_tick = std::chrono::steady_clock::now();
                     publish_config();
@@ -732,7 +750,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 renderer.resize(client_width, client_height);
                 runtime_state.record_resize();
                 previous_client_rectangle = current_client_rectangle;
-                has_completed_source = false;
                 cadence_counter = 0;
                 pacer.refresh_display_timing(window);
                 pacer.reset();
@@ -769,7 +786,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
             }
 
             if (simulation.take_manual_control_if_needed(manual_input)) {
-                has_completed_source = false;
+                renderer.invalidate_source_history();
                 runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, 104);
                 publish_config();
             }
@@ -778,33 +795,52 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
             simulation.advance(std::chrono::duration<double>(current_tick - previous_tick).count(), scene_paused, manual_input);
             previous_tick = current_tick;
 
+            renderer.poll_completed_scenes();
             const std::int32_t effective_divider = presentation_mode == frame_warp_lab::PresentationMode::full_render ? 1 : source_divider;
-            const bool render_scene_pass = !has_completed_source || (cadence_counter % effective_divider == 0);
+            const bool need_initial_source = !renderer.has_completed_source();
+            const bool cadence_requests_scene = need_initial_source || (cadence_counter % effective_divider == 0);
             ++cadence_counter;
+
+            bool scene_submitted_this_frame = false;
+            if (cadence_requests_scene && (!renderer.has_scene_in_flight() || !async_gpu_enabled || need_initial_source)) {
+                ++source_frame_id;
+                const auto capture_time = std::chrono::steady_clock::now();
+                const frame_warp_lab::SceneSnapshot new_snapshot = simulation.capture_source_snapshot(source_frame_id);
+                const bool must_wait = need_initial_source || !async_gpu_enabled;
+                scene_submitted_this_frame = renderer.submit_scene_async(
+                    new_snapshot,
+                    capture_time,
+                    stress_level,
+                    frame_id_u64,
+                    latency_monitor,
+                    must_wait);
+            }
+
+            renderer.poll_completed_scenes();
+            const frame_warp_lab::CompletedSourceInfo active_source = renderer.latest_completed_source();
+            const bool source_is_fresh_this_frame = active_source.valid && (active_source.snapshot.source_frame_id == source_frame_id) && scene_submitted_this_frame;
 
             frame_warp_lab::FrameKind frame_kind = frame_warp_lab::FrameKind::rendered;
             frame_warp_lab::FallbackReason fallback_reason = frame_warp_lab::FallbackReason::none;
             bool warp_enabled = false;
-            bool frame_discontinuity = false;
-            frame_warp_lab::CameraBasis target_camera{};
+            bool frame_discontinuity = active_source.snapshot.discontinuity;
+            frame_warp_lab::CameraBasis target_camera = active_source.snapshot.camera;
 
-            if (render_scene_pass) {
-                ++source_frame_id;
-                latest_source_capture_time = std::chrono::steady_clock::now();
-                latest_source_snapshot = simulation.capture_source_snapshot(source_frame_id);
-                has_completed_source = true;
-                target_camera = latest_source_snapshot.camera;
-                frame_discontinuity = latest_source_snapshot.discontinuity;
+            if (source_is_fresh_this_frame) {
                 frame_kind = frame_warp_lab::FrameKind::rendered;
+                target_camera = active_source.snapshot.camera;
             } else if (presentation_mode == frame_warp_lab::PresentationMode::repeat) {
-                target_camera = latest_source_snapshot.camera;
                 frame_kind = frame_warp_lab::FrameKind::repeated;
-            } else {
+                target_camera = active_source.snapshot.camera;
+            } else if (presentation_mode == frame_warp_lab::PresentationMode::reproject || async_gpu_enabled) {
                 std::int64_t current_cut_segment = 0;
                 target_camera = simulation.sample_latest_camera(current_cut_segment);
                 const std::int64_t pending_source_age_us = std::chrono::duration_cast<std::chrono::microseconds>(
-                    std::chrono::steady_clock::now() - latest_source_capture_time).count();
-                if (current_cut_segment != latest_source_snapshot.cut_segment) {
+                    std::chrono::steady_clock::now() - active_source.capture_time).count();
+                if (presentation_mode == frame_warp_lab::PresentationMode::full_render) {
+                    frame_kind = frame_warp_lab::FrameKind::repeated;
+                    target_camera = active_source.snapshot.camera;
+                } else if (current_cut_segment != active_source.snapshot.cut_segment) {
                     frame_kind = frame_warp_lab::FrameKind::fallback;
                     fallback_reason = frame_warp_lab::FallbackReason::camera_cut;
                     frame_discontinuity = true;
@@ -836,23 +872,22 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 presentation_mode,
                 pacer.mode(),
                 effective_divider,
+                async_gpu_enabled,
                 simulation.path(),
                 stress_level,
-                latency_monitor.etw_listener_active(),
                 input_state.mouse_look_locked);
 
-            const frame_warp_lab::FrameExecutionMetrics gpu_metrics = renderer.render_and_present(
-                frame_warp_lab::FrameRenderRequest{
+            const frame_warp_lab::FrameExecutionMetrics gpu_metrics = renderer.present_from_source(
+                frame_warp_lab::PresentRequest{
                     frame_id_u64,
-                    latest_source_snapshot,
+                    active_source.slot_index,
+                    active_source.snapshot,
                     target_camera,
                     &hud_state,
                     diagnostic_view,
-                    stress_level,
                     overlay_enabled,
                     flash_indicator_enabled,
                     flash_triggered && flash_indicator_enabled,
-                    render_scene_pass,
                     warp_enabled,
                     vsync_enabled,
                 },
@@ -864,7 +899,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
             const std::int64_t present_interval_us = has_previous_present
                 ? std::chrono::duration_cast<std::chrono::microseconds>(present_entry_time - previous_present_tick).count()
                 : 0;
-            const std::int64_t source_age_us = std::chrono::duration_cast<std::chrono::microseconds>(present_entry_time - latest_source_capture_time).count();
+            const std::int64_t source_age_us = std::chrono::duration_cast<std::chrono::microseconds>(present_entry_time - active_source.capture_time).count();
             const std::int64_t input_to_present_us = has_input_timestamp
                 ? std::chrono::duration_cast<std::chrono::microseconds>(present_complete_time - earliest_input_time).count()
                 : -1;
@@ -895,7 +930,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 last_total_pixels = gpu_metrics.completed_total_pixel_count;
             }
 
-            const float sample_gpu_ms = ((gpu_metrics.completed_scene_gpu_us > 0 ? static_cast<float>(gpu_metrics.completed_scene_gpu_us) : 0.0f)
+            const float sample_gpu_ms = ((scene_submitted_this_frame && last_scene_gpu_us > 0 ? static_cast<float>(last_scene_gpu_us) : 0.0f)
                 + (gpu_metrics.completed_present_gpu_us > 0 ? static_cast<float>(gpu_metrics.completed_present_gpu_us) : 0.0f)) / 1000.0f;
             hud_state.samples[hud_state.write_head & (frame_warp_lab::hud_graph_sample_count - 1)] = frame_warp_lab::HudGraphSample{
                 static_cast<float>(present_interval_us) / 1000.0f,
@@ -919,7 +954,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 frame_warp_lab::RuntimeFrameSample{
                     0,
                     display_frame_id,
-                    latest_source_snapshot.source_frame_id,
+                    active_source.snapshot.source_frame_id,
                     present_interval_us,
                     source_age_us,
                     input_to_present_us,
@@ -937,8 +972,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                     static_cast<std::int32_t>(simulation.path()),
                     stress_level,
                     effective_divider,
-                    render_scene_pass ? 1 : 0,
+                    scene_submitted_this_frame ? 1 : 0,
                     gpu_metrics.completed_slot_warped ? 1 : 0,
+                    gpu_metrics.async_overlapped ? 1 : 0,
                     gpu_metrics.missed_deadline ? 1 : 0,
                     frame_discontinuity ? 1 : 0,
                 },

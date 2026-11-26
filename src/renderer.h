@@ -13,7 +13,6 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
-#include <string>
 
 namespace frame_warp_lab {
 
@@ -33,6 +32,14 @@ struct HudOverlayState {
     std::uint32_t alignment_padding;
 };
 
+struct CompletedSourceInfo {
+    bool valid;
+    std::int32_t slot_index;
+    SceneSnapshot snapshot;
+    std::chrono::steady_clock::time_point capture_time;
+    std::int64_t scene_gpu_us;
+};
+
 struct FrameExecutionMetrics {
     std::chrono::steady_clock::time_point present_call_time;
     std::int64_t completed_scene_gpu_us;
@@ -42,23 +49,22 @@ struct FrameExecutionMetrics {
     std::uint32_t completed_invalid_pixel_count;
     std::uint32_t completed_total_pixel_count;
     bool completed_slot_valid;
-    bool completed_slot_source_rendered;
     bool completed_slot_warped;
+    bool async_overlapped;
     bool missed_deadline;
     bool gpu_timing_available;
 };
 
-struct FrameRenderRequest {
+struct PresentRequest {
     std::uint64_t display_frame_id;
+    std::int32_t source_slot_index;
     SceneSnapshot source_snapshot;
     CameraBasis target_camera;
     const HudOverlayState* hud;
     DiagnosticView diagnostic_view;
-    std::int32_t stress_level;
     bool overlay_enabled;
     bool flash_indicator_enabled;
     bool flash_triggered;
-    bool render_scene_pass;
     bool warp_enabled;
     bool vsync_enabled;
 };
@@ -72,17 +78,33 @@ public:
     Renderer& operator=(const Renderer&) = delete;
 
     void wait_for_frame_slot();
-    FrameExecutionMetrics render_and_present(const FrameRenderRequest& request, LatencyMonitor& latency_monitor, FramePacer& pacer);
+    bool poll_completed_scenes();
+    bool has_scene_in_flight() const;
+    bool has_completed_source() const { return latest_completed_slot_ >= 0; }
+    bool has_previous_completed_source() const { return previous_completed_slot_ >= 0; }
+    CompletedSourceInfo latest_completed_source() const;
+    CompletedSourceInfo previous_completed_source() const;
+    bool submit_scene_async(
+        const SceneSnapshot& snapshot,
+        std::chrono::steady_clock::time_point capture_time,
+        std::int32_t stress_level,
+        std::uint64_t frame_id,
+        LatencyMonitor& latency_monitor,
+        bool wait_for_completion);
+    void invalidate_source_history();
+    FrameExecutionMetrics present_from_source(const PresentRequest& request, LatencyMonitor& latency_monitor, FramePacer& pacer);
     void resize(UINT width, UINT height);
     void flush();
-    bool gpu_timing_available() const { return gpu_timestamp_frequency_ > 0; }
+    bool gpu_timing_available() const { return present_timestamp_frequency_ > 0; }
     bool allow_tearing_enabled() const { return allow_tearing_supported_; }
     bool waitable_swap_chain_enabled() const { return frame_latency_waitable_object_ != nullptr; }
+    bool high_priority_present_queue() const { return high_priority_present_queue_; }
 
 private:
     static constexpr UINT swap_chain_buffer_count = 2;
-    static constexpr UINT offscreen_target_count = 3;
-    static constexpr UINT timestamps_per_frame = 4;
+    static constexpr UINT source_slot_count = 3;
+    static constexpr UINT targets_per_source_slot = 3;
+    static constexpr UINT timestamps_per_pass = 2;
     static constexpr std::size_t constant_buffer_stride = 256;
     static constexpr std::size_t hud_constant_buffer_stride = 2560;
 
@@ -97,29 +119,46 @@ private:
         HANDLE value_;
     };
 
+    struct SourceSlot {
+        Microsoft::WRL::ComPtr<ID3D12Resource> color_target;
+        Microsoft::WRL::ComPtr<ID3D12Resource> depth_target;
+        Microsoft::WRL::ComPtr<ID3D12Resource> motion_target;
+        Microsoft::WRL::ComPtr<ID3D12CommandAllocator> command_allocator;
+        SceneSnapshot snapshot{};
+        std::chrono::steady_clock::time_point capture_time{};
+        std::uint64_t scene_fence_value = 0;
+        std::uint64_t last_read_present_fence = 0;
+        std::int64_t scene_gpu_us = -1;
+        bool in_flight = false;
+        bool valid = false;
+    };
+
     void create_pipelines();
     void create_constant_buffers();
     void create_timestamp_resources();
     void create_reprojection_stats_resources();
     void create_swap_chain_targets();
-    void create_offscreen_targets();
-    void wait_for_fence(std::uint64_t value);
+    void create_source_targets();
+    std::int32_t find_available_source_slot() const;
+    void wait_for_fence(ID3D12Fence* fence, HANDLE event_handle, std::uint64_t value);
 
-    OsHandle fence_completion_event_;
+    OsHandle present_fence_event_;
+    OsHandle scene_fence_event_;
     HANDLE frame_latency_waitable_object_ = nullptr;
     Microsoft::WRL::ComPtr<IDXGIFactory4> factory_;
     Microsoft::WRL::ComPtr<ID3D12Device> device_;
-    Microsoft::WRL::ComPtr<ID3D12CommandQueue> queue_;
+    Microsoft::WRL::ComPtr<ID3D12CommandQueue> present_queue_;
+    Microsoft::WRL::ComPtr<ID3D12CommandQueue> scene_queue_;
     Microsoft::WRL::ComPtr<IDXGISwapChain3> swap_chain_;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> render_target_heap_;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> shader_resource_heap_;
     std::array<Microsoft::WRL::ComPtr<ID3D12Resource>, swap_chain_buffer_count> render_targets_;
-    Microsoft::WRL::ComPtr<ID3D12Resource> scene_color_target_;
-    Microsoft::WRL::ComPtr<ID3D12Resource> scene_depth_target_;
-    Microsoft::WRL::ComPtr<ID3D12Resource> scene_motion_target_;
-    std::array<Microsoft::WRL::ComPtr<ID3D12CommandAllocator>, swap_chain_buffer_count> command_allocators_;
-    Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> command_list_;
-    Microsoft::WRL::ComPtr<ID3D12Fence> fence_;
+    std::array<Microsoft::WRL::ComPtr<ID3D12CommandAllocator>, swap_chain_buffer_count> present_command_allocators_;
+    Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> present_command_list_;
+    Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> scene_command_list_;
+    std::array<SourceSlot, source_slot_count> source_slots_;
+    Microsoft::WRL::ComPtr<ID3D12Fence> present_fence_;
+    Microsoft::WRL::ComPtr<ID3D12Fence> scene_fence_;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> scene_root_signature_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> scene_pipeline_;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> present_root_signature_;
@@ -130,24 +169,32 @@ private:
     std::uint8_t* mapped_scene_constants_ = nullptr;
     std::uint8_t* mapped_present_constants_ = nullptr;
     std::uint8_t* mapped_hud_constants_ = nullptr;
-    Microsoft::WRL::ComPtr<ID3D12QueryHeap> timestamp_query_heap_;
-    Microsoft::WRL::ComPtr<ID3D12Resource> timestamp_readback_buffer_;
-    const std::uint64_t* mapped_timestamps_ = nullptr;
-    std::uint64_t gpu_timestamp_frequency_ = 0;
+    Microsoft::WRL::ComPtr<ID3D12QueryHeap> present_timestamp_heap_;
+    Microsoft::WRL::ComPtr<ID3D12Resource> present_timestamp_readback_;
+    const std::uint64_t* mapped_present_timestamps_ = nullptr;
+    std::uint64_t present_timestamp_frequency_ = 0;
+    Microsoft::WRL::ComPtr<ID3D12QueryHeap> scene_timestamp_heap_;
+    Microsoft::WRL::ComPtr<ID3D12Resource> scene_timestamp_readback_;
+    const std::uint64_t* mapped_scene_timestamps_ = nullptr;
+    std::uint64_t scene_timestamp_frequency_ = 0;
     Microsoft::WRL::ComPtr<ID3D12Resource> reprojection_stats_uav_;
     Microsoft::WRL::ComPtr<ID3D12Resource> reprojection_stats_zero_upload_;
     Microsoft::WRL::ComPtr<ID3D12Resource> reprojection_stats_readback_;
     const std::uint32_t* mapped_reprojection_stats_ = nullptr;
     std::array<std::uint64_t, swap_chain_buffer_count> buffer_fence_values_{};
     std::array<bool, swap_chain_buffer_count> buffer_has_data_{};
-    std::array<bool, swap_chain_buffer_count> buffer_source_rendered_{};
     std::array<bool, swap_chain_buffer_count> buffer_warped_{};
     std::array<std::uint32_t, swap_chain_buffer_count> buffer_total_pixels_{};
-    std::uint64_t next_fence_value_ = 1;
+    std::uint64_t next_present_fence_value_ = 1;
+    std::uint64_t next_scene_fence_value_ = 1;
+    std::int32_t latest_completed_slot_ = -1;
+    std::int32_t previous_completed_slot_ = -1;
+    std::int64_t last_completed_scene_gpu_us_ = -1;
     UINT pending_buffer_index_ = 0;
     bool has_acquired_slot_ = false;
     UINT swap_chain_flags_ = 0;
     bool allow_tearing_supported_ = false;
+    bool high_priority_present_queue_ = false;
     UINT render_target_descriptor_stride_ = 0;
     UINT shader_resource_descriptor_stride_ = 0;
     UINT viewport_width_ = 0;

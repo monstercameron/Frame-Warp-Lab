@@ -165,7 +165,7 @@ void write_hud_constants_simd(HudConstantsData* destination, const HudOverlaySta
 
     simd::store_float4(
         destination->hud_graph_scale,
-        hud.max_graph_ms > 1.0f ? hud.max_graph_ms : 25.0f,
+        hud.max_graph_ms > 1.0f ? hud.max_graph_ms : 20.0f,
         hud.target_frame_ms > 0.5f ? hud.target_frame_ms : 8.333f,
         static_cast<float>(hud_graph_sample_count),
         static_cast<float>(hud.write_head & (hud_graph_sample_count - 1)));
@@ -195,7 +195,8 @@ Renderer::OsHandle::~OsHandle() {
 }
 
 Renderer::Renderer(HWND window)
-    : fence_completion_event_(CreateEventW(nullptr, FALSE, FALSE, nullptr), "Create fence event") {
+    : present_fence_event_(CreateEventW(nullptr, FALSE, FALSE, nullptr), "Create present fence event"),
+      scene_fence_event_(CreateEventW(nullptr, FALSE, FALSE, nullptr), "Create scene fence event") {
     UINT flags = 0;
 #if defined(_DEBUG)
     ComPtr<ID3D12Debug> debug;
@@ -214,9 +215,21 @@ Renderer::Renderer(HWND window)
     }
 
     check(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device_)), "Create D3D12 device");
-    D3D12_COMMAND_QUEUE_DESC queue_description{};
-    queue_description.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
-    check(device_->CreateCommandQueue(&queue_description, IID_PPV_ARGS(&queue_)), "Create command queue");
+
+    D3D12_COMMAND_QUEUE_DESC present_queue_description{};
+    present_queue_description.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+    present_queue_description.Priority = D3D12_COMMAND_QUEUE_PRIORITY_HIGH;
+    if (SUCCEEDED(device_->CreateCommandQueue(&present_queue_description, IID_PPV_ARGS(&present_queue_)))) {
+        high_priority_present_queue_ = true;
+    } else {
+        present_queue_description.Priority = D3D12_COMMAND_QUEUE_PRIORITY_NORMAL;
+        check(device_->CreateCommandQueue(&present_queue_description, IID_PPV_ARGS(&present_queue_)), "Create present command queue");
+    }
+
+    D3D12_COMMAND_QUEUE_DESC scene_queue_description{};
+    scene_queue_description.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+    scene_queue_description.Priority = D3D12_COMMAND_QUEUE_PRIORITY_NORMAL;
+    check(device_->CreateCommandQueue(&scene_queue_description, IID_PPV_ARGS(&scene_queue_)), "Create scene command queue");
 
     RECT client_rectangle{};
     if (!GetClientRect(window, &client_rectangle)) {
@@ -241,7 +254,7 @@ Renderer::Renderer(HWND window)
     swap_chain_description.Flags = swap_chain_flags_;
 
     ComPtr<IDXGISwapChain1> swap_chain;
-    check(factory_->CreateSwapChainForHwnd(queue_.Get(), window, &swap_chain_description, nullptr, nullptr, &swap_chain), "Create swap chain");
+    check(factory_->CreateSwapChainForHwnd(present_queue_.Get(), window, &swap_chain_description, nullptr, nullptr, &swap_chain), "Create swap chain");
     check(swap_chain.As(&swap_chain_), "Query swap chain");
     check(factory_->MakeWindowAssociation(window, DXGI_MWA_NO_ALT_ENTER), "Configure window association");
     check(swap_chain_->SetMaximumFrameLatency(swap_chain_buffer_count), "Set maximum frame latency");
@@ -249,28 +262,36 @@ Renderer::Renderer(HWND window)
 
     D3D12_DESCRIPTOR_HEAP_DESC rtv_heap_description{};
     rtv_heap_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-    rtv_heap_description.NumDescriptors = swap_chain_buffer_count + offscreen_target_count;
+    rtv_heap_description.NumDescriptors = swap_chain_buffer_count + source_slot_count * targets_per_source_slot;
     check(device_->CreateDescriptorHeap(&rtv_heap_description, IID_PPV_ARGS(&render_target_heap_)), "Create RTV heap");
     render_target_descriptor_stride_ = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
 
     D3D12_DESCRIPTOR_HEAP_DESC srv_heap_description{};
     srv_heap_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    srv_heap_description.NumDescriptors = offscreen_target_count;
+    srv_heap_description.NumDescriptors = source_slot_count * targets_per_source_slot;
     srv_heap_description.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     check(device_->CreateDescriptorHeap(&srv_heap_description, IID_PPV_ARGS(&shader_resource_heap_)), "Create SRV heap");
     shader_resource_descriptor_stride_ = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 
-    for (auto& allocator : command_allocators_) {
-        check(device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator)), "Create command allocator");
+    for (auto& allocator : present_command_allocators_) {
+        check(device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator)), "Create present command allocator");
     }
-    check(device_->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, command_allocators_[0].Get(), nullptr, IID_PPV_ARGS(&command_list_)), "Create command list");
-    check(command_list_->Close(), "Close initial command list");
-    check(device_->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence_)), "Create fence");
+    check(device_->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, present_command_allocators_[0].Get(), nullptr, IID_PPV_ARGS(&present_command_list_)), "Create present command list");
+    check(present_command_list_->Close(), "Close initial present command list");
+
+    for (auto& slot : source_slots_) {
+        check(device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&slot.command_allocator)), "Create scene command allocator");
+    }
+    check(device_->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, source_slots_[0].command_allocator.Get(), nullptr, IID_PPV_ARGS(&scene_command_list_)), "Create scene command list");
+    check(scene_command_list_->Close(), "Close initial scene command list");
+
+    check(device_->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&present_fence_)), "Create present fence");
+    check(device_->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&scene_fence_)), "Create scene fence");
 
     viewport_width_ = initial_width;
     viewport_height_ = initial_height;
     create_swap_chain_targets();
-    create_offscreen_targets();
+    create_source_targets();
     create_constant_buffers();
     create_timestamp_resources();
     create_reprojection_stats_resources();
@@ -278,7 +299,7 @@ Renderer::Renderer(HWND window)
 }
 
 Renderer::~Renderer() noexcept {
-    if (queue_ && fence_) {
+    if ((present_queue_ && present_fence_) || (scene_queue_ && scene_fence_)) {
         try {
             flush();
         } catch (...) {
@@ -296,13 +317,215 @@ void Renderer::wait_for_frame_slot() {
         WaitForSingleObjectEx(frame_latency_waitable_object_, 1000, TRUE);
     }
     pending_buffer_index_ = swap_chain_->GetCurrentBackBufferIndex();
-    wait_for_fence(buffer_fence_values_[pending_buffer_index_]);
+    wait_for_fence(present_fence_.Get(), present_fence_event_.get(), buffer_fence_values_[pending_buffer_index_]);
     has_acquired_slot_ = true;
 }
 
-FrameExecutionMetrics Renderer::render_and_present(const FrameRenderRequest& request, LatencyMonitor& latency_monitor, FramePacer& pacer) {
-    FrameExecutionMetrics metrics{std::chrono::steady_clock::now(), -1, -1, 0, 0, 0, 0, false, false, false, false, gpu_timing_available()};
-    if (viewport_width_ == 0 || viewport_height_ == 0) {
+bool Renderer::poll_completed_scenes() {
+    const std::uint64_t completed_scene_fence = scene_fence_->GetCompletedValue();
+    if (completed_scene_fence == UINT64_MAX) throw std::runtime_error("D3D12 device was removed");
+    bool promoted = false;
+    for (UINT slot_index = 0; slot_index < source_slot_count; ++slot_index) {
+        auto& slot = source_slots_[slot_index];
+        if (!slot.in_flight || completed_scene_fence < slot.scene_fence_value) continue;
+        slot.in_flight = false;
+        slot.valid = true;
+        if (mapped_scene_timestamps_ && scene_timestamp_frequency_ > 0) {
+            const std::size_t base_index = static_cast<std::size_t>(slot_index) * timestamps_per_pass;
+            const std::uint64_t begin_ts = mapped_scene_timestamps_[base_index + 0];
+            const std::uint64_t end_ts = mapped_scene_timestamps_[base_index + 1];
+            if (end_ts >= begin_ts) {
+                slot.scene_gpu_us = static_cast<std::int64_t>(((end_ts - begin_ts) * 1000000ULL) / scene_timestamp_frequency_);
+                last_completed_scene_gpu_us_ = slot.scene_gpu_us;
+            }
+        }
+        if (latest_completed_slot_ != static_cast<std::int32_t>(slot_index)) {
+            previous_completed_slot_ = latest_completed_slot_;
+            latest_completed_slot_ = static_cast<std::int32_t>(slot_index);
+        }
+        promoted = true;
+    }
+    return promoted;
+}
+
+bool Renderer::has_scene_in_flight() const {
+    for (const auto& slot : source_slots_) {
+        if (slot.in_flight) return true;
+    }
+    return false;
+}
+
+CompletedSourceInfo Renderer::latest_completed_source() const {
+    if (latest_completed_slot_ < 0) return CompletedSourceInfo{false, -1, {}, {}, -1};
+    const auto& slot = source_slots_[static_cast<std::size_t>(latest_completed_slot_)];
+    return CompletedSourceInfo{slot.valid, latest_completed_slot_, slot.snapshot, slot.capture_time, slot.scene_gpu_us};
+}
+
+CompletedSourceInfo Renderer::previous_completed_source() const {
+    if (previous_completed_slot_ < 0) return CompletedSourceInfo{false, -1, {}, {}, -1};
+    const auto& slot = source_slots_[static_cast<std::size_t>(previous_completed_slot_)];
+    return CompletedSourceInfo{slot.valid, previous_completed_slot_, slot.snapshot, slot.capture_time, slot.scene_gpu_us};
+}
+
+void Renderer::invalidate_source_history() {
+    flush();
+    for (auto& slot : source_slots_) {
+        slot.in_flight = false;
+        slot.valid = false;
+        slot.scene_fence_value = 0;
+        slot.last_read_present_fence = 0;
+        slot.scene_gpu_us = -1;
+    }
+    latest_completed_slot_ = -1;
+    previous_completed_slot_ = -1;
+}
+
+std::int32_t Renderer::find_available_source_slot() const {
+    const std::uint64_t completed_present = present_fence_->GetCompletedValue();
+    const std::uint64_t completed_scene = scene_fence_->GetCompletedValue();
+    for (UINT slot_index = 0; slot_index < source_slot_count; ++slot_index) {
+        const auto signed_index = static_cast<std::int32_t>(slot_index);
+        if (signed_index == latest_completed_slot_ || signed_index == previous_completed_slot_) continue;
+        const auto& slot = source_slots_[slot_index];
+        if (!slot.in_flight && completed_scene >= slot.scene_fence_value && completed_present >= slot.last_read_present_fence) {
+            return signed_index;
+        }
+    }
+    for (UINT slot_index = 0; slot_index < source_slot_count; ++slot_index) {
+        const auto signed_index = static_cast<std::int32_t>(slot_index);
+        if (signed_index == latest_completed_slot_) continue;
+        const auto& slot = source_slots_[slot_index];
+        if (!slot.in_flight && completed_scene >= slot.scene_fence_value && completed_present >= slot.last_read_present_fence) {
+            return signed_index;
+        }
+    }
+    return -1;
+}
+
+bool Renderer::submit_scene_async(
+    const SceneSnapshot& snapshot,
+    std::chrono::steady_clock::time_point capture_time,
+    std::int32_t stress_level,
+    std::uint64_t frame_id,
+    LatencyMonitor& latency_monitor,
+    bool wait_for_completion) {
+    if (viewport_width_ == 0 || viewport_height_ == 0) return false;
+    poll_completed_scenes();
+    if (has_scene_in_flight()) return false;
+
+    std::int32_t slot_index = find_available_source_slot();
+    if (slot_index < 0 && wait_for_completion) {
+        flush();
+        poll_completed_scenes();
+        slot_index = find_available_source_slot();
+        if (slot_index < 0) slot_index = 0;
+    }
+    if (slot_index < 0) return false;
+
+    auto& slot = source_slots_[static_cast<std::size_t>(slot_index)];
+    const float aspect_ratio = static_cast<float>(viewport_width_) / static_cast<float>(viewport_height_);
+    const float rcp_width = 1.0f / static_cast<float>(viewport_width_);
+    const float rcp_height = 1.0f / static_cast<float>(viewport_height_);
+    const std::size_t constant_offset = static_cast<std::size_t>(slot_index) * constant_buffer_stride;
+    auto* scene_constants = reinterpret_cast<SceneConstantsData*>(mapped_scene_constants_ + constant_offset);
+    const float tan_y = snapshot.camera.tan_half_fov_y;
+    const float tan_x = tan_y * aspect_ratio;
+    const float prev_tan_y = snapshot.previous_camera.tan_half_fov_y;
+    const float prev_tan_x = prev_tan_y * aspect_ratio;
+    write_float4(scene_constants->camera_position_tan_y, snapshot.camera.position, tan_y);
+    write_float4(scene_constants->camera_right_aspect, snapshot.camera.right, tan_x);
+    write_float4(scene_constants->camera_up_width, snapshot.camera.up, rcp_width);
+    write_float4(scene_constants->camera_forward_height, snapshot.camera.forward, rcp_height);
+    write_float4(scene_constants->previous_camera_position_tan_y, snapshot.previous_camera.position, 1.0f / prev_tan_y);
+    write_float4(scene_constants->previous_camera_right_aspect, snapshot.previous_camera.right, 1.0f / prev_tan_x);
+    write_float4(scene_constants->previous_camera_up_cut, snapshot.previous_camera.up, snapshot.discontinuity ? 1.0f : 0.0f);
+    write_float4(scene_constants->previous_camera_forward_unused, snapshot.previous_camera.forward, 0.0f);
+    write_float4(scene_constants->ball_center_stress, snapshot.ball_center, static_cast<float>(stress_level));
+    write_float4(scene_constants->previous_ball_center_unused, snapshot.previous_ball_center, 0.0f);
+
+    latency_monitor.emit_marker(LatencyMarker::render_submit_start, frame_id);
+    check(slot.command_allocator->Reset(), "Reset scene command allocator");
+    check(scene_command_list_->Reset(slot.command_allocator.Get(), nullptr), "Reset scene command list");
+
+    const D3D12_VIEWPORT viewport{0.0f, 0.0f, static_cast<float>(viewport_width_), static_cast<float>(viewport_height_), 0.0f, 1.0f};
+    const D3D12_RECT scissor{0, 0, static_cast<LONG>(viewport_width_), static_cast<LONG>(viewport_height_)};
+    scene_command_list_->RSSetViewports(1, &viewport);
+    scene_command_list_->RSSetScissorRects(1, &scissor);
+    scene_command_list_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+    const UINT query_base = static_cast<UINT>(slot_index) * timestamps_per_pass;
+    if (scene_timestamp_heap_) {
+        scene_command_list_->EndQuery(scene_timestamp_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, query_base + 0);
+    }
+
+    const std::array<D3D12_RESOURCE_BARRIER, targets_per_source_slot> to_rtv = {
+        transition_barrier(slot.color_target.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET),
+        transition_barrier(slot.depth_target.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET),
+        transition_barrier(slot.motion_target.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET),
+    };
+    scene_command_list_->ResourceBarrier(static_cast<UINT>(to_rtv.size()), to_rtv.data());
+
+    auto offscreen_rtv = render_target_heap_->GetCPUDescriptorHandleForHeapStart();
+    offscreen_rtv.ptr += static_cast<SIZE_T>(swap_chain_buffer_count + static_cast<UINT>(slot_index) * targets_per_source_slot) * render_target_descriptor_stride_;
+    scene_command_list_->OMSetRenderTargets(targets_per_source_slot, &offscreen_rtv, TRUE, nullptr);
+    scene_command_list_->SetGraphicsRootSignature(scene_root_signature_.Get());
+    scene_command_list_->SetPipelineState(scene_pipeline_.Get());
+    scene_command_list_->SetGraphicsRootConstantBufferView(0, scene_constant_buffer_->GetGPUVirtualAddress() + constant_offset);
+    scene_command_list_->DrawInstanced(3, 1, 0, 0);
+
+    const std::array<D3D12_RESOURCE_BARRIER, targets_per_source_slot> to_srv = {
+        transition_barrier(slot.color_target.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
+        transition_barrier(slot.depth_target.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
+        transition_barrier(slot.motion_target.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
+    };
+    scene_command_list_->ResourceBarrier(static_cast<UINT>(to_srv.size()), to_srv.data());
+
+    if (scene_timestamp_heap_) {
+        scene_command_list_->EndQuery(scene_timestamp_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, query_base + 1);
+        scene_command_list_->ResolveQueryData(
+            scene_timestamp_heap_.Get(),
+            D3D12_QUERY_TYPE_TIMESTAMP,
+            query_base,
+            timestamps_per_pass,
+            scene_timestamp_readback_.Get(),
+            static_cast<UINT64>(query_base) * sizeof(std::uint64_t));
+    }
+
+    check(scene_command_list_->Close(), "Close scene command list");
+    ID3D12CommandList* command_lists[] = {scene_command_list_.Get()};
+    scene_queue_->ExecuteCommandLists(1, command_lists);
+    latency_monitor.emit_marker(LatencyMarker::render_submit_end, frame_id);
+
+    const auto fence_value = next_scene_fence_value_++;
+    check(scene_queue_->Signal(scene_fence_.Get(), fence_value), "Signal scene fence");
+    slot.snapshot = snapshot;
+    slot.capture_time = capture_time;
+    slot.scene_fence_value = fence_value;
+    slot.in_flight = true;
+
+    if (wait_for_completion) {
+        wait_for_fence(scene_fence_.Get(), scene_fence_event_.get(), fence_value);
+        poll_completed_scenes();
+    }
+    return true;
+}
+
+FrameExecutionMetrics Renderer::present_from_source(const PresentRequest& request, LatencyMonitor& latency_monitor, FramePacer& pacer) {
+    FrameExecutionMetrics metrics{
+        std::chrono::steady_clock::now(),
+        last_completed_scene_gpu_us_,
+        -1,
+        0,
+        0,
+        0,
+        0,
+        false,
+        false,
+        has_scene_in_flight(),
+        false,
+        gpu_timing_available(),
+    };
+    if (viewport_width_ == 0 || viewport_height_ == 0 || request.source_slot_index < 0) {
         return metrics;
     }
 
@@ -314,20 +537,14 @@ FrameExecutionMetrics Renderer::render_and_present(const FrameRenderRequest& req
 
     if (buffer_has_data_[buffer_index]) {
         metrics.completed_slot_valid = true;
-        metrics.completed_slot_source_rendered = buffer_source_rendered_[buffer_index];
         metrics.completed_slot_warped = buffer_warped_[buffer_index];
         metrics.completed_total_pixel_count = buffer_total_pixels_[buffer_index];
-        if (mapped_timestamps_ && gpu_timestamp_frequency_ > 0) {
-            const std::size_t base_index = static_cast<std::size_t>(buffer_index) * timestamps_per_frame;
-            const std::uint64_t scene_begin = mapped_timestamps_[base_index + 0];
-            const std::uint64_t scene_end = mapped_timestamps_[base_index + 1];
-            const std::uint64_t present_begin = mapped_timestamps_[base_index + 2];
-            const std::uint64_t present_end = mapped_timestamps_[base_index + 3];
-            if (buffer_source_rendered_[buffer_index] && scene_end >= scene_begin) {
-                metrics.completed_scene_gpu_us = static_cast<std::int64_t>(((scene_end - scene_begin) * 1000000ULL) / gpu_timestamp_frequency_);
-            }
+        if (mapped_present_timestamps_ && present_timestamp_frequency_ > 0) {
+            const std::size_t base_index = static_cast<std::size_t>(buffer_index) * timestamps_per_pass;
+            const std::uint64_t present_begin = mapped_present_timestamps_[base_index + 0];
+            const std::uint64_t present_end = mapped_present_timestamps_[base_index + 1];
             if (present_end >= present_begin) {
-                metrics.completed_present_gpu_us = static_cast<std::int64_t>(((present_end - present_begin) * 1000000ULL) / gpu_timestamp_frequency_);
+                metrics.completed_present_gpu_us = static_cast<std::int64_t>(((present_end - present_begin) * 1000000ULL) / present_timestamp_frequency_);
             }
         }
         if (buffer_warped_[buffer_index] && mapped_reprojection_stats_) {
@@ -345,24 +562,6 @@ FrameExecutionMetrics Renderer::render_and_present(const FrameRenderRequest& req
     const float rcp_height = 1.0f / static_cast<float>(viewport_height_);
     const std::size_t constant_offset = static_cast<std::size_t>(buffer_index) * constant_buffer_stride;
     const std::size_t hud_offset = static_cast<std::size_t>(buffer_index) * hud_constant_buffer_stride;
-
-    if (request.render_scene_pass) {
-        auto* scene_constants = reinterpret_cast<SceneConstantsData*>(mapped_scene_constants_ + constant_offset);
-        const float tan_y = request.source_snapshot.camera.tan_half_fov_y;
-        const float tan_x = tan_y * aspect_ratio;
-        const float prev_tan_y = request.source_snapshot.previous_camera.tan_half_fov_y;
-        const float prev_tan_x = prev_tan_y * aspect_ratio;
-        write_float4(scene_constants->camera_position_tan_y, request.source_snapshot.camera.position, tan_y);
-        write_float4(scene_constants->camera_right_aspect, request.source_snapshot.camera.right, tan_x);
-        write_float4(scene_constants->camera_up_width, request.source_snapshot.camera.up, rcp_width);
-        write_float4(scene_constants->camera_forward_height, request.source_snapshot.camera.forward, rcp_height);
-        write_float4(scene_constants->previous_camera_position_tan_y, request.source_snapshot.previous_camera.position, 1.0f / prev_tan_y);
-        write_float4(scene_constants->previous_camera_right_aspect, request.source_snapshot.previous_camera.right, 1.0f / prev_tan_x);
-        write_float4(scene_constants->previous_camera_up_cut, request.source_snapshot.previous_camera.up, request.source_snapshot.discontinuity ? 1.0f : 0.0f);
-        write_float4(scene_constants->previous_camera_forward_unused, request.source_snapshot.previous_camera.forward, 0.0f);
-        write_float4(scene_constants->ball_center_stress, request.source_snapshot.ball_center, static_cast<float>(request.stress_level));
-        write_float4(scene_constants->previous_ball_center_unused, request.source_snapshot.previous_ball_center, 0.0f);
-    }
 
     auto* present_constants = reinterpret_cast<PresentConstantsData*>(mapped_present_constants_ + constant_offset);
     const float source_tan_y = request.source_snapshot.camera.tan_half_fov_y;
@@ -395,107 +594,77 @@ FrameExecutionMetrics Renderer::render_and_present(const FrameRenderRequest& req
         write_hud_constants_simd(hud_destination, *request.hud, viewport_width_, viewport_height_);
     }
 
-    check(command_allocators_[buffer_index]->Reset(), "Reset command allocator");
-    check(command_list_->Reset(command_allocators_[buffer_index].Get(), nullptr), "Reset command list");
+    check(present_command_allocators_[buffer_index]->Reset(), "Reset present command allocator");
+    check(present_command_list_->Reset(present_command_allocators_[buffer_index].Get(), nullptr), "Reset present command list");
 
     const D3D12_VIEWPORT viewport{0.0f, 0.0f, static_cast<float>(viewport_width_), static_cast<float>(viewport_height_), 0.0f, 1.0f};
     const D3D12_RECT scissor{0, 0, static_cast<LONG>(viewport_width_), static_cast<LONG>(viewport_height_)};
-    command_list_->RSSetViewports(1, &viewport);
-    command_list_->RSSetScissorRects(1, &scissor);
-    command_list_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-
-    const UINT query_base = buffer_index * timestamps_per_frame;
-    if (timestamp_query_heap_) {
-        command_list_->EndQuery(timestamp_query_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, query_base + 0);
-    }
-
-    if (request.render_scene_pass) {
-        const std::array<D3D12_RESOURCE_BARRIER, offscreen_target_count> to_render_target = {
-            transition_barrier(scene_color_target_.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET),
-            transition_barrier(scene_depth_target_.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET),
-            transition_barrier(scene_motion_target_.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET),
-        };
-        command_list_->ResourceBarrier(static_cast<UINT>(to_render_target.size()), to_render_target.data());
-
-        auto offscreen_rtv = render_target_heap_->GetCPUDescriptorHandleForHeapStart();
-        offscreen_rtv.ptr += static_cast<SIZE_T>(swap_chain_buffer_count) * render_target_descriptor_stride_;
-        command_list_->OMSetRenderTargets(offscreen_target_count, &offscreen_rtv, TRUE, nullptr);
-        command_list_->SetGraphicsRootSignature(scene_root_signature_.Get());
-        command_list_->SetPipelineState(scene_pipeline_.Get());
-        command_list_->SetGraphicsRootConstantBufferView(0, scene_constant_buffer_->GetGPUVirtualAddress() + constant_offset);
-        command_list_->DrawInstanced(3, 1, 0, 0);
-
-        const std::array<D3D12_RESOURCE_BARRIER, offscreen_target_count> to_shader_resource = {
-            transition_barrier(scene_color_target_.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
-            transition_barrier(scene_depth_target_.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
-            transition_barrier(scene_motion_target_.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
-        };
-        command_list_->ResourceBarrier(static_cast<UINT>(to_shader_resource.size()), to_shader_resource.data());
-    }
-
-    if (timestamp_query_heap_) {
-        command_list_->EndQuery(timestamp_query_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, query_base + 1);
-    }
+    present_command_list_->RSSetViewports(1, &viewport);
+    present_command_list_->RSSetScissorRects(1, &scissor);
+    present_command_list_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
     if (request.warp_enabled) {
         const auto stats_to_copy_dest = transition_barrier(reprojection_stats_uav_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST);
-        command_list_->ResourceBarrier(1, &stats_to_copy_dest);
-        command_list_->CopyBufferRegion(reprojection_stats_uav_.Get(), 0, reprojection_stats_zero_upload_.Get(), 0, sizeof(std::uint32_t));
+        present_command_list_->ResourceBarrier(1, &stats_to_copy_dest);
+        present_command_list_->CopyBufferRegion(reprojection_stats_uav_.Get(), 0, reprojection_stats_zero_upload_.Get(), 0, sizeof(std::uint32_t));
         const auto stats_to_uav = transition_barrier(reprojection_stats_uav_.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        command_list_->ResourceBarrier(1, &stats_to_uav);
+        present_command_list_->ResourceBarrier(1, &stats_to_uav);
     }
 
-    if (timestamp_query_heap_) {
-        command_list_->EndQuery(timestamp_query_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, query_base + 2);
+    const UINT query_base = buffer_index * timestamps_per_pass;
+    if (present_timestamp_heap_) {
+        present_command_list_->EndQuery(present_timestamp_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, query_base + 0);
     }
 
     const auto back_buffer_to_rtv = transition_barrier(render_targets_[buffer_index].Get(), D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
-    command_list_->ResourceBarrier(1, &back_buffer_to_rtv);
+    present_command_list_->ResourceBarrier(1, &back_buffer_to_rtv);
 
     auto back_buffer_rtv = render_target_heap_->GetCPUDescriptorHandleForHeapStart();
     back_buffer_rtv.ptr += static_cast<SIZE_T>(buffer_index) * render_target_descriptor_stride_;
-    command_list_->OMSetRenderTargets(1, &back_buffer_rtv, FALSE, nullptr);
+    present_command_list_->OMSetRenderTargets(1, &back_buffer_rtv, FALSE, nullptr);
 
     ID3D12DescriptorHeap* heaps[] = {shader_resource_heap_.Get()};
-    command_list_->SetDescriptorHeaps(1, heaps);
-    command_list_->SetGraphicsRootSignature(present_root_signature_.Get());
-    command_list_->SetPipelineState(present_pipeline_.Get());
-    command_list_->SetGraphicsRootConstantBufferView(0, present_constant_buffer_->GetGPUVirtualAddress() + constant_offset);
-    command_list_->SetGraphicsRootDescriptorTable(1, shader_resource_heap_->GetGPUDescriptorHandleForHeapStart());
-    command_list_->SetGraphicsRootUnorderedAccessView(2, reprojection_stats_uav_->GetGPUVirtualAddress());
-    command_list_->SetGraphicsRootConstantBufferView(3, hud_constant_buffer_->GetGPUVirtualAddress() + hud_offset);
-    command_list_->DrawInstanced(3, 1, 0, 0);
+    present_command_list_->SetDescriptorHeaps(1, heaps);
+    present_command_list_->SetGraphicsRootSignature(present_root_signature_.Get());
+    present_command_list_->SetPipelineState(present_pipeline_.Get());
+    present_command_list_->SetGraphicsRootConstantBufferView(0, present_constant_buffer_->GetGPUVirtualAddress() + constant_offset);
+    auto source_srv_gpu = shader_resource_heap_->GetGPUDescriptorHandleForHeapStart();
+    source_srv_gpu.ptr += static_cast<UINT64>(request.source_slot_index) * targets_per_source_slot * shader_resource_descriptor_stride_;
+    present_command_list_->SetGraphicsRootDescriptorTable(1, source_srv_gpu);
+    present_command_list_->SetGraphicsRootUnorderedAccessView(2, reprojection_stats_uav_->GetGPUVirtualAddress());
+    present_command_list_->SetGraphicsRootConstantBufferView(3, hud_constant_buffer_->GetGPUVirtualAddress() + hud_offset);
+    present_command_list_->DrawInstanced(3, 1, 0, 0);
 
     const auto back_buffer_to_present = transition_barrier(render_targets_[buffer_index].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
-    command_list_->ResourceBarrier(1, &back_buffer_to_present);
+    present_command_list_->ResourceBarrier(1, &back_buffer_to_present);
 
-    if (timestamp_query_heap_) {
-        command_list_->EndQuery(timestamp_query_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, query_base + 3);
-        command_list_->ResolveQueryData(
-            timestamp_query_heap_.Get(),
+    if (present_timestamp_heap_) {
+        present_command_list_->EndQuery(present_timestamp_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, query_base + 1);
+        present_command_list_->ResolveQueryData(
+            present_timestamp_heap_.Get(),
             D3D12_QUERY_TYPE_TIMESTAMP,
             query_base,
-            timestamps_per_frame,
-            timestamp_readback_buffer_.Get(),
+            timestamps_per_pass,
+            present_timestamp_readback_.Get(),
             static_cast<UINT64>(query_base) * sizeof(std::uint64_t));
     }
 
     if (request.warp_enabled) {
         const auto stats_to_copy_source = transition_barrier(reprojection_stats_uav_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
-        command_list_->ResourceBarrier(1, &stats_to_copy_source);
-        command_list_->CopyBufferRegion(
+        present_command_list_->ResourceBarrier(1, &stats_to_copy_source);
+        present_command_list_->CopyBufferRegion(
             reprojection_stats_readback_.Get(),
             static_cast<UINT64>(buffer_index) * sizeof(std::uint32_t),
             reprojection_stats_uav_.Get(),
             0,
             sizeof(std::uint32_t));
         const auto stats_restore_uav = transition_barrier(reprojection_stats_uav_.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        command_list_->ResourceBarrier(1, &stats_restore_uav);
+        present_command_list_->ResourceBarrier(1, &stats_restore_uav);
     }
 
-    check(command_list_->Close(), "Close command list");
-    ID3D12CommandList* command_lists[] = {command_list_.Get()};
-    queue_->ExecuteCommandLists(1, command_lists);
+    check(present_command_list_->Close(), "Close present command list");
+    ID3D12CommandList* command_lists[] = {present_command_list_.Get()};
+    present_queue_->ExecuteCommandLists(1, command_lists);
 
     const auto submit_end_time = std::chrono::steady_clock::now();
     latency_monitor.emit_marker(
@@ -521,13 +690,13 @@ FrameExecutionMetrics Renderer::render_and_present(const FrameRenderRequest& req
         request.display_frame_id);
     metrics.present_call_cpu_us = std::chrono::duration_cast<std::chrono::microseconds>(present_end_time - present_begin_time).count();
 
-    const auto value = next_fence_value_++;
-    check(queue_->Signal(fence_.Get(), value), "Signal frame fence");
-    buffer_fence_values_[buffer_index] = value;
+    const auto fence_value = next_present_fence_value_++;
+    check(present_queue_->Signal(present_fence_.Get(), fence_value), "Signal present fence");
+    buffer_fence_values_[buffer_index] = fence_value;
     buffer_has_data_[buffer_index] = true;
-    buffer_source_rendered_[buffer_index] = request.render_scene_pass;
     buffer_warped_[buffer_index] = request.warp_enabled;
     buffer_total_pixels_[buffer_index] = viewport_width_ * viewport_height_;
+    source_slots_[static_cast<std::size_t>(request.source_slot_index)].last_read_present_fence = fence_value;
 
     return metrics;
 }
@@ -537,25 +706,40 @@ void Renderer::resize(UINT width, UINT height) {
     flush();
     has_acquired_slot_ = false;
     for (auto& target : render_targets_) target.Reset();
-    scene_color_target_.Reset();
-    scene_depth_target_.Reset();
-    scene_motion_target_.Reset();
+    for (auto& slot : source_slots_) {
+        slot.color_target.Reset();
+        slot.depth_target.Reset();
+        slot.motion_target.Reset();
+        slot.in_flight = false;
+        slot.valid = false;
+        slot.scene_fence_value = 0;
+        slot.last_read_present_fence = 0;
+        slot.scene_gpu_us = -1;
+    }
+    latest_completed_slot_ = -1;
+    previous_completed_slot_ = -1;
     check(swap_chain_->ResizeBuffers(swap_chain_buffer_count, width, height, DXGI_FORMAT_R8G8B8A8_UNORM, swap_chain_flags_), "Resize swap chain");
     viewport_width_ = width;
     viewport_height_ = height;
     buffer_fence_values_.fill(0);
     buffer_has_data_.fill(false);
-    buffer_source_rendered_.fill(false);
     buffer_warped_.fill(false);
     buffer_total_pixels_.fill(0);
     create_swap_chain_targets();
-    create_offscreen_targets();
+    create_source_targets();
 }
 
 void Renderer::flush() {
-    const auto value = next_fence_value_++;
-    check(queue_->Signal(fence_.Get(), value), "Signal flush fence");
-    wait_for_fence(value);
+    if (scene_queue_ && scene_fence_) {
+        const auto scene_value = next_scene_fence_value_++;
+        check(scene_queue_->Signal(scene_fence_.Get(), scene_value), "Signal scene flush fence");
+        wait_for_fence(scene_fence_.Get(), scene_fence_event_.get(), scene_value);
+    }
+    if (present_queue_ && present_fence_) {
+        const auto present_value = next_present_fence_value_++;
+        check(present_queue_->Signal(present_fence_.Get(), present_value), "Signal present flush fence");
+        wait_for_fence(present_fence_.Get(), present_fence_event_.get(), present_value);
+    }
 }
 
 void Renderer::create_pipelines() {
@@ -584,7 +768,7 @@ void Renderer::create_pipelines() {
     scene_pipeline_desc.pRootSignature = scene_root_signature_.Get();
     scene_pipeline_desc.VS = {scene_vs->GetBufferPointer(), scene_vs->GetBufferSize()};
     scene_pipeline_desc.PS = {scene_ps->GetBufferPointer(), scene_ps->GetBufferSize()};
-    for (UINT i = 0; i < offscreen_target_count; ++i) {
+    for (UINT i = 0; i < targets_per_source_slot; ++i) {
         scene_pipeline_desc.BlendState.RenderTarget[i].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
     }
     scene_pipeline_desc.SampleMask = UINT_MAX;
@@ -594,7 +778,7 @@ void Renderer::create_pipelines() {
     scene_pipeline_desc.DepthStencilState.DepthEnable = FALSE;
     scene_pipeline_desc.DepthStencilState.StencilEnable = FALSE;
     scene_pipeline_desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-    scene_pipeline_desc.NumRenderTargets = offscreen_target_count;
+    scene_pipeline_desc.NumRenderTargets = targets_per_source_slot;
     scene_pipeline_desc.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
     scene_pipeline_desc.RTVFormats[1] = DXGI_FORMAT_R32_FLOAT;
     scene_pipeline_desc.RTVFormats[2] = DXGI_FORMAT_R16G16_FLOAT;
@@ -603,7 +787,7 @@ void Renderer::create_pipelines() {
 
     D3D12_DESCRIPTOR_RANGE srv_range{};
     srv_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    srv_range.NumDescriptors = offscreen_target_count;
+    srv_range.NumDescriptors = targets_per_source_slot;
     srv_range.BaseShaderRegister = 0;
     srv_range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
 
@@ -667,10 +851,11 @@ void Renderer::create_pipelines() {
 }
 
 void Renderer::create_constant_buffers() {
-    const std::size_t total_size = static_cast<std::size_t>(swap_chain_buffer_count) * constant_buffer_stride;
+    const std::size_t scene_total_size = static_cast<std::size_t>(source_slot_count) * constant_buffer_stride;
+    const std::size_t present_total_size = static_cast<std::size_t>(swap_chain_buffer_count) * constant_buffer_stride;
     const std::size_t total_hud_size = static_cast<std::size_t>(swap_chain_buffer_count) * hud_constant_buffer_stride;
-    scene_constant_buffer_ = create_buffer(device_.Get(), D3D12_HEAP_TYPE_UPLOAD, total_size, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ, "Create scene constant buffer");
-    present_constant_buffer_ = create_buffer(device_.Get(), D3D12_HEAP_TYPE_UPLOAD, total_size, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ, "Create present constant buffer");
+    scene_constant_buffer_ = create_buffer(device_.Get(), D3D12_HEAP_TYPE_UPLOAD, scene_total_size, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ, "Create scene constant buffer");
+    present_constant_buffer_ = create_buffer(device_.Get(), D3D12_HEAP_TYPE_UPLOAD, present_total_size, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ, "Create present constant buffer");
     hud_constant_buffer_ = create_buffer(device_.Get(), D3D12_HEAP_TYPE_UPLOAD, total_hud_size, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ, "Create HUD constant buffer");
     D3D12_RANGE empty_range{0, 0};
     check(scene_constant_buffer_->Map(0, &empty_range, reinterpret_cast<void**>(&mapped_scene_constants_)), "Map scene constant buffer");
@@ -679,28 +864,48 @@ void Renderer::create_constant_buffers() {
 }
 
 void Renderer::create_timestamp_resources() {
-    if (FAILED(queue_->GetTimestampFrequency(&gpu_timestamp_frequency_)) || gpu_timestamp_frequency_ == 0) {
-        gpu_timestamp_frequency_ = 0;
-        return;
+    if (SUCCEEDED(present_queue_->GetTimestampFrequency(&present_timestamp_frequency_)) && present_timestamp_frequency_ > 0) {
+        D3D12_QUERY_HEAP_DESC heap_desc{};
+        heap_desc.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
+        heap_desc.Count = swap_chain_buffer_count * timestamps_per_pass;
+        if (SUCCEEDED(device_->CreateQueryHeap(&heap_desc, IID_PPV_ARGS(&present_timestamp_heap_)))) {
+            present_timestamp_readback_ = create_buffer(
+                device_.Get(),
+                D3D12_HEAP_TYPE_READBACK,
+                static_cast<std::size_t>(heap_desc.Count) * sizeof(std::uint64_t),
+                D3D12_RESOURCE_FLAG_NONE,
+                D3D12_RESOURCE_STATE_COPY_DEST,
+                "Create present timestamp readback");
+            if (FAILED(present_timestamp_readback_->Map(0, nullptr, reinterpret_cast<void**>(const_cast<std::uint64_t**>(&mapped_present_timestamps_))))) {
+                present_timestamp_readback_.Reset();
+                present_timestamp_heap_.Reset();
+                present_timestamp_frequency_ = 0;
+            }
+        } else {
+            present_timestamp_frequency_ = 0;
+        }
     }
-    D3D12_QUERY_HEAP_DESC query_heap_description{};
-    query_heap_description.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
-    query_heap_description.Count = swap_chain_buffer_count * timestamps_per_frame;
-    if (FAILED(device_->CreateQueryHeap(&query_heap_description, IID_PPV_ARGS(&timestamp_query_heap_)))) {
-        gpu_timestamp_frequency_ = 0;
-        return;
-    }
-    timestamp_readback_buffer_ = create_buffer(
-        device_.Get(),
-        D3D12_HEAP_TYPE_READBACK,
-        static_cast<std::size_t>(query_heap_description.Count) * sizeof(std::uint64_t),
-        D3D12_RESOURCE_FLAG_NONE,
-        D3D12_RESOURCE_STATE_COPY_DEST,
-        "Create timestamp readback buffer");
-    if (FAILED(timestamp_readback_buffer_->Map(0, nullptr, reinterpret_cast<void**>(const_cast<std::uint64_t**>(&mapped_timestamps_))))) {
-        timestamp_readback_buffer_.Reset();
-        timestamp_query_heap_.Reset();
-        gpu_timestamp_frequency_ = 0;
+
+    if (SUCCEEDED(scene_queue_->GetTimestampFrequency(&scene_timestamp_frequency_)) && scene_timestamp_frequency_ > 0) {
+        D3D12_QUERY_HEAP_DESC heap_desc{};
+        heap_desc.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
+        heap_desc.Count = source_slot_count * timestamps_per_pass;
+        if (SUCCEEDED(device_->CreateQueryHeap(&heap_desc, IID_PPV_ARGS(&scene_timestamp_heap_)))) {
+            scene_timestamp_readback_ = create_buffer(
+                device_.Get(),
+                D3D12_HEAP_TYPE_READBACK,
+                static_cast<std::size_t>(heap_desc.Count) * sizeof(std::uint64_t),
+                D3D12_RESOURCE_FLAG_NONE,
+                D3D12_RESOURCE_STATE_COPY_DEST,
+                "Create scene timestamp readback");
+            if (FAILED(scene_timestamp_readback_->Map(0, nullptr, reinterpret_cast<void**>(const_cast<std::uint64_t**>(&mapped_scene_timestamps_))))) {
+                scene_timestamp_readback_.Reset();
+                scene_timestamp_heap_.Reset();
+                scene_timestamp_frequency_ = 0;
+            }
+        } else {
+            scene_timestamp_frequency_ = 0;
+        }
     }
 }
 
@@ -744,44 +949,50 @@ void Renderer::create_swap_chain_targets() {
     }
 }
 
-void Renderer::create_offscreen_targets() {
-    scene_color_target_ = create_offscreen_texture(device_.Get(), viewport_width_, viewport_height_, DXGI_FORMAT_R16G16B16A16_FLOAT, "Create scene color target");
-    scene_depth_target_ = create_offscreen_texture(device_.Get(), viewport_width_, viewport_height_, DXGI_FORMAT_R32_FLOAT, "Create scene depth target");
-    scene_motion_target_ = create_offscreen_texture(device_.Get(), viewport_width_, viewport_height_, DXGI_FORMAT_R16G16_FLOAT, "Create scene motion target");
-
+void Renderer::create_source_targets() {
     auto rtv = render_target_heap_->GetCPUDescriptorHandleForHeapStart();
     rtv.ptr += static_cast<SIZE_T>(swap_chain_buffer_count) * render_target_descriptor_stride_;
-    device_->CreateRenderTargetView(scene_color_target_.Get(), nullptr, rtv);
-    rtv.ptr += render_target_descriptor_stride_;
-    device_->CreateRenderTargetView(scene_depth_target_.Get(), nullptr, rtv);
-    rtv.ptr += render_target_descriptor_stride_;
-    device_->CreateRenderTargetView(scene_motion_target_.Get(), nullptr, rtv);
-
     auto srv = shader_resource_heap_->GetCPUDescriptorHandleForHeapStart();
+
     D3D12_SHADER_RESOURCE_VIEW_DESC srv_desc{};
     srv_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
     srv_desc.Texture2D.MipLevels = 1;
 
-    srv_desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-    device_->CreateShaderResourceView(scene_color_target_.Get(), &srv_desc, srv);
-    srv.ptr += shader_resource_descriptor_stride_;
-    srv_desc.Format = DXGI_FORMAT_R32_FLOAT;
-    device_->CreateShaderResourceView(scene_depth_target_.Get(), &srv_desc, srv);
-    srv.ptr += shader_resource_descriptor_stride_;
-    srv_desc.Format = DXGI_FORMAT_R16G16_FLOAT;
-    device_->CreateShaderResourceView(scene_motion_target_.Get(), &srv_desc, srv);
+    for (UINT slot_index = 0; slot_index < source_slot_count; ++slot_index) {
+        auto& slot = source_slots_[slot_index];
+        slot.color_target = create_offscreen_texture(device_.Get(), viewport_width_, viewport_height_, DXGI_FORMAT_R16G16B16A16_FLOAT, "Create source color target");
+        slot.depth_target = create_offscreen_texture(device_.Get(), viewport_width_, viewport_height_, DXGI_FORMAT_R32_FLOAT, "Create source depth target");
+        slot.motion_target = create_offscreen_texture(device_.Get(), viewport_width_, viewport_height_, DXGI_FORMAT_R16G16_FLOAT, "Create source motion target");
+
+        device_->CreateRenderTargetView(slot.color_target.Get(), nullptr, rtv);
+        rtv.ptr += render_target_descriptor_stride_;
+        device_->CreateRenderTargetView(slot.depth_target.Get(), nullptr, rtv);
+        rtv.ptr += render_target_descriptor_stride_;
+        device_->CreateRenderTargetView(slot.motion_target.Get(), nullptr, rtv);
+        rtv.ptr += render_target_descriptor_stride_;
+
+        srv_desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        device_->CreateShaderResourceView(slot.color_target.Get(), &srv_desc, srv);
+        srv.ptr += shader_resource_descriptor_stride_;
+        srv_desc.Format = DXGI_FORMAT_R32_FLOAT;
+        device_->CreateShaderResourceView(slot.depth_target.Get(), &srv_desc, srv);
+        srv.ptr += shader_resource_descriptor_stride_;
+        srv_desc.Format = DXGI_FORMAT_R16G16_FLOAT;
+        device_->CreateShaderResourceView(slot.motion_target.Get(), &srv_desc, srv);
+        srv.ptr += shader_resource_descriptor_stride_;
+    }
 }
 
-void Renderer::wait_for_fence(std::uint64_t value) {
-    const auto completed = fence_->GetCompletedValue();
+void Renderer::wait_for_fence(ID3D12Fence* fence, HANDLE event_handle, std::uint64_t value) {
+    const auto completed = fence->GetCompletedValue();
     if (completed == UINT64_MAX) throw std::runtime_error("D3D12 device was removed");
     if (value == 0 || completed >= value) return;
-    check(fence_->SetEventOnCompletion(value, fence_completion_event_.get()), "Set fence event");
-    if (WaitForSingleObject(fence_completion_event_.get(), INFINITE) != WAIT_OBJECT_0) {
+    check(fence->SetEventOnCompletion(value, event_handle), "Set fence event");
+    if (WaitForSingleObject(event_handle, INFINITE) != WAIT_OBJECT_0) {
         throw std::system_error(static_cast<int>(GetLastError()), std::system_category(), "Wait for GPU");
     }
-    if (fence_->GetCompletedValue() == UINT64_MAX) throw std::runtime_error("D3D12 device was removed");
+    if (fence->GetCompletedValue() == UINT64_MAX) throw std::runtime_error("D3D12 device was removed");
 }
 
 }

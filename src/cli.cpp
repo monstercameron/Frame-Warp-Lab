@@ -224,6 +224,7 @@ int print_status(const WindowInstance& instance) {
     const std::int64_t repeated_frames = std::atomic_ref<std::int64_t>(state->repeated_frame_count).load(std::memory_order_acquire);
     const std::int64_t warped_frames = std::atomic_ref<std::int64_t>(state->warped_frame_count).load(std::memory_order_acquire);
     const std::int64_t fallback_frames = std::atomic_ref<std::int64_t>(state->fallback_frame_count).load(std::memory_order_acquire);
+    const std::int64_t async_overlaps = std::atomic_ref<std::int64_t>(state->async_overlap_count).load(std::memory_order_acquire);
     const std::int64_t missed_deadlines = std::atomic_ref<std::int64_t>(state->missed_deadline_count).load(std::memory_order_acquire);
     const std::int64_t target_period_us = std::atomic_ref<std::int64_t>(state->target_period_us).load(std::memory_order_acquire);
     const std::int64_t present_interval_us = std::atomic_ref<std::int64_t>(state->last_present_interval_us).load(std::memory_order_acquire);
@@ -246,6 +247,8 @@ int print_status(const WindowInstance& instance) {
     const std::int32_t vsync_enabled = std::atomic_ref<std::int32_t>(state->vsync_enabled).load(std::memory_order_acquire);
     const std::int32_t allow_tearing_enabled = std::atomic_ref<std::int32_t>(state->allow_tearing_enabled).load(std::memory_order_acquire);
     const std::int32_t waitable_swap_chain = std::atomic_ref<std::int32_t>(state->waitable_swap_chain).load(std::memory_order_acquire);
+    const std::int32_t async_gpu_enabled = std::atomic_ref<std::int32_t>(state->async_gpu_enabled).load(std::memory_order_acquire);
+    const std::int32_t high_priority_present_queue = std::atomic_ref<std::int32_t>(state->high_priority_present_queue).load(std::memory_order_acquire);
     const std::int32_t diagnostic_view = std::atomic_ref<std::int32_t>(state->diagnostic_view).load(std::memory_order_acquire);
     const std::int32_t camera_path = std::atomic_ref<std::int32_t>(state->camera_path).load(std::memory_order_acquire);
     const std::int32_t stress_level = std::atomic_ref<std::int32_t>(state->stress_level).load(std::memory_order_acquire);
@@ -284,6 +287,9 @@ int print_status(const WindowInstance& instance) {
               << ",\"vsync_enabled\":" << (vsync_enabled ? "true" : "false")
               << ",\"allow_tearing_enabled\":" << (allow_tearing_enabled ? "true" : "false")
               << ",\"waitable_swap_chain\":" << (waitable_swap_chain ? "true" : "false")
+              << ",\"async_gpu_enabled\":" << (async_gpu_enabled ? "true" : "false")
+              << ",\"high_priority_present_queue\":" << (high_priority_present_queue ? "true" : "false")
+              << ",\"async_overlapped_presents\":" << async_overlaps
               << ",\"wait_before_input_sample\":true"
               << ",\"max_frame_latency\":2,\"displayed_frame_timing\":null}"
               << ",\"timing\":{\"cpu_present_interval_us\":" << present_interval_us
@@ -320,7 +326,7 @@ int print_status(const WindowInstance& instance) {
               << "},\"diagnostic_view\":\"" << frame_warp_lab::diagnostic_view_name(diagnostic_view)
               << "\",\"stress_level\":" << stress_level
               << ",\"overlay_enabled\":" << (overlay_enabled ? "true" : "false") << "}"
-              << ",\"features\":{\"scene\":\"cpu_camera_gbuffer\",\"hud\":\"2d_frametime_graph_and_readout\",\"reprojection\":\"depth_camera_warp\",\"nvidia_pcl_markers\":\"etw_tracelogging_active\",\"frame_generation\":\"not_implemented\",\"vrs\":\"not_implemented\"}}\n";
+              << ",\"features\":{\"scene\":\"cpu_camera_gbuffer\",\"hud\":\"2d_frametime_graph_and_readout\",\"async_gpu\":\"dual_queue_3slot_ring\",\"reprojection\":\"depth_camera_warp\",\"nvidia_pcl_markers\":\"etw_tracelogging_active\",\"frame_generation\":\"not_implemented\",\"vrs\":\"not_implemented\"}}\n";
     return 0;
 }
 
@@ -386,6 +392,7 @@ int print_trace(const WindowInstance& instance, std::size_t max_samples, bool in
     std::int64_t repeated_count = 0;
     std::int64_t warped_count = 0;
     std::int64_t fallback_count = 0;
+    std::int64_t async_overlap_count = 0;
     std::int64_t missed_deadline_count = 0;
 
     for (std::int64_t sequence = first_sequence; sequence <= total_samples; ++sequence) {
@@ -414,6 +421,7 @@ int print_trace(const WindowInstance& instance, std::size_t max_samples, bool in
             case frame_warp_lab::FrameKind::warped: ++warped_count; break;
             case frame_warp_lab::FrameKind::fallback: ++fallback_count; break;
         }
+        if (copy.async_overlapped) ++async_overlap_count;
         if (copy.missed_deadline) ++missed_deadline_count;
     }
 
@@ -422,12 +430,13 @@ int print_trace(const WindowInstance& instance, std::size_t max_samples, bool in
               << ",\"total_frames_recorded\":" << total_samples
               << ",\"sample_count\":" << captured.size()
               << ",\"units\":\"microseconds\""
-              << ",\"note\":\"cpu_present_interval_us is Present return cadence; input_to_present_us is software input arrival to Present return; GPU timings come from the completed swap-chain slot\""
+              << ",\"note\":\"cpu_present_interval_us is Present entry cadence; input_to_present_us is software input arrival to Present return; GPU timings come from completed queue slots\""
               << ",\"summary\":{\"frame_kinds\":{\"rendered\":" << rendered_count
               << ",\"repeated\":" << repeated_count
               << ",\"warped\":" << warped_count
               << ",\"fallback\":" << fallback_count
-              << "},\"missed_deadlines\":" << missed_deadline_count
+              << "},\"async_overlaps\":" << async_overlap_count
+              << ",\"missed_deadlines\":" << missed_deadline_count
               << ",\"cpu_present_interval_us\":";
     print_metric_summary(present_intervals);
     std::cout << ",\"cpu_source_age_us\":";
@@ -552,8 +561,13 @@ int apply_setting(const WindowInstance& instance, const std::wstring& key, const
         }
         command = frame_warp_lab::ControlCommand::set_target_fps;
         parameter = static_cast<LPARAM>(parsed);
+    } else if (key == L"async_gpu") {
+        command = frame_warp_lab::ControlCommand::set_async_gpu;
+        if (value == L"on" || value == L"1" || value == L"true") parameter = 1;
+        else if (value == L"off" || value == L"0" || value == L"false") parameter = 0;
+        else return fail("invalid_value", "Expected async_gpu in {on, off}");
     } else {
-        return fail("unknown_setting", "Supported settings are: mode, pacer, target_fps, divider, vsync, view, path, stress, overlay, flash");
+        return fail("unknown_setting", "Supported settings are: mode, pacer, target_fps, async_gpu, divider, vsync, view, path, stress, overlay, flash");
     }
 
     if (!PostMessageW(instance.window, frame_warp_lab::control_message, static_cast<WPARAM>(command), parameter)) {
@@ -656,14 +670,14 @@ int print_capabilities() {
 
 int wmain(int argument_count, wchar_t** arguments) {
     if (argument_count == 2 && std::wstring(arguments[1]) == L"help") {
-        std::cout << "{\"ok\":true,\"schema_version\":6,\"commands\":[\"help\",\"start\",\"instances\",\"status <pid>\",\"events <pid>\",\"trace <pid> [limit] [summary]\",\"set <pid> <key> <value>\",\"pause <pid>\",\"resume <pid>\",\"reset <pid>\",\"stop <pid>\",\"capabilities\"],\"settings\":{\"mode\":[\"full_render\",\"repeat\",\"reproject\"],\"pacer\":[\"deadline\",\"vsync_only\",\"unlocked\"],\"target_fps\":\"0 or 30..500\",\"divider\":\"1..8\",\"vsync\":[\"on\",\"off\"],\"view\":[\"final\",\"depth\",\"motion\",\"holes\"],\"path\":[\"corridor_sway\",\"fast_pan\",\"occlusion_sweep\",\"camera_cut\",\"manual\"],\"stress\":\"0..64\",\"overlay\":[\"on\",\"off\"],\"flash\":[\"on\",\"off\"]}}\n";
+        std::cout << "{\"ok\":true,\"schema_version\":6,\"commands\":[\"help\",\"start\",\"instances\",\"status <pid>\",\"events <pid>\",\"trace <pid> [limit] [summary]\",\"set <pid> <key> <value>\",\"pause <pid>\",\"resume <pid>\",\"reset <pid>\",\"stop <pid>\",\"capabilities\"],\"settings\":{\"mode\":[\"full_render\",\"repeat\",\"reproject\"],\"pacer\":[\"deadline\",\"vsync_only\",\"unlocked\"],\"target_fps\":\"0 or 30..500\",\"async_gpu\":[\"on\",\"off\"],\"divider\":\"1..8\",\"vsync\":[\"on\",\"off\"],\"view\":[\"final\",\"depth\",\"motion\",\"holes\"],\"path\":[\"corridor_sway\",\"fast_pan\",\"occlusion_sweep\",\"camera_cut\",\"manual\"],\"stress\":\"0..64\",\"overlay\":[\"on\",\"off\"],\"flash\":[\"on\",\"off\"]}}\n";
         return 0;
     }
     if (argument_count == 2 && std::wstring(arguments[1]) == L"capabilities") return print_capabilities();
     if (argument_count == 2 && std::wstring(arguments[1]) == L"start") return start_instance();
     const auto instances = find_instances();
     if (argument_count == 2 && std::wstring(arguments[1]) == L"instances") {
-        std::cout << "{\"ok\":true,\"schema_version\":5,\"instances\":[";
+        std::cout << "{\"ok\":true,\"schema_version\":6,\"instances\":[";
         for (std::size_t index = 0; index < instances.size(); ++index) {
             if (index) std::cout << ',';
             std::cout << "{\"process_id\":" << instances[index].process_id << "}";

@@ -1,5 +1,16 @@
 # Development log
 
+## v0.11.0 — Dual-queue asynchronous GPU execution and 3-slot source history ring
+
+- Refactored `src/renderer.h` and `src/renderer.cpp` from a single serialized direct command queue into two independent D3D12 command queues: a `D3D12_COMMAND_QUEUE_PRIORITY_NORMAL` `scene_queue_` for heavy G-buffer rendering and a `D3D12_COMMAND_QUEUE_PRIORITY_HIGH` `present_queue_` (with automatic NORMAL fallback) for late reprojection, HUD compositing, and `Present()`, each with its own fence, event handle, command list, and GPU timestamp query heap.
+- Replaced the single offscreen G-buffer with a 3-slot source ring (`source_slots_[3]`) tracking `latest_completed_slot_` (`T_n`) and `previous_completed_slot_` (`T_{n-1}`) with per-slot `scene_fence_value` and `last_read_present_fence` lifetime guards so `scene_queue_` can render into an idle slot concurrently while `present_queue_` warps and presents the latest completed source without stalling on the scene pass.
+- Wired non-blocking async scene dispatch (`async_gpu_enabled`, default `on`, hotkey `G`, CLI `set <pid> async_gpu on|off`) in `src/main.cpp`, `src/runtime_state.h` (`runtime_state_version = 10`), and `src/cli.cpp`, reporting `high_priority_present_queue` and `async_overlapped_presents` / `async_overlaps` in `status` and `trace`.
+- Verified zero-warning ARM64 Release and Debug builds (plus Debug smoke test with D3D12 debug layer) and a live Release Sync vs. Async workload-spike comparison on `NVIDIA RTX Spark N1X` (`1264x681`, `120 Hz` DWM deadline lock, `reproject /2`, `stress=64`, 160-frame traces):
+  - `high_priority_present_queue: true` was granted by D3D12 on RTX Spark N1X.
+  - Synchronous (`async_gpu=off`): `async_overlaps: 0`, **80 / 160 missed deadlines**, `cpu_present_interval_us` median **10,900 µs** (min 2,082 / p95 13,292 / max 14,584 µs), `scene_gpu_us` median 4,574 µs, `present_gpu_us` median 47 µs.
+  - Asynchronous (`async_gpu=on`): **81 overlapped presents**, **1 / 160 missed deadlines**, `cpu_present_interval_us` median **8,333 µs** (min 7,806 / p95 8,475 / max 8,719 µs), `scene_gpu_us` median 4,864 µs, `present_gpu_us` median 48 µs (p95 130 µs).
+- Honest trade-off and limitations: non-blocking presentation from the previously completed source slot increases `cpu_source_age_us` median from ~10.8 ms to **17.4 ms** (~2 refresh intervals), which motivates motion-vector extrapolation and temporal history recovery in `v0.12.0`. Physical display scanout timing still requires elevated PresentMon/FrameView capture.
+
 ## v0.10.2 — Record five core architectural requirements in research docs
 
 - Added the five core architectural pillars (deadline-based scheduling beyond VSync alone, independent scene-rendering and reprojection queues, GPU execution headroom reservation, actual displayed-frame timing through PresentMon, and independent camera vs. world-state update frequencies) to `research.md` and `experiment-plan.md`.
