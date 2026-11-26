@@ -215,7 +215,7 @@ void vis_classify_main(
         uint surf_hash = 0u;
         uint sky_flags_init = (uint)(previous_ball_center_unused.w + 0.5);
         float3 cached_color = ((sky_flags_init & 256u) != 0u)
-            ? pbr_linear_to_srgb(pbr_aces_filmic(pbr_env_cubemap.SampleLevel(linear_clamp_sampler, direction, 0.0).rgb * 0.45))
+            ? pbr_aces_filmic(pbr_env_cubemap.SampleLevel(linear_clamp_sampler, direction, 0.0).rgb * 0.45)
             : float3(0.035, 0.055, 0.07);
         bool cache_hit = false;
         bool has_prev_cache = (cache_params.x != 0u) && (previous_camera_up_cut.w < 0.5);
@@ -633,7 +633,7 @@ void tile_shade_main(
             + camera_up_rcp_width.xyz * (sky_ndc.y * camera_position_tan_y.w)
             + camera_forward_rcp_height.xyz);
         float3 sky_col = ((sky_flags & 256u) != 0u)
-            ? pbr_linear_to_srgb(pbr_aces_filmic(pbr_env_cubemap.SampleLevel(linear_clamp_sampler, sky_dir, 0.0).rgb * 0.45))
+            ? pbr_aces_filmic(pbr_env_cubemap.SampleLevel(linear_clamp_sampler, sky_dir, 0.0).rgb * 0.45)
             : float3(0.035, 0.055, 0.07);
         out_color_uav[pixel_coord] = float4(sky_col, 1.0);
         return;

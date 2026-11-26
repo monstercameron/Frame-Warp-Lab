@@ -4,6 +4,7 @@
 #include "renderer.h"
 #include "runtime_state.h"
 #include "simulation.h"
+#include "tactical_range.h"
 
 #include <windows.h>
 #include <windowsx.h>
@@ -107,6 +108,7 @@ public:
         std::uint32_t shader_flags,
         bool pbr_enabled,
         bool aniso_mip_enabled,
+        frame_warp_lab::SceneKind scene_kind,
         bool overlay_enabled,
         bool flash_indicator_enabled) {
         std::atomic_ref<std::int32_t>(state_->presentation_mode).store(static_cast<std::int32_t>(presentation_mode), std::memory_order_release);
@@ -125,8 +127,22 @@ public:
         std::atomic_ref<std::uint32_t>(state_->shader_flags).store(shader_flags, std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->pbr_enabled).store(pbr_enabled ? 1 : 0, std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->aniso_mip_enabled).store(aniso_mip_enabled ? 1 : 0, std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->scene_kind).store(static_cast<std::int32_t>(scene_kind), std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->overlay_enabled).store(overlay_enabled ? 1 : 0, std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->flash_indicator_enabled).store(flash_indicator_enabled ? 1 : 0, std::memory_order_release);
+    }
+
+    void update_tactical_range(const frame_warp_lab::TacticalHudSnapshot& h) {
+        std::atomic_ref<std::int32_t>(state_->tactical_hp).store(h.hp, std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->tactical_armor).store(h.armor, std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->tactical_ammo_in_mag).store(h.ammo_in_mag, std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->tactical_ammo_reserve).store(h.ammo_reserve, std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->tactical_shots_fired).store(h.shots_fired, std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->tactical_hits).store(h.hits, std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->tactical_headshots).store(h.headshots, std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->tactical_score).store(h.score, std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->tactical_targets_up).store(h.targets_up, std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->tactical_ads_active).store(h.ads_alpha > 0.5f ? 1 : 0, std::memory_order_release);
     }
 
     void update_dlssg(
@@ -400,6 +416,9 @@ struct WindowInputState {
     int last_cursor_y = 0;
     float pending_mouse_delta_x = 0.0f;
     float pending_mouse_delta_y = 0.0f;
+    bool range_mode = true;
+    bool right_mouse_down = false;
+    bool fire_trigger_pending = false;
     std::vector<std::pair<WPARAM, LPARAM>> queued_control_messages;
 };
 
@@ -604,7 +623,12 @@ LRESULT CALLBACK window_procedure(HWND window, UINT message, WPARAM message_para
     if (message == WM_LBUTTONDOWN) {
         input->flash_trigger_pending = true;
         stamp_input_arrival(*input);
-        if (!input->mouse_look_locked) {
+        if (input->range_mode) {
+            input->fire_trigger_pending = true;
+            if (!input->mouse_look_locked) {
+                set_mouse_look_locked(window, *input, true);
+            }
+        } else if (!input->mouse_look_locked) {
             input->left_drag_active = true;
             input->last_cursor_x = GET_X_LPARAM(message_data);
             input->last_cursor_y = GET_Y_LPARAM(message_data);
@@ -620,7 +644,15 @@ LRESULT CALLBACK window_procedure(HWND window, UINT message, WPARAM message_para
         return 0;
     }
     if (message == WM_RBUTTONDOWN) {
-        set_mouse_look_locked(window, *input, !input->mouse_look_locked);
+        if (input->range_mode) {
+            input->right_mouse_down = true;
+        } else {
+            set_mouse_look_locked(window, *input, !input->mouse_look_locked);
+        }
+        return 0;
+    }
+    if (message == WM_RBUTTONUP) {
+        input->right_mouse_down = false;
         return 0;
     }
     if (message == WM_MOUSEMOVE) {
@@ -641,6 +673,7 @@ LRESULT CALLBACK window_procedure(HWND window, UINT message, WPARAM message_para
     }
     if (message == WM_KILLFOCUS || (message == WM_CAPTURECHANGED && reinterpret_cast<HWND>(message_data) != window)) {
         input->left_drag_active = false;
+        input->right_mouse_down = false;
         set_mouse_look_locked(window, *input, false);
         return 0;
     }
@@ -742,6 +775,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         std::uint32_t shader_flags = 0U;
         bool pbr_enabled = true;
         bool aniso_mip_enabled = true;
+        frame_warp_lab::SceneKind scene_kind = frame_warp_lab::SceneKind::range;
+        bool cli_ads_active = false;
+        frame_warp_lab::TacticalRangeSimulation tactical_range;
+        frame_warp_lab::TacticalRangeFrame tactical_range_frame{};
+        simulation.reset_for_tactical_range();
+        input_state.range_mode = true;
         bool overlay_enabled = true;
         bool flash_indicator_enabled = false;
         bool pending_pcl_ping = false;
@@ -787,6 +826,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 shader_flags,
                 pbr_enabled,
                 aniso_mip_enabled,
+                scene_kind,
                 overlay_enabled,
                 flash_indicator_enabled);
             runtime_state.update_adaptive(adaptive_scheduler.enabled(), adaptive_scheduler.telemetry());
@@ -827,7 +867,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 scene_paused = false;
                 runtime_state.record_event(frame_warp_lab::RuntimeEventType::scene_resumed, 0);
             } else if (command == frame_warp_lab::ControlCommand::scene_reset) {
-                simulation.reset();
+                if (scene_kind == frame_warp_lab::SceneKind::range) {
+                    simulation.reset_for_tactical_range();
+                    tactical_range.reset();
+                } else {
+                    simulation.reset();
+                }
                 renderer.invalidate_source_history();
                 cadence_counter = 0;
                 pacer.reset();
@@ -968,6 +1013,30 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 aniso_mip_enabled = message_lparam != 0;
                 renderer.invalidate_source_history();
                 runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, aniso_mip_enabled ? 1 : 0, frame_warp_lab::ConfigKey::aniso_mip_enabled);
+            } else if (command == frame_warp_lab::ControlCommand::set_scene_kind) {
+                const auto raw = static_cast<std::int32_t>(message_lparam);
+                if (raw >= 0 && raw <= 1) {
+                    scene_kind = static_cast<frame_warp_lab::SceneKind>(raw);
+                    input_state.range_mode = (scene_kind == frame_warp_lab::SceneKind::range);
+                    if (scene_kind == frame_warp_lab::SceneKind::range) {
+                        simulation.reset_for_tactical_range();
+                        tactical_range.reset();
+                    } else {
+                        simulation.set_range_camera_modifiers(0.0f, 0.0f, 0.0f, false);
+                        simulation.set_path(frame_warp_lab::CameraPath::corridor_sway);
+                        simulation.reset();
+                    }
+                    renderer.invalidate_source_history();
+                    cadence_counter = 0;
+                    runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, raw, frame_warp_lab::ConfigKey::scene_kind);
+                }
+            } else if (command == frame_warp_lab::ControlCommand::range_fire) {
+                tactical_range.request_fire();
+            } else if (command == frame_warp_lab::ControlCommand::set_range_ads) {
+                cli_ads_active = message_lparam != 0;
+                tactical_range.set_ads_requested(cli_ads_active || input_state.right_mouse_down);
+            } else if (command == frame_warp_lab::ControlCommand::range_reload) {
+                tactical_range.request_reload();
             } else if (command == frame_warp_lab::ControlCommand::set_render_scale) {
                 drs_mode = frame_warp_lab::DrsMode::off;
                 render_scale_pct = std::clamp(static_cast<std::int32_t>(message_lparam), 25, 200);
@@ -1194,11 +1263,42 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                             scene_paused ? frame_warp_lab::RuntimeEventType::scene_paused : frame_warp_lab::RuntimeEventType::scene_resumed,
                             scene_paused ? 1 : 0);
                     } else if (message.wParam == 'R') {
-                        simulation.reset();
+                        if (scene_kind == frame_warp_lab::SceneKind::range) {
+                            tactical_range.request_reload();
+                        } else {
+                            simulation.reset();
+                            renderer.invalidate_source_history();
+                            cadence_counter = 0;
+                            pacer.reset();
+                            runtime_state.record_event(frame_warp_lab::RuntimeEventType::scene_reset, 0);
+                        }
+                    } else if (message.wParam == VK_F5) {
+                        if (scene_kind == frame_warp_lab::SceneKind::range) {
+                            simulation.reset_for_tactical_range();
+                            tactical_range.reset();
+                        } else {
+                            simulation.reset();
+                        }
                         renderer.invalidate_source_history();
                         cadence_counter = 0;
                         pacer.reset();
                         runtime_state.record_event(frame_warp_lab::RuntimeEventType::scene_reset, 0);
+                    } else if (message.wParam == VK_TAB) {
+                        scene_kind = (scene_kind == frame_warp_lab::SceneKind::range)
+                            ? frame_warp_lab::SceneKind::corridor
+                            : frame_warp_lab::SceneKind::range;
+                        input_state.range_mode = (scene_kind == frame_warp_lab::SceneKind::range);
+                        if (scene_kind == frame_warp_lab::SceneKind::range) {
+                            simulation.reset_for_tactical_range();
+                            tactical_range.reset();
+                        } else {
+                            simulation.set_range_camera_modifiers(0.0f, 0.0f, 0.0f, false);
+                            simulation.set_path(frame_warp_lab::CameraPath::corridor_sway);
+                            simulation.reset();
+                        }
+                        renderer.invalidate_source_history();
+                        cadence_counter = 0;
+                        config_changed = true;
                     } else if (message.wParam == 'C') {
                         const auto next_path = static_cast<frame_warp_lab::CameraPath>((static_cast<std::int32_t>(simulation.path()) + 1) % 6);
                         simulation.set_path(next_path);
@@ -1331,7 +1431,32 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
             const double delta_seconds = fixed_dt_us > 0
                 ? (static_cast<double>(fixed_dt_us) / 1000000.0)
                 : std::chrono::duration<double>(current_tick - previous_tick).count();
+            const bool in_range_scene = (scene_kind == frame_warp_lab::SceneKind::range);
+            if (in_range_scene) {
+                tactical_range.set_ads_requested(input_state.right_mouse_down || cli_ads_active);
+                if (input_state.fire_trigger_pending) {
+                    input_state.fire_trigger_pending = false;
+                    tactical_range.request_fire();
+                }
+                simulation.set_range_camera_modifiers(
+                    tactical_range.current_vertical_fov_radians(),
+                    tactical_range.camera_recoil_pitch_radians(),
+                    tactical_range.camera_recoil_yaw_radians(),
+                    true);
+            } else {
+                simulation.set_range_camera_modifiers(0.0f, 0.0f, 0.0f, false);
+            }
             simulation.advance(delta_seconds, scene_paused && !stepping_now, manual_input);
+            if (in_range_scene) {
+                std::int64_t range_cut_seg = 0;
+                const frame_warp_lab::CameraBasis range_cam = simulation.sample_latest_camera(range_cut_seg);
+                tactical_range.step(delta_seconds, scene_paused && !stepping_now, range_cam);
+                hud_state.tactical_hud_enabled = true;
+                hud_state.tactical_hud = tactical_range.hud_snapshot(range_cam);
+                runtime_state.update_tactical_range(hud_state.tactical_hud);
+            } else {
+                hud_state.tactical_hud_enabled = false;
+            }
             if (stepping_now) {
                 --pending_step_frames;
                 runtime_state.update_pending_steps(pending_step_frames);
@@ -1357,6 +1482,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 const auto capture_time = std::chrono::steady_clock::now();
                 const frame_warp_lab::SceneSnapshot new_snapshot = simulation.capture_source_snapshot(source_frame_id);
                 const bool must_wait = need_initial_source || !async_gpu_enabled;
+                const frame_warp_lab::TacticalRangeFrame* range_payload = nullptr;
+                if (in_range_scene) {
+                    tactical_range.build_render_frame(new_snapshot.camera, new_snapshot.previous_camera, tactical_range_frame);
+                    range_payload = &tactical_range_frame;
+                }
                 scene_submitted_this_frame = renderer.submit_scene_async(
                     new_snapshot,
                     capture_time,
@@ -1373,7 +1503,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                     subtile_interleave_enabled,
                     frame_id_u64,
                     latency_monitor,
-                    must_wait);
+                    must_wait,
+                    range_payload);
             }
 
             renderer.poll_completed_scenes();

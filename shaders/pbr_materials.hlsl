@@ -491,7 +491,7 @@ float3 evaluate_pbr_shader_color(
         color = apply_transparent_glass(color, ray_origin, ray_dir, distance_travelled, scene_time);
     }
 
-    return pbr_linear_to_srgb(pbr_aces_filmic(color * 1.12));
+    return pbr_aces_filmic(color * 1.15);
 }
 
 float3 evaluate_shader_color_unified(

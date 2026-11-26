@@ -72,11 +72,17 @@ struct HudConstantsData {
     std::uint32_t hud_text_meta[4];
     std::uint32_t hud_text_packed[64];
     float hud_graph_samples[hud_graph_sample_count][4];
+    float tactical_flags[4];
+    float tactical_combat[4];
+    std::uint32_t tactical_ammo_hp[4];
+    std::uint32_t tactical_score_meta[4];
+    float tactical_player_radar[4];
+    float tactical_targets[8][4];
 };
 
 static_assert(sizeof(SceneConstantsData) <= 256);
 static_assert(sizeof(PresentConstantsData) <= 512);
-static_assert(sizeof(HudConstantsData) <= 2560);
+static_assert(sizeof(HudConstantsData) <= 3072);
 
 void check(HRESULT result, const char* operation) {
     if (FAILED(result)) {
@@ -199,11 +205,14 @@ void write_hud_constants_simd(HudConstantsData* destination, const HudOverlaySta
     const float graph_height = char_scale == 2U ? 104.0f : 72.0f;
     const float panel_width = std::min(static_cast<float>(viewport_width) - 24.0f, text_width + 20.0f);
     const float panel_height = std::min(static_cast<float>(viewport_height) - 24.0f, text_height + graph_height + 26.0f);
+    const float panel_x = hud.tactical_hud_enabled
+        ? std::max(196.0f, static_cast<float>(viewport_width) - panel_width - 14.0f)
+        : 12.0f;
     if (panel_width > 40.0f && panel_height > 40.0f) {
-        simd::store_float4(destination->hud_panel_rect, 12.0f, 12.0f, panel_width, panel_height);
+        simd::store_float4(destination->hud_panel_rect, panel_x, 12.0f, panel_width, panel_height);
         simd::store_float4(
             destination->hud_graph_rect,
-            22.0f,
+            panel_x + 10.0f,
             12.0f + 8.0f + text_height + 8.0f,
             std::max(0.0f, panel_width - 20.0f),
             std::max(0.0f, panel_height - (text_height + 26.0f)));
@@ -231,6 +240,46 @@ void write_hud_constants_simd(HudConstantsData* destination, const HudOverlaySta
     }
     simd::copy_uint4_stream(destination->hud_text_packed, packed_text, 16U);
     simd::copy_float4_stream(&destination->hud_graph_samples[0][0], &hud.samples[0].present_interval_ms, hud_graph_sample_count);
+
+    const auto& th = hud.tactical_hud;
+    simd::store_float4(
+        destination->tactical_flags,
+        hud.tactical_hud_enabled ? 1.0f : 0.0f,
+        th.ads_alpha,
+        th.crosshair_spread,
+        th.hit_marker_alpha);
+    simd::store_float4(
+        destination->tactical_combat,
+        th.hit_marker_headshot,
+        th.reload_progress,
+        static_cast<float>(std::clamp(th.hp, 0, 100)) / 100.0f,
+        static_cast<float>(std::clamp(th.armor, 0, 100)) / 100.0f);
+    simd::store_uint4(
+        destination->tactical_ammo_hp,
+        static_cast<std::uint32_t>(std::max(0, th.hp)),
+        static_cast<std::uint32_t>(std::max(0, th.armor)),
+        static_cast<std::uint32_t>(std::max(0, th.ammo_in_mag)),
+        static_cast<std::uint32_t>(std::max(0, th.ammo_reserve)));
+    simd::store_uint4(
+        destination->tactical_score_meta,
+        static_cast<std::uint32_t>(std::max(0, th.hits)),
+        static_cast<std::uint32_t>(std::max(0, th.headshots)),
+        static_cast<std::uint32_t>(std::max(0, th.score)),
+        static_cast<std::uint32_t>(std::max(0, th.targets_up)));
+    simd::store_float4(
+        destination->tactical_player_radar,
+        th.player_pos.x,
+        th.player_pos.z,
+        std::cos(th.player_yaw_rad),
+        std::sin(th.player_yaw_rad));
+    for (std::uint32_t ti = 0; ti < k_range_target_count; ++ti) {
+        simd::store_float4(
+            destination->tactical_targets[ti],
+            th.target_radar_xy_state[ti * 4U + 0U],
+            th.target_radar_xy_state[ti * 4U + 1U],
+            th.target_radar_xy_state[ti * 4U + 2U],
+            th.target_radar_xy_state[ti * 4U + 3U]);
+    }
 }
 
 }
@@ -330,6 +379,11 @@ Renderer::Renderer(HWND window)
     check(device_->CreateDescriptorHeap(&rtv_heap_description, IID_PPV_ARGS(&render_target_heap_)), "Create RTV heap");
     render_target_descriptor_stride_ = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
 
+    D3D12_DESCRIPTOR_HEAP_DESC dsv_heap_description{};
+    dsv_heap_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+    dsv_heap_description.NumDescriptors = 1;
+    check(device_->CreateDescriptorHeap(&dsv_heap_description, IID_PPV_ARGS(&depth_stencil_heap_)), "Create DSV heap");
+
     D3D12_DESCRIPTOR_HEAP_DESC srv_heap_description{};
     srv_heap_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     srv_heap_description.NumDescriptors = source_slot_count * (targets_per_source_slot + 1U);
@@ -372,6 +426,7 @@ Renderer::Renderer(HWND window)
     create_reprojection_stats_resources();
     create_selective_tile_resources();
     create_pbr_assets();
+    create_range_resources();
     create_vrs_resources();
     create_pipelines();
 }
@@ -564,7 +619,8 @@ bool Renderer::submit_scene_async(
     bool subtile_interleave_enabled,
     std::uint64_t frame_id,
     LatencyMonitor& latency_monitor,
-    bool wait_for_completion) {
+    bool wait_for_completion,
+    const TacticalRangeFrame* range_frame) {
     if (viewport_width_ == 0 || viewport_height_ == 0 || render_width_ == 0 || render_height_ == 0) return false;
     poll_completed_scenes();
     if (has_scene_in_flight()) return false;
@@ -669,7 +725,126 @@ bool Renderer::submit_scene_async(
         scene_command_list_->EndQuery(scene_timestamp_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, query_base + 0);
     }
 
-    if (selective_tiles_enabled && tile_vis_classify_pipeline_ && tile_admit_pipeline_ && tile_shade_indirect_pipeline_ && dispatch_command_signature_) {
+    if (range_frame != nullptr && range_pipeline_ && range_root_signature_ && range_depth_buffer_) {
+        write_float4(
+            scene_constants->ball_center_stress,
+            range_frame->hud.muzzle_world_pos,
+            range_frame->hud.muzzle_flash_alpha);
+        write_float4(
+            scene_constants->previous_ball_center_unused,
+            Float3{pbr_enabled ? 1.0f : 0.0f, aniso_mip_enabled ? 1.0f : 0.0f, 0.0f},
+            0.0f);
+
+        const std::size_t inst_slot_bytes = max_range_instances * sizeof(RangeInstanceGpu);
+        const std::size_t inst_offset = static_cast<std::size_t>(slot_index) * inst_slot_bytes;
+        const std::uint32_t count = std::min<std::uint32_t>(range_frame->draw_count, static_cast<std::uint32_t>(max_range_instances));
+        if (count > 0U) {
+            std::memcpy(mapped_range_instances_ + inst_offset, range_frame->instances.data(), static_cast<std::size_t>(count) * sizeof(RangeInstanceGpu));
+        }
+
+        const D3D12_VIEWPORT viewport{0.0f, 0.0f, static_cast<float>(render_width_), static_cast<float>(render_height_), 0.0f, 1.0f};
+        const D3D12_RECT scissor{0, 0, static_cast<LONG>(render_width_), static_cast<LONG>(render_height_)};
+        scene_command_list_->RSSetViewports(1, &viewport);
+        scene_command_list_->RSSetScissorRects(1, &scissor);
+        scene_command_list_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+        const std::array<D3D12_RESOURCE_BARRIER, targets_per_source_slot> to_rtv = {
+            transition_barrier(slot.color_target.Get(), source_slot_readable_state, D3D12_RESOURCE_STATE_RENDER_TARGET),
+            transition_barrier(slot.depth_target.Get(), source_slot_readable_state, D3D12_RESOURCE_STATE_RENDER_TARGET),
+            transition_barrier(slot.motion_target.Get(), source_slot_readable_state, D3D12_RESOURCE_STATE_RENDER_TARGET),
+        };
+        scene_command_list_->ResourceBarrier(static_cast<UINT>(to_rtv.size()), to_rtv.data());
+
+        auto offscreen_rtv = render_target_heap_->GetCPUDescriptorHandleForHeapStart();
+        offscreen_rtv.ptr += static_cast<SIZE_T>(
+            swap_chain_buffer_count
+            + dlss_input_slot_count * rtv_targets_per_dlss_slot
+            + static_cast<UINT>(slot_index) * targets_per_source_slot) * render_target_descriptor_stride_;
+        const auto dsv_handle = depth_stencil_heap_->GetCPUDescriptorHandleForHeapStart();
+
+        const float clear_col[4] = {0.035f, 0.050f, 0.068f, 1.0f};
+        const float clear_depth_rtv[4] = {1000.0f, 0.0f, 0.0f, 0.0f};
+        const float clear_motion[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        D3D12_CPU_DESCRIPTOR_HANDLE rtv_c = offscreen_rtv;
+        D3D12_CPU_DESCRIPTOR_HANDLE rtv_d{offscreen_rtv.ptr + render_target_descriptor_stride_};
+        D3D12_CPU_DESCRIPTOR_HANDLE rtv_m{offscreen_rtv.ptr + static_cast<SIZE_T>(2U) * render_target_descriptor_stride_};
+        scene_command_list_->ClearRenderTargetView(rtv_c, clear_col, 0, nullptr);
+        scene_command_list_->ClearRenderTargetView(rtv_d, clear_depth_rtv, 0, nullptr);
+        scene_command_list_->ClearRenderTargetView(rtv_m, clear_motion, 0, nullptr);
+        scene_command_list_->ClearDepthStencilView(dsv_handle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+
+        ID3D12DescriptorHeap* scene_heaps[] = {scene_compute_heap_.Get()};
+        scene_command_list_->SetDescriptorHeaps(1, scene_heaps);
+        scene_command_list_->OMSetRenderTargets(targets_per_source_slot, &offscreen_rtv, TRUE, &dsv_handle);
+        scene_command_list_->SetGraphicsRootSignature(range_root_signature_.Get());
+        scene_command_list_->SetPipelineState(range_pipeline_.Get());
+        scene_command_list_->SetGraphicsRootConstantBufferView(0, scene_constant_buffer_->GetGPUVirtualAddress() + constant_offset);
+        scene_command_list_->SetGraphicsRootShaderResourceView(2, range_instance_buffer_->GetGPUVirtualAddress() + inst_offset);
+        D3D12_GPU_DESCRIPTOR_HANDLE range_pbr_srv_gpu{
+            scene_compute_heap_->GetGPUDescriptorHandleForHeapStart().ptr
+            + static_cast<UINT64>(source_slot_count * compute_descriptors_per_source_slot + 2U) * shader_resource_descriptor_stride_};
+        scene_command_list_->SetGraphicsRootDescriptorTable(3, range_pbr_srv_gpu);
+        scene_command_list_->IASetVertexBuffers(0, 1, &range_vb_view_);
+        scene_command_list_->IASetIndexBuffer(&range_ib_view_);
+
+        if (scene_command_list5_ && vrs_tier_ > 0) {
+            const VrsMode effective_vrs = resolve_effective_vrs_mode(vrs_mode);
+            const bool full_backing_active = (render_width_ == alloc_render_width_ && render_height_ == alloc_render_height_);
+            if (effective_vrs == VrsMode::foveated && vrs_image_ && full_backing_active) {
+                const D3D12_SHADING_RATE_COMBINER combiners[2] = {
+                    D3D12_SHADING_RATE_COMBINER_PASSTHROUGH,
+                    D3D12_SHADING_RATE_COMBINER_OVERRIDE,
+                };
+                scene_command_list5_->RSSetShadingRate(D3D12_SHADING_RATE_1X1, combiners);
+                scene_command_list5_->RSSetShadingRateImage(vrs_image_.Get());
+            } else if (effective_vrs == VrsMode::uniform_2x2 || (effective_vrs == VrsMode::foveated && !full_backing_active)) {
+                scene_command_list5_->RSSetShadingRate(D3D12_SHADING_RATE_2X2, nullptr);
+                if (vrs_tier_ >= static_cast<std::int32_t>(D3D12_VARIABLE_SHADING_RATE_TIER_2)) {
+                    scene_command_list5_->RSSetShadingRateImage(nullptr);
+                }
+            } else {
+                scene_command_list5_->RSSetShadingRate(D3D12_SHADING_RATE_1X1, nullptr);
+                if (vrs_tier_ >= static_cast<std::int32_t>(D3D12_VARIABLE_SHADING_RATE_TIER_2)) {
+                    scene_command_list5_->RSSetShadingRateImage(nullptr);
+                }
+            }
+        }
+
+        for (std::uint32_t i = 0; i < count; ++i) {
+            const auto& dc = range_frame->draws[i];
+            if (dc.viewmodel) continue;
+            const auto& sm = range_submeshes_[static_cast<std::size_t>(dc.mesh)];
+            if (sm.index_count == 0U) continue;
+            const std::uint32_t meta[4] = {dc.instance_index, 0U, 0U, 0U};
+            scene_command_list_->SetGraphicsRoot32BitConstants(1, 4, meta, 0);
+            scene_command_list_->DrawIndexedInstanced(sm.index_count, 1, sm.index_offset, 0, 0);
+        }
+
+        scene_command_list_->ClearDepthStencilView(dsv_handle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+        if (scene_command_list5_ && vrs_tier_ > 0) {
+            scene_command_list5_->RSSetShadingRate(D3D12_SHADING_RATE_1X1, nullptr);
+            if (vrs_tier_ >= static_cast<std::int32_t>(D3D12_VARIABLE_SHADING_RATE_TIER_2)) {
+                scene_command_list5_->RSSetShadingRateImage(nullptr);
+            }
+        }
+        for (std::uint32_t i = 0; i < count; ++i) {
+            const auto& dc = range_frame->draws[i];
+            if (!dc.viewmodel) continue;
+            const auto& sm = range_submeshes_[static_cast<std::size_t>(dc.mesh)];
+            if (sm.index_count == 0U) continue;
+            const std::uint32_t meta[4] = {dc.instance_index, 1U, 0U, 0U};
+            scene_command_list_->SetGraphicsRoot32BitConstants(1, 4, meta, 0);
+            scene_command_list_->DrawIndexedInstanced(sm.index_count, 1, sm.index_offset, 0, 0);
+        }
+
+        const std::array<D3D12_RESOURCE_BARRIER, targets_per_source_slot> to_srv = {
+            transition_barrier(slot.color_target.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, source_slot_readable_state),
+            transition_barrier(slot.depth_target.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, source_slot_readable_state),
+            transition_barrier(slot.motion_target.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, source_slot_readable_state),
+        };
+        scene_command_list_->ResourceBarrier(static_cast<UINT>(to_srv.size()), to_srv.data());
+        slot.used_selective_tiles = false;
+    } else if (selective_tiles_enabled && tile_vis_classify_pipeline_ && tile_admit_pipeline_ && tile_shade_indirect_pipeline_ && dispatch_command_signature_) {
         const std::array<D3D12_RESOURCE_BARRIER, 6> to_uav = {
             transition_barrier(slot.color_target.Get(), source_slot_readable_state, D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
             transition_barrier(slot.depth_target.Get(), source_slot_readable_state, D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
@@ -1396,6 +1571,7 @@ void Renderer::resize(UINT width, UINT height) {
     buffer_stats_enabled_.fill(false);
     buffer_total_pixels_.fill(0);
     vrs_image_.Reset();
+    range_depth_buffer_.Reset();
     capture_readback_buffer_.Reset();
     capture_readback_row_pitch_ = 0;
     create_swap_chain_targets();
@@ -1464,6 +1640,7 @@ void Renderer::set_render_resolution(UINT override_width, UINT override_height, 
     previous_completed_slot_ = -1;
     has_previous_presented_camera_ = false;
     vrs_image_.Reset();
+    range_depth_buffer_.Reset();
     render_width_ = new_width;
     render_height_ = new_height;
     alloc_render_width_ = std::max(alloc_render_width_, new_width);
@@ -1508,6 +1685,8 @@ void Renderer::create_pipelines() {
     const auto tile_vis_classify_cs = load_shader_bytecode(shaders / L"tile_vis_classify_cs.cso");
     const auto tile_admit_cs = load_shader_bytecode(shaders / L"tile_admit_cs.cso");
     const auto tile_shade_indirect_cs = load_shader_bytecode(shaders / L"tile_shade_indirect_cs.cso");
+    const auto range_vs = load_shader_bytecode(shaders / L"range_vs.cso");
+    const auto range_ps = load_shader_bytecode(shaders / L"range_ps.cso");
 
     D3D12_DESCRIPTOR_RANGE scene_pbr_srv_range{};
     scene_pbr_srv_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
@@ -1748,6 +1927,68 @@ void Renderer::create_pipelines() {
     check(device_->CreateComputePipelineState(&compute_desc, IID_PPV_ARGS(&tile_admit_pipeline_)), "Create tile admit compute pipeline");
     compute_desc.CS = {tile_shade_indirect_cs.data(), tile_shade_indirect_cs.size()};
     check(device_->CreateComputePipelineState(&compute_desc, IID_PPV_ARGS(&tile_shade_indirect_pipeline_)), "Create tile shade indirect compute pipeline");
+
+    std::array<D3D12_ROOT_PARAMETER, 4> range_params{};
+    range_params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    range_params[0].Descriptor.ShaderRegister = 0;
+    range_params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    range_params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    range_params[1].Constants.ShaderRegister = 1;
+    range_params[1].Constants.Num32BitValues = 4;
+    range_params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    range_params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+    range_params[2].Descriptor.ShaderRegister = 0;
+    range_params[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+    range_params[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    range_params[3].DescriptorTable.NumDescriptorRanges = 1;
+    range_params[3].DescriptorTable.pDescriptorRanges = &scene_pbr_srv_range;
+    range_params[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    D3D12_ROOT_SIGNATURE_DESC range_root_desc{};
+    range_root_desc.NumParameters = static_cast<UINT>(range_params.size());
+    range_root_desc.pParameters = range_params.data();
+    range_root_desc.NumStaticSamplers = static_cast<UINT>(scene_samplers.size());
+    range_root_desc.pStaticSamplers = scene_samplers.data();
+    range_root_desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+
+    serialized_root.Reset();
+    errors.Reset();
+    check(D3D12SerializeRootSignature(&range_root_desc, D3D_ROOT_SIGNATURE_VERSION_1, &serialized_root, &errors), "Serialize range root signature");
+    check(device_->CreateRootSignature(0, serialized_root->GetBufferPointer(), serialized_root->GetBufferSize(), IID_PPV_ARGS(&range_root_signature_)), "Create range root signature");
+
+    const std::array<D3D12_INPUT_ELEMENT_DESC, 6> range_layout = {{
+        {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"TANGENT", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 36, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"TEXCOORD", 1, DXGI_FORMAT_R32_UINT, 0, 44, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"TEXCOORD", 2, DXGI_FORMAT_R32_FLOAT, 0, 48, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+    }};
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC range_pso_desc{};
+    range_pso_desc.pRootSignature = range_root_signature_.Get();
+    range_pso_desc.InputLayout = {range_layout.data(), static_cast<UINT>(range_layout.size())};
+    range_pso_desc.VS = {range_vs.data(), range_vs.size()};
+    range_pso_desc.PS = {range_ps.data(), range_ps.size()};
+    for (UINT i = 0; i < targets_per_source_slot; ++i) {
+        range_pso_desc.BlendState.RenderTarget[i].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    }
+    range_pso_desc.SampleMask = UINT_MAX;
+    range_pso_desc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    range_pso_desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    range_pso_desc.RasterizerState.DepthClipEnable = TRUE;
+    range_pso_desc.DepthStencilState.DepthEnable = TRUE;
+    range_pso_desc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+    range_pso_desc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+    range_pso_desc.DepthStencilState.StencilEnable = FALSE;
+    range_pso_desc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+    range_pso_desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    range_pso_desc.NumRenderTargets = targets_per_source_slot;
+    range_pso_desc.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    range_pso_desc.RTVFormats[1] = DXGI_FORMAT_R32_FLOAT;
+    range_pso_desc.RTVFormats[2] = DXGI_FORMAT_R16G16_FLOAT;
+    range_pso_desc.SampleDesc.Count = 1;
+    check(device_->CreateGraphicsPipelineState(&range_pso_desc, IID_PPV_ARGS(&range_pipeline_)), "Create range PBR graphics pipeline");
 }
 
 void Renderer::create_constant_buffers() {
@@ -1920,6 +2161,54 @@ void Renderer::create_pbr_assets() {
         next_scene_fence_value_,
         pbr_srv_cpu,
         shader_resource_descriptor_stride_);
+}
+
+void Renderer::create_range_resources() {
+    const RangeGeometryPackage pkg = build_tactical_range_geometry();
+    range_submeshes_ = pkg.submeshes;
+
+    const std::size_t vb_bytes = pkg.vertices.size() * sizeof(RangeVertex);
+    const std::size_t ib_bytes = pkg.indices.size() * sizeof(std::uint32_t);
+    range_vertex_buffer_ = create_buffer(device_.Get(), D3D12_HEAP_TYPE_DEFAULT, vb_bytes, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST, "Create range vertex buffer");
+    range_index_buffer_ = create_buffer(device_.Get(), D3D12_HEAP_TYPE_DEFAULT, ib_bytes, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST, "Create range index buffer");
+
+    ComPtr<ID3D12Resource> vb_upload = create_buffer(device_.Get(), D3D12_HEAP_TYPE_UPLOAD, vb_bytes, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ, "Create range VB upload");
+    ComPtr<ID3D12Resource> ib_upload = create_buffer(device_.Get(), D3D12_HEAP_TYPE_UPLOAD, ib_bytes, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ, "Create range IB upload");
+    void* mapped = nullptr;
+    D3D12_RANGE empty_range{0, 0};
+    check(vb_upload->Map(0, &empty_range, &mapped), "Map range VB upload");
+    std::memcpy(mapped, pkg.vertices.data(), vb_bytes);
+    vb_upload->Unmap(0, nullptr);
+    check(ib_upload->Map(0, &empty_range, &mapped), "Map range IB upload");
+    std::memcpy(mapped, pkg.indices.data(), ib_bytes);
+    ib_upload->Unmap(0, nullptr);
+
+    check(source_slots_[0].command_allocator->Reset(), "Reset range mesh upload allocator");
+    check(scene_command_list_->Reset(source_slots_[0].command_allocator.Get(), nullptr), "Reset range mesh upload command list");
+    scene_command_list_->CopyBufferRegion(range_vertex_buffer_.Get(), 0, vb_upload.Get(), 0, vb_bytes);
+    scene_command_list_->CopyBufferRegion(range_index_buffer_.Get(), 0, ib_upload.Get(), 0, ib_bytes);
+    const std::array<D3D12_RESOURCE_BARRIER, 2> barriers = {
+        transition_barrier(range_vertex_buffer_.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER),
+        transition_barrier(range_index_buffer_.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_INDEX_BUFFER),
+    };
+    scene_command_list_->ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());
+    check(scene_command_list_->Close(), "Close range mesh upload command list");
+    ID3D12CommandList* lists[] = {scene_command_list_.Get()};
+    scene_queue_->ExecuteCommandLists(1, lists);
+    const auto fence_value = next_scene_fence_value_++;
+    check(scene_queue_->Signal(scene_fence_.Get(), fence_value), "Signal range mesh upload fence");
+    wait_for_fence(scene_fence_.Get(), scene_fence_event_.get(), fence_value);
+
+    range_vb_view_.BufferLocation = range_vertex_buffer_->GetGPUVirtualAddress();
+    range_vb_view_.SizeInBytes = static_cast<UINT>(vb_bytes);
+    range_vb_view_.StrideInBytes = static_cast<UINT>(sizeof(RangeVertex));
+    range_ib_view_.BufferLocation = range_index_buffer_->GetGPUVirtualAddress();
+    range_ib_view_.SizeInBytes = static_cast<UINT>(ib_bytes);
+    range_ib_view_.Format = DXGI_FORMAT_R32_UINT;
+
+    const std::size_t inst_bytes = static_cast<std::size_t>(source_slot_count) * max_range_instances * sizeof(RangeInstanceGpu);
+    range_instance_buffer_ = create_buffer(device_.Get(), D3D12_HEAP_TYPE_UPLOAD, inst_bytes, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ, "Create range instance buffer");
+    check(range_instance_buffer_->Map(0, &empty_range, reinterpret_cast<void**>(&mapped_range_instances_)), "Map range instance buffer");
 }
 
 void Renderer::create_vrs_resources() {
@@ -2113,6 +2402,26 @@ void Renderer::create_source_targets() {
         device_->CreateUnorderedAccessView(slot.tile_map_target.Get(), nullptr, &uav_desc, compute_cpu);
         compute_cpu.ptr += shader_resource_descriptor_stride_;
     }
+
+    D3D12_HEAP_PROPERTIES dsv_heap_props{};
+    dsv_heap_props.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC depth_desc{};
+    depth_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    depth_desc.Width = alloc_render_width_;
+    depth_desc.Height = alloc_render_height_;
+    depth_desc.DepthOrArraySize = 1;
+    depth_desc.MipLevels = 1;
+    depth_desc.Format = DXGI_FORMAT_D32_FLOAT;
+    depth_desc.SampleDesc.Count = 1;
+    depth_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+    D3D12_CLEAR_VALUE depth_clear{};
+    depth_clear.Format = DXGI_FORMAT_D32_FLOAT;
+    depth_clear.DepthStencil.Depth = 1.0f;
+    check(device_->CreateCommittedResource(&dsv_heap_props, D3D12_HEAP_FLAG_NONE, &depth_desc, D3D12_RESOURCE_STATE_DEPTH_WRITE, &depth_clear, IID_PPV_ARGS(&range_depth_buffer_)), "Create range depth buffer");
+    D3D12_DEPTH_STENCIL_VIEW_DESC dsv_desc{};
+    dsv_desc.Format = DXGI_FORMAT_D32_FLOAT;
+    dsv_desc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+    device_->CreateDepthStencilView(range_depth_buffer_.Get(), &dsv_desc, depth_stencil_heap_->GetCPUDescriptorHandleForHeapStart());
 }
 
 void Renderer::wait_for_fence(ID3D12Fence* fence, HANDLE event_handle, std::uint64_t value) {

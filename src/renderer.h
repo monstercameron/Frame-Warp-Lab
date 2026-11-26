@@ -3,9 +3,11 @@
 #include "frame_pacer.h"
 #include "latency_monitor.h"
 #include "pbr_assets.h"
+#include "range_mesh.h"
 #include "runtime_state.h"
 #include "simulation.h"
 #include "streamline_backend.h"
+#include "tactical_range.h"
 
 #include <windows.h>
 #include <d3d12.h>
@@ -32,6 +34,8 @@ struct HudOverlayState {
     float max_graph_ms;
     float target_frame_ms;
     std::uint32_t alignment_padding;
+    bool tactical_hud_enabled;
+    TacticalHudSnapshot tactical_hud;
 };
 
 struct TileCacheStats {
@@ -138,7 +142,8 @@ public:
         bool subtile_interleave_enabled,
         std::uint64_t frame_id,
         LatencyMonitor& latency_monitor,
-        bool wait_for_completion);
+        bool wait_for_completion,
+        const TacticalRangeFrame* range_frame = nullptr);
     void invalidate_source_history();
     FrameExecutionMetrics present_from_source(const PresentRequest& request, LatencyMonitor& latency_monitor, FramePacer& pacer);
     void resize(UINT width, UINT height);
@@ -176,7 +181,8 @@ private:
     static constexpr UINT timestamps_per_pass = 2;
     static constexpr std::size_t scene_constant_buffer_stride = 256;
     static constexpr std::size_t present_constant_buffer_stride = 512;
-    static constexpr std::size_t hud_constant_buffer_stride = 2560;
+    static constexpr std::size_t hud_constant_buffer_stride = 3072;
+    static constexpr std::size_t max_range_instances = 48;
 
     class OsHandle {
     public:
@@ -224,6 +230,7 @@ private:
     void create_reprojection_stats_resources();
     void create_selective_tile_resources();
     void create_pbr_assets();
+    void create_range_resources();
     void create_vrs_resources();
     void create_swap_chain_targets();
     void create_dlss_input_targets();
@@ -244,6 +251,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12CommandQueue> scene_queue_;
     Microsoft::WRL::ComPtr<IDXGISwapChain3> swap_chain_;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> render_target_heap_;
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> depth_stencil_heap_;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> shader_resource_heap_;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> scene_compute_heap_;
     std::array<Microsoft::WRL::ComPtr<ID3D12Resource>, swap_chain_buffer_count> render_targets_;
@@ -271,6 +279,16 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Resource> tile_stats_readback_;
     const std::uint32_t* mapped_tile_stats_ = nullptr;
     PbrAssetBundle pbr_assets_{};
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> range_root_signature_;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> range_pipeline_;
+    Microsoft::WRL::ComPtr<ID3D12Resource> range_depth_buffer_;
+    Microsoft::WRL::ComPtr<ID3D12Resource> range_vertex_buffer_;
+    Microsoft::WRL::ComPtr<ID3D12Resource> range_index_buffer_;
+    Microsoft::WRL::ComPtr<ID3D12Resource> range_instance_buffer_;
+    std::uint8_t* mapped_range_instances_ = nullptr;
+    D3D12_VERTEX_BUFFER_VIEW range_vb_view_{};
+    D3D12_INDEX_BUFFER_VIEW range_ib_view_{};
+    std::array<RangeSubmesh, static_cast<std::size_t>(RangeMeshKind::count)> range_submeshes_{};
     Microsoft::WRL::ComPtr<ID3D12RootSignature> present_root_signature_;
     std::array<Microsoft::WRL::ComPtr<ID3D12PipelineState>, 5> present_pipelines_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> present_dlss_inputs_pipeline_;

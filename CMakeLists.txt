@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(FrameWarpLab VERSION 0.27.0 LANGUAGES CXX)
+project(FrameWarpLab VERSION 0.28.0 LANGUAGES CXX)
 
 if(NOT WIN32)
     message(FATAL_ERROR "Frame Warp Lab currently requires Windows and Direct3D 12.")
@@ -34,10 +34,45 @@ else()
     message(STATUS "NVIDIA Streamline SDK not found in third_party/streamline; building without DLSS-G backend")
 endif()
 
+set(USE_STATIC_MSVC_RUNTIME_LIBRARY OFF CACHE BOOL "" FORCE)
+set(INTERPROCEDURAL_OPTIMIZATION OFF CACHE BOOL "" FORCE)
+set(OVERRIDE_CXX_FLAGS OFF CACHE BOOL "" FORCE)
+set(ENABLE_ALL_WARNINGS OFF CACHE BOOL "" FORCE)
+set(FLOATING_POINT_EXCEPTIONS_ENABLED OFF CACHE BOOL "" FORCE)
+set(CPP_EXCEPTIONS_ENABLED ON CACHE BOOL "" FORCE)
+set(DEBUG_RENDERER_IN_DEBUG_AND_RELEASE OFF CACHE BOOL "" FORCE)
+set(PROFILER_IN_DEBUG_AND_RELEASE OFF CACHE BOOL "" FORCE)
+set(ENABLE_OBJECT_STREAM OFF CACHE BOOL "" FORCE)
+set(GENERATE_DEBUG_SYMBOLS OFF CACHE BOOL "" FORCE)
+set(JPH_USE_DX12 OFF CACHE BOOL "" FORCE)
+set(JPH_USE_VK OFF CACHE BOOL "" FORCE)
+set(JPH_USE_MTL OFF CACHE BOOL "" FORCE)
+set(JPH_USE_CPU_COMPUTE OFF CACHE BOOL "" FORCE)
+set(TARGET_UNIT_TESTS OFF CACHE BOOL "" FORCE)
+set(TARGET_HELLO_WORLD OFF CACHE BOOL "" FORCE)
+set(TARGET_PERFORMANCE_TEST OFF CACHE BOOL "" FORCE)
+set(TARGET_SAMPLES OFF CACHE BOOL "" FORCE)
+set(TARGET_VIEWER OFF CACHE BOOL "" FORCE)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/JoltPhysics/Build/CMakeLists.txt")
+    add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/third_party/JoltPhysics/Build" "${CMAKE_CURRENT_BINARY_DIR}/jolt_build" EXCLUDE_FROM_ALL)
+else()
+    include(FetchContent)
+    FetchContent_Declare(
+        JoltPhysics
+        GIT_REPOSITORY https://github.com/jrouwe/JoltPhysics.git
+        GIT_TAG v5.7.0
+        GIT_SHALLOW TRUE
+        SOURCE_SUBDIR Build
+    )
+    FetchContent_MakeAvailable(JoltPhysics)
+endif()
+
 add_executable(frame_warp_lab WIN32
     src/main.cpp
     src/renderer.cpp
     src/pbr_assets.cpp
+    src/tactical_range.cpp
+    src/range_mesh.cpp
     src/latency_monitor.cpp
     src/streamline_backend.cpp
 )
@@ -55,12 +90,12 @@ if(FRAME_WARP_HAS_STREAMLINE)
     target_compile_definitions(frame_warp_cli PRIVATE FRAME_WARP_HAS_STREAMLINE=1)
     target_include_directories(frame_warp_lab SYSTEM PRIVATE "${STREAMLINE_INCLUDE_DIR}")
     target_include_directories(frame_warp_cli SYSTEM PRIVATE "${STREAMLINE_INCLUDE_DIR}")
-    target_link_libraries(frame_warp_lab PRIVATE "${STREAMLINE_LIB_FILE}" dxguid advapi32 dwmapi)
+    target_link_libraries(frame_warp_lab PRIVATE Jolt "${STREAMLINE_LIB_FILE}" dxguid advapi32 dwmapi)
     target_link_libraries(frame_warp_cli PRIVATE "${STREAMLINE_LIB_FILE}" dxguid)
 else()
     target_compile_definitions(frame_warp_lab PRIVATE FRAME_WARP_HAS_STREAMLINE=0)
     target_compile_definitions(frame_warp_cli PRIVATE FRAME_WARP_HAS_STREAMLINE=0)
-    target_link_libraries(frame_warp_lab PRIVATE d3d12 dxgi dxguid advapi32 dwmapi)
+    target_link_libraries(frame_warp_lab PRIVATE Jolt d3d12 dxgi dxguid advapi32 dwmapi)
     target_link_libraries(frame_warp_cli PRIVATE d3d12 dxgi dxguid)
 endif()
 
@@ -99,6 +134,8 @@ add_dxc_shader(COMPILED_SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/present.hls
 add_dxc_shader(COMPILED_SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/selective_tiles.hlsl" vis_classify_main cs_6_0 tile_vis_classify_cs.cso)
 add_dxc_shader(COMPILED_SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/selective_tiles.hlsl" tile_admit_main cs_6_0 tile_admit_cs.cso)
 add_dxc_shader(COMPILED_SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/selective_tiles.hlsl" tile_shade_main cs_6_0 tile_shade_indirect_cs.cso)
+add_dxc_shader(COMPILED_SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/range_mesh.hlsl" range_vs_main vs_6_0 range_vs.cso)
+add_dxc_shader(COMPILED_SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/range_mesh.hlsl" range_ps_main ps_6_0 range_ps.cso)
 
 add_custom_target(frame_warp_shaders ALL DEPENDS ${COMPILED_SHADERS})
 add_dependencies(frame_warp_lab frame_warp_shaders)

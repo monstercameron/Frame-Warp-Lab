@@ -95,7 +95,7 @@ SceneOutput pixel_main(VertexOutput input) {
     float scene_time = previous_camera_forward_unused.w;
     uint packed_flags = (uint)(previous_ball_center_unused.w + 0.5);
     float3 color = ((packed_flags & 256u) != 0u)
-        ? pbr_linear_to_srgb(pbr_aces_filmic(pbr_env_cubemap.SampleLevel(linear_clamp_sampler, direction, 0.0).rgb * 0.45))
+        ? pbr_aces_filmic(pbr_env_cubemap.SampleLevel(linear_clamp_sampler, direction, 0.0).rgb * 0.45)
         : float3(0.035, 0.055, 0.07);
     float linear_view_depth = 1000.0;
     float2 motion_vector = float2(0.0, 0.0);

@@ -119,6 +119,29 @@ public:
         manual_position_ = Float3{0.0f, 1.45f, 1.4f};
         manual_yaw_ = 0.0f;
         manual_pitch_ = 0.0f;
+        vertical_fov_override_ = 0.0f;
+        recoil_yaw_offset_ = 0.0f;
+        recoil_pitch_offset_ = 0.0f;
+    }
+
+    void reset_for_tactical_range() {
+        scene_time_seconds_ = 0.0;
+        has_previous_ = false;
+        previous_cut_segment_ = 0;
+        path_ = CameraPath::manual;
+        manual_position_ = Float3{0.0f, 1.42f, 1.2f};
+        manual_yaw_ = 0.0f;
+        manual_pitch_ = 0.0f;
+        vertical_fov_override_ = 1.15f;
+        recoil_yaw_offset_ = 0.0f;
+        recoil_pitch_offset_ = 0.0f;
+    }
+
+    void set_range_camera_modifiers(float vertical_fov_rad, float recoil_pitch_rad, float recoil_yaw_rad, bool clamp_to_bay) {
+        vertical_fov_override_ = vertical_fov_rad;
+        recoil_pitch_offset_ = recoil_pitch_rad;
+        recoil_yaw_offset_ = recoil_yaw_rad;
+        clamp_to_range_bay_ = clamp_to_bay;
     }
 
     void set_path(CameraPath path) {
@@ -157,35 +180,55 @@ public:
             scene_time_seconds_ += delta_seconds;
         }
         if (path_ == CameraPath::manual) {
-            constexpr float mouse_sensitivity = 0.0032f;
+            constexpr float mouse_sensitivity = 0.0024f;
             const float step = static_cast<float>(delta_seconds);
-            manual_yaw_ += input.yaw_axis * 1.4f * step + input.mouse_delta_x_px * mouse_sensitivity;
+            const float fov_scale = vertical_fov_override_ > 0.1f ? (vertical_fov_override_ / 1.15f) : 1.0f;
+            manual_yaw_ += input.yaw_axis * 1.4f * step + input.mouse_delta_x_px * mouse_sensitivity * fov_scale;
             manual_pitch_ = std::clamp(
-                manual_pitch_ + input.pitch_axis * 1.1f * step - input.mouse_delta_y_px * mouse_sensitivity,
+                manual_pitch_ + input.pitch_axis * 1.1f * step - input.mouse_delta_y_px * mouse_sensitivity * fov_scale,
                 -1.15f,
                 1.15f);
-            const CameraBasis basis = make_camera_basis(manual_position_, manual_yaw_, manual_pitch_, 1.04719755f);
+            const float active_fov = vertical_fov_override_ > 0.1f ? vertical_fov_override_ : 1.04719755f;
+            const CameraBasis basis = make_camera_basis(manual_position_, manual_yaw_, manual_pitch_, active_fov);
             const float move_speed = 4.2f * step;
-            simd::advance_clamped_position(
-                manual_position_.x,
-                manual_position_.y,
-                manual_position_.z,
-                (basis.forward.x * input.forward_axis + basis.right.x * input.right_axis) * move_speed,
-                input.vertical_axis * move_speed,
-                (basis.forward.z * input.forward_axis + basis.right.z * input.right_axis) * move_speed,
-                -3.5f,
-                0.45f,
-                0.4f,
-                3.5f,
-                3.15f,
-                24.5f);
+            if (clamp_to_range_bay_) {
+                simd::advance_clamped_position(
+                    manual_position_.x,
+                    manual_position_.y,
+                    manual_position_.z,
+                    (basis.forward.x * input.forward_axis + basis.right.x * input.right_axis) * move_speed,
+                    0.0f,
+                    (basis.forward.z * input.forward_axis + basis.right.z * input.right_axis) * move_speed,
+                    -5.6f,
+                    1.42f,
+                    -0.8f,
+                    5.6f,
+                    1.42f,
+                    2.85f);
+            } else {
+                simd::advance_clamped_position(
+                    manual_position_.x,
+                    manual_position_.y,
+                    manual_position_.z,
+                    (basis.forward.x * input.forward_axis + basis.right.x * input.right_axis) * move_speed,
+                    input.vertical_axis * move_speed,
+                    (basis.forward.z * input.forward_axis + basis.right.z * input.right_axis) * move_speed,
+                    -3.5f,
+                    0.45f,
+                    0.4f,
+                    3.5f,
+                    3.15f,
+                    24.5f);
+            }
         }
     }
 
     CameraBasis sample_latest_camera(std::int64_t& out_cut_segment) const {
         if (path_ == CameraPath::manual) {
             out_cut_segment = 0;
-            return make_camera_basis(manual_position_, manual_yaw_, manual_pitch_, 1.04719755f);
+            const float active_fov = vertical_fov_override_ > 0.1f ? vertical_fov_override_ : 1.04719755f;
+            const float pitched = std::clamp(manual_pitch_ + recoil_pitch_offset_, -1.25f, 1.25f);
+            return make_camera_basis(manual_position_, manual_yaw_ + recoil_yaw_offset_, pitched, active_fov);
         }
         return evaluate_scripted_camera(scene_time_seconds_, path_, out_cut_segment);
     }
@@ -239,6 +282,10 @@ private:
     Float3 manual_position_{0.0f, 1.45f, 1.4f};
     float manual_yaw_ = 0.0f;
     float manual_pitch_ = 0.0f;
+    float vertical_fov_override_ = 0.0f;
+    float recoil_yaw_offset_ = 0.0f;
+    float recoil_pitch_offset_ = 0.0f;
+    bool clamp_to_range_bay_ = false;
 };
 
 }

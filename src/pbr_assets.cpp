@@ -17,7 +17,7 @@ namespace {
 
 constexpr UINT k_material_size = 256;
 constexpr UINT k_material_mips = 9;
-constexpr UINT k_material_count = 6;
+constexpr UINT k_material_count = 12;
 constexpr UINT k_dfg_size = 128;
 constexpr UINT k_env_size = 64;
 constexpr UINT k_env_mips = 6;
@@ -244,7 +244,7 @@ MaterialPixel evaluate_material_texel(UINT slice, float u, float v) {
         p.roughness = saturate((copper_panel ? 0.17f : 0.24f) + 0.12f * (1.0f - brush) + 0.40f * seam);
         p.metallic = 1.0f - 0.85f * seam;
         p.clearcoat = (1.0f - seam) * (copper_panel ? 0.55f : 0.25f);
-    } else {
+    } else if (slice == 5U) {
         const float brush = tileable_value_noise(u * 16.0f, v * 2.0f, 16, 709);
         const float patina = tileable_fbm(u, v, 8, 3, 727);
         p.albedo_linear = lerp3(Vec3{0.80f, 0.58f, 0.22f}, Vec3{0.98f, 0.80f, 0.40f}, brush * 0.65f + patina * 0.35f);
@@ -253,6 +253,103 @@ MaterialPixel evaluate_material_texel(UINT slice, float u, float v) {
         p.roughness = saturate(0.20f + 0.14f * (1.0f - brush) + 0.08f * patina);
         p.metallic = 1.0f;
         p.clearcoat = 0.15f;
+    } else if (slice == 6U) {
+        const float slab_u = std::fmod(u * 2.0f, 1.0f);
+        const float slab_v = std::fmod(v * 2.0f, 1.0f);
+        const float joint = 1.0f - smoothstep_f(0.008f, 0.022f, std::min(std::min(slab_u, 1.0f - slab_u), std::min(slab_v, 1.0f - slab_v)));
+        const float grit = tileable_fbm(u, v, 24, 4, 811);
+        const float dust = tileable_fbm(u, v, 6, 3, 823);
+        const float lane_line = 1.0f - smoothstep_f(0.015f, 0.028f, std::fabs(u - 0.5f));
+        Vec3 concrete = lerp3(Vec3{0.16f, 0.155f, 0.145f}, Vec3{0.28f, 0.265f, 0.235f}, grit * 0.55f + dust * 0.45f);
+        concrete = lerp3(concrete, Vec3{0.58f, 0.46f, 0.12f}, lane_line * 0.35f * (1.0f - joint));
+        concrete = lerp3(concrete, Vec3{0.06f, 0.058f, 0.055f}, joint);
+        p.albedo_linear = concrete;
+        p.height = (0.56f + 0.22f * grit + 0.10f * dust) * (1.0f - 0.80f * joint);
+        p.ao = saturate(0.92f - 0.52f * joint - 0.14f * (1.0f - grit));
+        p.roughness = saturate(0.66f + 0.20f * grit + 0.12f * joint - 0.12f * lane_line);
+        p.metallic = 0.0f;
+        p.clearcoat = 0.0f;
+    } else if (slice == 7U) {
+        const float row = std::floor(v * 8.0f);
+        const float bu = std::fmod(u * 4.0f + ((static_cast<int>(row) & 1) ? 0.5f : 0.0f), 1.0f);
+        const float bv = std::fmod(v * 8.0f, 1.0f);
+        const float mortar_u = 1.0f - smoothstep_f(0.020f, 0.045f, std::min(bu, 1.0f - bu));
+        const float mortar_v = 1.0f - smoothstep_f(0.040f, 0.085f, std::min(bv, 1.0f - bv));
+        const float mortar = saturate(std::max(mortar_u, mortar_v));
+        const float plaster = tileable_fbm(u, v, 16, 4, 907);
+        const float tint_var = hash2d(static_cast<int>(std::floor(u * 4.0f + ((static_cast<int>(row) & 1) ? 0.5f : 0.0f))) % 4, static_cast<int>(row) % 8, 919);
+        const Vec3 stone_a{0.38f, 0.31f, 0.22f};
+        const Vec3 stone_b{0.52f, 0.43f, 0.31f};
+        Vec3 brick = lerp3(stone_a, stone_b, tint_var * 0.5f + plaster * 0.5f);
+        brick = lerp3(brick, Vec3{0.18f, 0.16f, 0.13f}, mortar);
+        p.albedo_linear = brick;
+        p.height = (0.64f + 0.18f * plaster) * (1.0f - 0.78f * mortar);
+        p.ao = saturate(0.95f - 0.60f * mortar - 0.10f * (1.0f - plaster));
+        p.roughness = saturate(0.76f + 0.14f * plaster + 0.10f * mortar);
+        p.metallic = 0.0f;
+        p.clearcoat = 0.0f;
+    } else if (slice == 8U) {
+        const float edge_u = std::min(u, 1.0f - u);
+        const float edge_v = std::min(v, 1.0f - v);
+        const float border = 1.0f - smoothstep_f(0.075f, 0.095f, std::min(edge_u, edge_v));
+        const float corner_brace = (edge_u < 0.11f && edge_v < 0.11f) ? 1.0f : 0.0f;
+        const float plank_gap = 1.0f - smoothstep_f(0.008f, 0.020f, std::min(std::fmod(v * 5.0f, 1.0f), 1.0f - std::fmod(v * 5.0f, 1.0f)));
+        const float grain = tileable_fbm(u * 1.0f, v * 6.0f, 12, 4, 1009);
+        const float rings = 0.5f + 0.5f * std::sin((v * 22.0f + grain * 5.0f) * k_pi);
+        const Vec3 wood = lerp3(Vec3{0.24f, 0.14f, 0.065f}, Vec3{0.44f, 0.28f, 0.135f}, rings * 0.45f + grain * 0.55f);
+        const Vec3 frame_wood = wood * 0.78f;
+        const Vec3 metal_brace{0.18f, 0.20f, 0.22f};
+        Vec3 col = lerp3(wood, frame_wood, border) * (1.0f - 0.55f * plank_gap * (1.0f - border));
+        col = lerp3(col, metal_brace, corner_brace);
+        p.albedo_linear = col;
+        p.height = (0.48f + 0.10f * rings + 0.14f * border) * (1.0f - 0.70f * plank_gap * (1.0f - border)) + 0.16f * corner_brace;
+        p.ao = saturate(0.92f - 0.55f * plank_gap * (1.0f - border) - 0.18f * (1.0f - grain));
+        p.roughness = saturate(lerp3({0.64f + 0.16f * (1.0f - grain), 0.0f, 0.0f}, {0.34f + 0.10f * grain, 0.0f, 0.0f}, corner_brace).x);
+        p.metallic = corner_brace * 0.92f;
+        p.clearcoat = 0.0f;
+    } else if (slice == 9U) {
+        const float dx = (u - 0.5f) * 2.0f;
+        const float dy = (v - 0.52f) * 2.0f;
+        const float r = std::sqrt(dx * dx + dy * dy);
+        const float ring1 = 1.0f - smoothstep_f(0.14f, 0.17f, r);
+        const float ring2 = smoothstep_f(0.32f, 0.35f, r) * (1.0f - smoothstep_f(0.46f, 0.49f, r));
+        const float ring3 = smoothstep_f(0.64f, 0.67f, r) * (1.0f - smoothstep_f(0.76f, 0.79f, r));
+        const float edge_wear = 1.0f - smoothstep_f(0.03f, 0.09f, std::min(std::min(u, 1.0f - u), std::min(v, 1.0f - v)));
+        const float scuffs = tileable_fbm(u, v, 16, 4, 1103);
+        const float bare_steel = saturate(edge_wear * 0.85f + smoothstep_f(0.72f, 0.84f, scuffs) * 0.65f);
+        const Vec3 painted_cream{0.76f, 0.72f, 0.64f};
+        const Vec3 target_red{0.68f, 0.06f, 0.04f};
+        const Vec3 target_dark{0.08f, 0.09f, 0.10f};
+        const Vec3 ar500_steel{0.58f, 0.60f, 0.63f};
+        Vec3 paint = lerp3(painted_cream, target_dark, ring3);
+        paint = lerp3(paint, target_red, saturate(ring1 + ring2));
+        p.albedo_linear = lerp3(paint, ar500_steel, bare_steel);
+        p.height = 0.58f - 0.14f * bare_steel + 0.08f * scuffs;
+        p.ao = saturate(0.90f + 0.10f * scuffs - 0.12f * edge_wear);
+        p.roughness = saturate(lerp3({0.48f + 0.12f * scuffs, 0.0f, 0.0f}, {0.24f + 0.10f * scuffs, 0.0f, 0.0f}, bare_steel).x);
+        p.metallic = saturate(0.04f * (1.0f - bare_steel) + 0.96f * bare_steel);
+        p.clearcoat = 0.08f * (1.0f - bare_steel);
+    } else if (slice == 10U) {
+        const float mill = tileable_value_noise(u * 2.0f, v * 24.0f, 16, 1213) * 0.65f
+            + tileable_value_noise(u * 4.0f, v * 32.0f, 32, 1229) * 0.35f;
+        const float oil = tileable_fbm(u, v, 8, 3, 1237);
+        p.albedo_linear = lerp3(Vec3{0.16f, 0.18f, 0.21f}, Vec3{0.29f, 0.32f, 0.36f}, mill * 0.7f + oil * 0.3f);
+        p.height = 0.54f + 0.06f * mill;
+        p.ao = saturate(0.92f + 0.08f * oil);
+        p.roughness = saturate(0.20f + 0.14f * (1.0f - mill) + 0.06f * oil);
+        p.metallic = 0.96f;
+        p.clearcoat = 0.18f;
+    } else {
+        const float sx = std::fabs(std::fmod((u + v) * 24.0f, 1.0f) - 0.5f) * 2.0f;
+        const float sy = std::fabs(std::fmod((u - v + 2.0f) * 24.0f, 1.0f) - 0.5f) * 2.0f;
+        const float diamond = saturate(1.0f - std::max(sx, sy));
+        const float micro = tileable_fbm(u, v, 16, 3, 1307);
+        p.albedo_linear = lerp3(Vec3{0.025f, 0.027f, 0.030f}, Vec3{0.055f, 0.058f, 0.062f}, diamond * 0.6f + micro * 0.4f);
+        p.height = 0.36f + 0.42f * diamond + 0.08f * micro;
+        p.ao = saturate(0.62f + 0.38f * diamond);
+        p.roughness = saturate(0.66f + 0.18f * (1.0f - diamond) + 0.08f * micro);
+        p.metallic = 0.0f;
+        p.clearcoat = 0.0f;
     }
     return p;
 }

@@ -272,6 +272,17 @@ int print_status(const WindowInstance& instance) {
     const std::uint32_t shader_flags = std::atomic_ref<std::uint32_t>(state->shader_flags).load(std::memory_order_acquire);
     const std::int32_t pbr_enabled = std::atomic_ref<std::int32_t>(state->pbr_enabled).load(std::memory_order_acquire);
     const std::int32_t aniso_mip_enabled = std::atomic_ref<std::int32_t>(state->aniso_mip_enabled).load(std::memory_order_acquire);
+    const std::int32_t scene_kind = std::atomic_ref<std::int32_t>(state->scene_kind).load(std::memory_order_acquire);
+    const std::int32_t tactical_hp = std::atomic_ref<std::int32_t>(state->tactical_hp).load(std::memory_order_acquire);
+    const std::int32_t tactical_armor = std::atomic_ref<std::int32_t>(state->tactical_armor).load(std::memory_order_acquire);
+    const std::int32_t tactical_ammo_in_mag = std::atomic_ref<std::int32_t>(state->tactical_ammo_in_mag).load(std::memory_order_acquire);
+    const std::int32_t tactical_ammo_reserve = std::atomic_ref<std::int32_t>(state->tactical_ammo_reserve).load(std::memory_order_acquire);
+    const std::int32_t tactical_shots_fired = std::atomic_ref<std::int32_t>(state->tactical_shots_fired).load(std::memory_order_acquire);
+    const std::int32_t tactical_hits = std::atomic_ref<std::int32_t>(state->tactical_hits).load(std::memory_order_acquire);
+    const std::int32_t tactical_headshots = std::atomic_ref<std::int32_t>(state->tactical_headshots).load(std::memory_order_acquire);
+    const std::int32_t tactical_score = std::atomic_ref<std::int32_t>(state->tactical_score).load(std::memory_order_acquire);
+    const std::int32_t tactical_targets_up = std::atomic_ref<std::int32_t>(state->tactical_targets_up).load(std::memory_order_acquire);
+    const std::int32_t tactical_ads_active = std::atomic_ref<std::int32_t>(state->tactical_ads_active).load(std::memory_order_acquire);
     const std::int32_t overlay_enabled = std::atomic_ref<std::int32_t>(state->overlay_enabled).load(std::memory_order_acquire);
     const std::int32_t flash_indicator_enabled = std::atomic_ref<std::int32_t>(state->flash_indicator_enabled).load(std::memory_order_acquire);
     const std::int32_t raw_input_enabled = std::atomic_ref<std::int32_t>(state->raw_input_enabled).load(std::memory_order_acquire);
@@ -334,7 +345,7 @@ int print_status(const WindowInstance& instance) {
 
     RECT client_rectangle{};
     const bool has_client_size = GetClientRect(instance.window, &client_rectangle) != 0;
-    std::cout << "{\"ok\":true,\"schema_version\":21,\"process_id\":" << instance.process_id
+    std::cout << "{\"ok\":true,\"schema_version\":22,\"process_id\":" << instance.process_id
               << ",\"running\":" << (running ? "true" : "false")
               << ",\"present_calls_completed\":" << present_count
               << ",\"display_frame_id\":" << display_frame_id
@@ -395,7 +406,9 @@ int print_status(const WindowInstance& instance) {
               << ",\"markers_emitted\":" << pcl_markers_emitted
               << ",\"pings_received\":" << pcl_pings_received
               << "},\"note\":\"input_to_present_us measures software input arrival to Present return; physical display scanout requires FrameView/PresentMon ETW or Reflex Latency Analyzer\"}"
-              << ",\"scene\":{\"name\":\"motion_lab\",\"time_ms\":" << scene_time_ms
+              << ",\"scene\":{\"name\":\"" << (scene_kind == static_cast<std::int32_t>(frame_warp_lab::SceneKind::range) ? "tactical_range" : "motion_lab")
+              << "\",\"kind\":\"" << frame_warp_lab::scene_kind_name(scene_kind)
+              << "\",\"time_ms\":" << scene_time_ms
               << ",\"fixed_dt_us\":" << fixed_dt_us
               << ",\"pending_step_frames\":" << pending_step_frames
               << ",\"paused\":" << (scene_paused ? "true" : "false")
@@ -409,6 +422,16 @@ int print_status(const WindowInstance& instance) {
               << ",\"pbr_enabled\":" << (pbr_enabled ? "true" : "false")
               << ",\"aniso_mip_enabled\":" << (aniso_mip_enabled ? "true" : "false")
               << ",\"overlay_enabled\":" << (overlay_enabled ? "true" : "false")
+              << "},\"tactical_range\":{\"hp\":" << tactical_hp
+              << ",\"armor\":" << tactical_armor
+              << ",\"ammo_in_mag\":" << tactical_ammo_in_mag
+              << ",\"ammo_reserve\":" << tactical_ammo_reserve
+              << ",\"shots_fired\":" << tactical_shots_fired
+              << ",\"hits\":" << tactical_hits
+              << ",\"headshots\":" << tactical_headshots
+              << ",\"score\":" << tactical_score
+              << ",\"targets_up\":" << tactical_targets_up
+              << ",\"ads_active\":" << (tactical_ads_active ? "true" : "false")
               << "},\"vrs\":{\"tier\":" << vrs_tier
               << ",\"tile_size_px\":" << vrs_tile_size_px
               << ",\"additional_rates_supported\":" << (vrs_additional_rates ? "true" : "false")
@@ -491,7 +514,7 @@ int print_events(const WindowInstance& instance) {
     const std::int32_t event_count = std::atomic_ref<std::int32_t>(state->event_count).load(std::memory_order_acquire);
     const std::int32_t first_sequence = event_count > static_cast<std::int32_t>(frame_warp_lab::runtime_event_capacity)
         ? event_count - static_cast<std::int32_t>(frame_warp_lab::runtime_event_capacity) + 1 : 1;
-    std::cout << "{\"ok\":true,\"schema_version\":21,\"process_id\":" << instance.process_id
+    std::cout << "{\"ok\":true,\"schema_version\":22,\"process_id\":" << instance.process_id
               << ",\"capacity\":" << frame_warp_lab::runtime_event_capacity << ",\"total_events\":" << event_count << ",\"events\":[";
     bool first_event = true;
     for (std::int32_t sequence = first_sequence; sequence <= event_count; ++sequence) {
@@ -594,7 +617,7 @@ int print_trace(const WindowInstance& instance, std::size_t max_samples, bool in
         if (copy.missed_deadline) ++missed_deadline_count;
     }
 
-    std::cout << "{\"ok\":true,\"schema_version\":21,\"process_id\":" << instance.process_id
+    std::cout << "{\"ok\":true,\"schema_version\":22,\"process_id\":" << instance.process_id
               << ",\"capacity\":" << frame_warp_lab::runtime_frame_trace_capacity
               << ",\"total_frames_recorded\":" << total_samples
               << ",\"sample_count\":" << captured.size()
@@ -878,6 +901,16 @@ int apply_setting(const WindowInstance& instance, const std::wstring& key, const
         if (value == L"on" || value == L"1" || value == L"true") parameter = 1;
         else if (value == L"off" || value == L"0" || value == L"false") parameter = 0;
         else return fail("invalid_value", "Expected aniso_mip in {on, off}");
+    } else if (key == L"scene") {
+        command = frame_warp_lab::ControlCommand::set_scene_kind;
+        if (value == L"corridor") parameter = static_cast<LPARAM>(frame_warp_lab::SceneKind::corridor);
+        else if (value == L"range") parameter = static_cast<LPARAM>(frame_warp_lab::SceneKind::range);
+        else return fail("invalid_value", "Expected scene in {range, corridor}");
+    } else if (key == L"ads") {
+        command = frame_warp_lab::ControlCommand::set_range_ads;
+        if (value == L"on" || value == L"1" || value == L"true") parameter = 1;
+        else if (value == L"off" || value == L"0" || value == L"false") parameter = 0;
+        else return fail("invalid_value", "Expected ads in {on, off}");
     } else if (key == L"render_scale") {
         unsigned long parsed = 0;
         if (!parse_unsigned_long(value.c_str(), parsed) || parsed < 25UL || parsed > 200UL) {
@@ -1268,10 +1301,13 @@ int wmain(int argument_count, wchar_t** arguments) {
         }
         return step_instance_frames(*matched_instance, static_cast<std::int32_t>(parsed_count));
     }
-    if (argument_count == 3 && (command == L"pause" || command == L"resume" || command == L"reset")) {
+    if (argument_count == 3 && (command == L"pause" || command == L"resume" || command == L"reset" || command == L"fire" || command == L"reload")) {
         const frame_warp_lab::ControlCommand operation = command == L"pause"
             ? frame_warp_lab::ControlCommand::scene_pause
-            : command == L"resume" ? frame_warp_lab::ControlCommand::scene_resume : frame_warp_lab::ControlCommand::scene_reset;
+            : command == L"resume" ? frame_warp_lab::ControlCommand::scene_resume
+            : command == L"reset" ? frame_warp_lab::ControlCommand::scene_reset
+            : command == L"fire" ? frame_warp_lab::ControlCommand::range_fire
+            : frame_warp_lab::ControlCommand::range_reload;
         if (!PostMessageW(matched_instance->window, frame_warp_lab::control_message, static_cast<WPARAM>(operation), 0)) {
             return fail("control_failed", "Could not send scene control request");
         }

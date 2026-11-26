@@ -10,7 +10,7 @@
 namespace frame_warp_lab {
 
 inline constexpr wchar_t window_class_name[] = L"FrameWarpLabWindow";
-inline constexpr std::uint32_t runtime_state_version = 26;
+inline constexpr std::uint32_t runtime_state_version = 27;
 inline constexpr std::size_t runtime_event_capacity = 64;
 inline constexpr std::size_t runtime_frame_trace_capacity = 256;
 inline constexpr std::size_t hud_graph_sample_count = 128;
@@ -61,6 +61,15 @@ enum class ControlCommand : WPARAM {
     set_shader_flags = 37,
     set_pbr_enabled = 38,
     set_aniso_mip_enabled = 39,
+    set_scene_kind = 40,
+    range_fire = 41,
+    set_range_ads = 42,
+    range_reload = 43,
+};
+
+enum class SceneKind : std::int32_t {
+    corridor = 0,
+    range = 1,
 };
 
 enum class DrsMode : std::int32_t {
@@ -205,6 +214,7 @@ enum class ConfigKey : std::int32_t {
     shader_flags = 32,
     pbr_enabled = 33,
     aniso_mip_enabled = 34,
+    scene_kind = 35,
 };
 
 enum class RuntimeEventType : std::int32_t {
@@ -331,6 +341,17 @@ struct RuntimeState {
     std::uint32_t shader_flags;
     std::int32_t pbr_enabled;
     std::int32_t aniso_mip_enabled;
+    std::int32_t scene_kind;
+    std::int32_t tactical_hp;
+    std::int32_t tactical_armor;
+    std::int32_t tactical_ammo_in_mag;
+    std::int32_t tactical_ammo_reserve;
+    std::int32_t tactical_shots_fired;
+    std::int32_t tactical_hits;
+    std::int32_t tactical_headshots;
+    std::int32_t tactical_score;
+    std::int32_t tactical_targets_up;
+    std::int32_t tactical_ads_active;
     std::int32_t overlay_enabled;
     std::int32_t flash_indicator_enabled;
     std::int32_t raw_input_enabled;
@@ -479,6 +500,15 @@ inline const char* config_key_name(std::int32_t key) {
         case ConfigKey::shader_flags: return "shader_feature";
         case ConfigKey::pbr_enabled: return "pbr";
         case ConfigKey::aniso_mip_enabled: return "aniso_mip";
+        case ConfigKey::scene_kind: return "scene";
+        default: return "unknown";
+    }
+}
+
+inline const char* scene_kind_name(std::int32_t kind) {
+    switch (static_cast<SceneKind>(kind)) {
+        case SceneKind::corridor: return "corridor";
+        case SceneKind::range: return "range";
         default: return "unknown";
     }
 }

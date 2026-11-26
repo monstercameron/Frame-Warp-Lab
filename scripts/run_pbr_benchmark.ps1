@@ -218,6 +218,7 @@ try {
     }
 
     & $cli pause $fpid | Out-Null
+    & $cli set $fpid scene corridor | Out-Null
     & $cli set $fpid overlay off | Out-Null
     & $cli set $fpid async_gpu off | Out-Null
     & $cli set $fpid pacer unlocked | Out-Null
