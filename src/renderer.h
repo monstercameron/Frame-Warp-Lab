@@ -140,6 +140,10 @@ public:
     void set_render_resolution(UINT override_width, UINT override_height, std::int32_t scale_pct);
     UINT render_width() const { return render_width_; }
     UINT render_height() const { return render_height_; }
+    UINT alloc_render_width() const { return alloc_render_width_; }
+    UINT alloc_render_height() const { return alloc_render_height_; }
+    std::int64_t drs_scale_changes() const { return drs_scale_changes_; }
+    std::int64_t drs_reallocations() const { return drs_reallocations_; }
     void flush();
     bool gpu_timing_available() const { return present_timestamp_frequency_ > 0; }
     bool allow_tearing_enabled() const { return allow_tearing_supported_; }
@@ -192,6 +196,8 @@ private:
         std::uint64_t last_read_present_fence = 0;
         std::int64_t scene_gpu_us = -1;
         TileCacheStats tile_stats{};
+        UINT active_width = 0;
+        UINT active_height = 0;
         bool used_selective_tiles = false;
         bool in_flight = false;
         bool valid = false;
@@ -308,9 +314,13 @@ private:
     UINT viewport_height_ = 0;
     UINT render_width_ = 0;
     UINT render_height_ = 0;
+    UINT alloc_render_width_ = 0;
+    UINT alloc_render_height_ = 0;
     UINT render_override_width_ = 0;
     UINT render_override_height_ = 0;
     std::int32_t render_scale_pct_ = 100;
+    std::int64_t drs_scale_changes_ = 0;
+    std::int64_t drs_reallocations_ = 0;
 };
 
 }

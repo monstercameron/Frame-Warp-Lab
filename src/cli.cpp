@@ -306,7 +306,15 @@ int print_status(const WindowInstance& instance) {
     const std::int32_t render_scale_pct = std::atomic_ref<std::int32_t>(state->render_scale_pct).load(std::memory_order_acquire);
     const std::int32_t render_width = std::atomic_ref<std::int32_t>(state->render_width).load(std::memory_order_acquire);
     const std::int32_t render_height = std::atomic_ref<std::int32_t>(state->render_height).load(std::memory_order_acquire);
+    const std::int32_t alloc_render_width = std::atomic_ref<std::int32_t>(state->alloc_render_width).load(std::memory_order_acquire);
+    const std::int32_t alloc_render_height = std::atomic_ref<std::int32_t>(state->alloc_render_height).load(std::memory_order_acquire);
     const std::int32_t upscale_filter = std::atomic_ref<std::int32_t>(state->upscale_filter).load(std::memory_order_acquire);
+    const std::int32_t drs_mode = std::atomic_ref<std::int32_t>(state->drs_mode).load(std::memory_order_acquire);
+    const std::int32_t drs_min_pct = std::atomic_ref<std::int32_t>(state->drs_min_pct).load(std::memory_order_acquire);
+    const std::int32_t drs_max_pct = std::atomic_ref<std::int32_t>(state->drs_max_pct).load(std::memory_order_acquire);
+    const std::int64_t drs_scale_changes = std::atomic_ref<std::int64_t>(state->drs_scale_changes).load(std::memory_order_acquire);
+    const std::int64_t drs_reallocations = std::atomic_ref<std::int64_t>(state->drs_reallocations).load(std::memory_order_acquire);
+    const std::int64_t drs_target_scene_budget_us = std::atomic_ref<std::int64_t>(state->drs_target_scene_budget_us).load(std::memory_order_acquire);
     const std::int32_t fixed_dt_us = std::atomic_ref<std::int32_t>(state->fixed_dt_us).load(std::memory_order_acquire);
     const std::int64_t target_scene_budget_us = std::atomic_ref<std::int64_t>(state->last_target_scene_budget_us).load(std::memory_order_acquire);
     const std::int32_t pending_step_frames = std::atomic_ref<std::int32_t>(state->pending_step_frames).load(std::memory_order_acquire);
@@ -320,7 +328,7 @@ int print_status(const WindowInstance& instance) {
 
     RECT client_rectangle{};
     const bool has_client_size = GetClientRect(instance.window, &client_rectangle) != 0;
-    std::cout << "{\"ok\":true,\"schema_version\":17,\"process_id\":" << instance.process_id
+    std::cout << "{\"ok\":true,\"schema_version\":18,\"process_id\":" << instance.process_id
               << ",\"running\":" << (running ? "true" : "false")
               << ",\"present_calls_completed\":" << present_count
               << ",\"display_frame_id\":" << display_frame_id
@@ -446,11 +454,19 @@ int print_status(const WindowInstance& instance) {
     std::cout << "}"
               << ",\"offscreen_render\":{\"width\":" << render_width
               << ",\"height\":" << render_height
+              << ",\"alloc_width\":" << alloc_render_width
+              << ",\"alloc_height\":" << alloc_render_height
               << ",\"scale_pct\":" << render_scale_pct
-              << ",\"upscale_filter\":\"" << frame_warp_lab::upscale_filter_name(upscale_filter) << "\"}"
-              << ",\"features\":{\"scene\":\"cpu_camera_gbuffer\",\"offscreen_upscaling\":\"decoupled_render_target_bilinear_catmull_cas_nearest\",\"selective_tiles\":\"par_priority_stbn_auto_budget_trm_coarse_16x16\",\"hud\":\"2d_frametime_graph_and_readout\",\"async_gpu\":\"dual_queue_3slot_ring\",\"reprojection\":\"depth_camera_warp\",\"nvidia_pcl_markers\":\"etw_and_streamline_pcl\",\"frame_generation\":\"mv_extrapolation_temporal_and_dlss_g\",\"dlss_g_inputs\":\"3slot_aligned_hudless_clipdepth_motion\",\"vrs\":\""
+              << ",\"upscale_filter\":\"" << frame_warp_lab::upscale_filter_name(upscale_filter) << "\""
+              << ",\"drs_mode\":\"" << frame_warp_lab::drs_mode_name(drs_mode) << "\""
+              << ",\"drs_min_pct\":" << drs_min_pct
+              << ",\"drs_max_pct\":" << drs_max_pct
+              << ",\"scale_changes\":" << drs_scale_changes
+              << ",\"reallocations\":" << drs_reallocations
+              << ",\"target_scene_budget_us\":" << drs_target_scene_budget_us << "}"
+              << ",\"features\":{\"scene\":\"cpu_camera_gbuffer\",\"offscreen_upscaling\":\"zero_alloc_per_frame_drs_subrect_bilinear_catmull_cas_nearest\",\"selective_tiles\":\"par_priority_stbn_auto_budget_trm_coarse_16x16\",\"hud\":\"2d_frametime_graph_and_readout\",\"async_gpu\":\"dual_queue_3slot_ring\",\"reprojection\":\"depth_camera_warp\",\"nvidia_pcl_markers\":\"etw_and_streamline_pcl\",\"frame_generation\":\"mv_extrapolation_temporal_and_dlss_g\",\"dlss_g_inputs\":\"3slot_aligned_hudless_clipdepth_motion\",\"vrs\":\""
               << (vrs_tier >= 2 ? "tier1_and_tier2_foveated_image" : vrs_tier == 1 ? "tier1_per_draw" : "unsupported")
-              << "\",\"adaptive_scheduler\":\"unified_vrs_dlss_warp_ladder\",\"ipc\":\"seqlock_v22\",\"shaders\":\"dxc_sm6_0_wave_specialized\"}}\n";
+              << "\",\"adaptive_scheduler\":\"unified_vrs_dlss_warp_ladder\",\"ipc\":\"seqlock_v23\",\"shaders\":\"dxc_sm6_0_wave_specialized\"}}\n";
     return 0;
 }
 
@@ -463,7 +479,7 @@ int print_events(const WindowInstance& instance) {
     const std::int32_t event_count = std::atomic_ref<std::int32_t>(state->event_count).load(std::memory_order_acquire);
     const std::int32_t first_sequence = event_count > static_cast<std::int32_t>(frame_warp_lab::runtime_event_capacity)
         ? event_count - static_cast<std::int32_t>(frame_warp_lab::runtime_event_capacity) + 1 : 1;
-    std::cout << "{\"ok\":true,\"schema_version\":17,\"process_id\":" << instance.process_id
+    std::cout << "{\"ok\":true,\"schema_version\":18,\"process_id\":" << instance.process_id
               << ",\"capacity\":" << frame_warp_lab::runtime_event_capacity << ",\"total_events\":" << event_count << ",\"events\":[";
     bool first_event = true;
     for (std::int32_t sequence = first_sequence; sequence <= event_count; ++sequence) {
@@ -512,6 +528,7 @@ int print_trace(const WindowInstance& instance, std::size_t max_samples, bool in
     std::vector<double> shaded_tile_ratios;
     std::int64_t total_deferred_tiles = 0;
     std::int64_t total_critical_tiles = 0;
+    std::vector<std::int64_t> render_scales;
     std::int64_t total_critical_deferred_tiles = 0;
     std::int64_t rendered_count = 0;
     std::int64_t repeated_count = 0;
@@ -539,6 +556,7 @@ int print_trace(const WindowInstance& instance, std::size_t max_samples, bool in
         if (copy.present_call_cpu_us >= 0) present_call_cpu_times.push_back(copy.present_call_cpu_us);
         if (copy.scene_gpu_us >= 0) scene_gpu_times.push_back(copy.scene_gpu_us);
         if (copy.present_gpu_us >= 0) present_gpu_times.push_back(copy.present_gpu_us);
+        if (copy.render_scale_pct > 0) render_scales.push_back(static_cast<std::int64_t>(copy.render_scale_pct));
         if (copy.gpu_slot_warped && copy.total_pixel_count > 0) {
             invalid_ratios.push_back(static_cast<double>(copy.invalid_pixel_count) / static_cast<double>(copy.total_pixel_count));
             temporal_recovered_ratios.push_back(static_cast<double>(copy.temporal_recovered_count) / static_cast<double>(copy.total_pixel_count));
@@ -564,7 +582,7 @@ int print_trace(const WindowInstance& instance, std::size_t max_samples, bool in
         if (copy.missed_deadline) ++missed_deadline_count;
     }
 
-    std::cout << "{\"ok\":true,\"schema_version\":17,\"process_id\":" << instance.process_id
+    std::cout << "{\"ok\":true,\"schema_version\":18,\"process_id\":" << instance.process_id
               << ",\"capacity\":" << frame_warp_lab::runtime_frame_trace_capacity
               << ",\"total_frames_recorded\":" << total_samples
               << ",\"sample_count\":" << captured.size()
@@ -597,6 +615,8 @@ int print_trace(const WindowInstance& instance, std::size_t max_samples, bool in
     print_metric_summary(scene_gpu_times);
     std::cout << ",\"present_gpu_us\":";
     print_metric_summary(present_gpu_times);
+    std::cout << ",\"render_scale_pct\":";
+    print_metric_summary(render_scales);
     std::cout << ",\"invalid_pixel_ratio\":";
     print_double_summary(invalid_ratios);
     std::cout << ",\"temporal_recovered_ratio\":";
@@ -663,7 +683,8 @@ int print_trace(const WindowInstance& instance, std::size_t max_samples, bool in
                       << ",\"tile_critical_deferred\":" << sample.tile_critical_deferred
                       << ",\"shaded_tile_ratio\":";
             print_ratio(sample.tile_shaded_count, sample.tile_total_count);
-            std::cout << ",\"discontinuity\":" << (sample.discontinuity ? "true" : "false") << "}";
+            std::cout << ",\"render_scale_pct\":" << sample.render_scale_pct
+                      << ",\"discontinuity\":" << (sample.discontinuity ? "true" : "false") << "}";
         }
         std::cout << "]";
     }
@@ -829,6 +850,26 @@ int apply_setting(const WindowInstance& instance, const std::wstring& key, const
         else if (value == L"cas") parameter = static_cast<LPARAM>(frame_warp_lab::UpscaleFilter::cas);
         else if (value == L"nearest") parameter = static_cast<LPARAM>(frame_warp_lab::UpscaleFilter::nearest);
         else return fail("invalid_value", "Expected upscale_filter in {bilinear, catmull_rom, cas, nearest}");
+    } else if (key == L"drs") {
+        command = frame_warp_lab::ControlCommand::set_drs_mode;
+        if (value == L"off" || value == L"0" || value == L"false") parameter = static_cast<LPARAM>(frame_warp_lab::DrsMode::off);
+        else if (value == L"auto" || value == L"1" || value == L"true") parameter = static_cast<LPARAM>(frame_warp_lab::DrsMode::auto_deadline);
+        else if (value == L"sweep") parameter = static_cast<LPARAM>(frame_warp_lab::DrsMode::sweep);
+        else return fail("invalid_value", "Expected drs in {off, auto, sweep}");
+    } else if (key == L"drs_min") {
+        unsigned long parsed = 0;
+        if (!parse_unsigned_long(value.c_str(), parsed) || parsed < 25UL || parsed > 200UL) {
+            return fail("invalid_value", "Expected drs_min integer in [25, 200]");
+        }
+        command = frame_warp_lab::ControlCommand::set_drs_min_pct;
+        parameter = static_cast<LPARAM>(parsed);
+    } else if (key == L"drs_max") {
+        unsigned long parsed = 0;
+        if (!parse_unsigned_long(value.c_str(), parsed) || parsed < 25UL || parsed > 200UL) {
+            return fail("invalid_value", "Expected drs_max integer in [25, 200]");
+        }
+        command = frame_warp_lab::ControlCommand::set_drs_max_pct;
+        parameter = static_cast<LPARAM>(parsed);
     } else if (key == L"fixed_dt_us") {
         unsigned long parsed = 0;
         if (!parse_unsigned_long(value.c_str(), parsed) || parsed > 100000UL) {
@@ -837,7 +878,7 @@ int apply_setting(const WindowInstance& instance, const std::wstring& key, const
         command = frame_warp_lab::ControlCommand::set_fixed_dt_us;
         parameter = static_cast<LPARAM>(parsed);
     } else {
-        return fail("unknown_setting", "Supported settings are: mode, dlssg_mult, pacer, target_fps, async_gpu, vrs, selective_tiles, tile_budget, tile_policy, auto_tile_budget, cache_sharpen, coarse_fallback, render_scale, upscale_filter, fixed_dt_us, adaptive, adaptive_dlssg, instrumentation, divider, vsync, view, path, stress, overlay, flash");
+        return fail("unknown_setting", "Supported settings are: mode, dlssg_mult, pacer, target_fps, async_gpu, vrs, selective_tiles, tile_budget, tile_policy, auto_tile_budget, cache_sharpen, coarse_fallback, render_scale, upscale_filter, drs, drs_min, drs_max, fixed_dt_us, adaptive, adaptive_dlssg, instrumentation, divider, vsync, view, path, stress, overlay, flash");
     }
 
     if (!PostMessageW(instance.window, frame_warp_lab::control_message, static_cast<WPARAM>(command), parameter)) {
@@ -1090,14 +1131,14 @@ int set_instance_render_size(const WindowInstance& instance, std::uint32_t width
 
 int wmain(int argument_count, wchar_t** arguments) {
     if (argument_count == 2 && std::wstring(arguments[1]) == L"help") {
-        std::cout << "{\"ok\":true,\"schema_version\":17,\"commands\":[\"help\",\"start\",\"instances\",\"status <pid>\",\"events <pid>\",\"trace <pid> [limit] [summary]\",\"set <pid> <key> <value>\",\"resize <pid> <width> <height>\",\"render_size <pid> <width> <height>\",\"step <pid> <frames>\",\"capture <pid> <tag> [step_frames]\",\"pause <pid>\",\"resume <pid>\",\"reset <pid>\",\"stop <pid>\",\"capabilities\"],\"settings\":{\"mode\":[\"full_render\",\"repeat\",\"reproject\",\"frame_gen\",\"combined\",\"dlss_g\",\"dlss_g_warp\"],\"dlssg_mult\":[\"2\",\"3\",\"4\",\"5\",\"6\",\"dynamic\"],\"pacer\":[\"deadline\",\"vsync_only\",\"unlocked\"],\"target_fps\":\"0 or 30..500\",\"async_gpu\":[\"on\",\"off\"],\"vrs\":[\"off\",\"uniform_2x2\",\"foveated\"],\"selective_tiles\":[\"on\",\"off\"],\"tile_budget\":\"5..100\",\"tile_policy\":[\"fifo\",\"priority_stbn\"],\"auto_tile_budget\":[\"on\",\"off\"],\"cache_sharpen\":[\"on\",\"off\"],\"coarse_fallback\":[\"on\",\"off\"],\"render_scale\":\"25..200\",\"upscale_filter\":[\"bilinear\",\"catmull_rom\",\"cas\",\"nearest\"],\"fixed_dt_us\":\"0..100000\",\"adaptive\":[\"on\",\"off\"],\"adaptive_dlssg\":[\"on\",\"off\"],\"instrumentation\":[\"minimal\",\"standard\",\"diagnostic\"],\"divider\":\"1..8\",\"vsync\":[\"on\",\"off\"],\"view\":[\"final\",\"depth\",\"motion\",\"holes\",\"vrs\",\"tiles\",\"priority\"],\"path\":[\"corridor_sway\",\"fast_pan\",\"occlusion_sweep\",\"camera_cut\",\"manual\",\"pure_rotation\"],\"stress\":\"0..64\",\"overlay\":[\"on\",\"off\"],\"flash\":[\"on\",\"off\"]}}\n";
+        std::cout << "{\"ok\":true,\"schema_version\":18,\"commands\":[\"help\",\"start\",\"instances\",\"status <pid>\",\"events <pid>\",\"trace <pid> [limit] [summary]\",\"set <pid> <key> <value>\",\"resize <pid> <width> <height>\",\"render_size <pid> <width> <height>\",\"step <pid> <frames>\",\"capture <pid> <tag> [step_frames]\",\"pause <pid>\",\"resume <pid>\",\"reset <pid>\",\"stop <pid>\",\"capabilities\"],\"settings\":{\"mode\":[\"full_render\",\"repeat\",\"reproject\",\"frame_gen\",\"combined\",\"dlss_g\",\"dlss_g_warp\"],\"dlssg_mult\":[\"2\",\"3\",\"4\",\"5\",\"6\",\"dynamic\"],\"pacer\":[\"deadline\",\"vsync_only\",\"unlocked\"],\"target_fps\":\"0 or 30..500\",\"async_gpu\":[\"on\",\"off\"],\"vrs\":[\"off\",\"uniform_2x2\",\"foveated\"],\"selective_tiles\":[\"on\",\"off\"],\"tile_budget\":\"5..100\",\"tile_policy\":[\"fifo\",\"priority_stbn\"],\"auto_tile_budget\":[\"on\",\"off\"],\"cache_sharpen\":[\"on\",\"off\"],\"coarse_fallback\":[\"on\",\"off\"],\"render_scale\":\"25..200\",\"upscale_filter\":[\"bilinear\",\"catmull_rom\",\"cas\",\"nearest\"],\"drs\":[\"off\",\"auto\",\"sweep\"],\"drs_min\":\"25..200\",\"drs_max\":\"25..200\",\"fixed_dt_us\":\"0..100000\",\"adaptive\":[\"on\",\"off\"],\"adaptive_dlssg\":[\"on\",\"off\"],\"instrumentation\":[\"minimal\",\"standard\",\"diagnostic\"],\"divider\":\"1..8\",\"vsync\":[\"on\",\"off\"],\"view\":[\"final\",\"depth\",\"motion\",\"holes\",\"vrs\",\"tiles\",\"priority\"],\"path\":[\"corridor_sway\",\"fast_pan\",\"occlusion_sweep\",\"camera_cut\",\"manual\",\"pure_rotation\"],\"stress\":\"0..64\",\"overlay\":[\"on\",\"off\"],\"flash\":[\"on\",\"off\"]}}\n";
         return 0;
     }
     if (argument_count == 2 && std::wstring(arguments[1]) == L"capabilities") return print_capabilities();
     if (argument_count == 2 && std::wstring(arguments[1]) == L"start") return start_instance();
     const auto instances = find_instances();
     if (argument_count == 2 && std::wstring(arguments[1]) == L"instances") {
-        std::cout << "{\"ok\":true,\"schema_version\":17,\"instances\":[";
+        std::cout << "{\"ok\":true,\"schema_version\":18,\"instances\":[";
         for (std::size_t index = 0; index < instances.size(); ++index) {
             if (index) std::cout << ',';
             std::cout << "{\"process_id\":" << instances[index].process_id << "}";

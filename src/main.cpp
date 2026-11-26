@@ -173,7 +173,15 @@ public:
         std::int32_t render_scale_pct,
         std::int32_t render_width,
         std::int32_t render_height,
+        std::int32_t alloc_render_width,
+        std::int32_t alloc_render_height,
         frame_warp_lab::UpscaleFilter upscale_filter,
+        frame_warp_lab::DrsMode drs_mode,
+        std::int32_t drs_min_pct,
+        std::int32_t drs_max_pct,
+        std::int64_t drs_scale_changes,
+        std::int64_t drs_reallocations,
+        std::int64_t drs_target_scene_budget_us,
         std::int32_t fixed_dt_us,
         std::int64_t target_scene_budget_us,
         const frame_warp_lab::TileCacheStats& stats) {
@@ -186,7 +194,15 @@ public:
         std::atomic_ref<std::int32_t>(state_->render_scale_pct).store(render_scale_pct, std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->render_width).store(render_width, std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->render_height).store(render_height, std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->alloc_render_width).store(alloc_render_width, std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->alloc_render_height).store(alloc_render_height, std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->upscale_filter).store(static_cast<std::int32_t>(upscale_filter), std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->drs_mode).store(static_cast<std::int32_t>(drs_mode), std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->drs_min_pct).store(drs_min_pct, std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->drs_max_pct).store(drs_max_pct, std::memory_order_release);
+        std::atomic_ref<std::int64_t>(state_->drs_scale_changes).store(drs_scale_changes, std::memory_order_release);
+        std::atomic_ref<std::int64_t>(state_->drs_reallocations).store(drs_reallocations, std::memory_order_release);
+        std::atomic_ref<std::int64_t>(state_->drs_target_scene_budget_us).store(drs_target_scene_budget_us, std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->fixed_dt_us).store(fixed_dt_us, std::memory_order_release);
         std::atomic_ref<std::int64_t>(state_->last_target_scene_budget_us).store(target_scene_budget_us, std::memory_order_release);
         std::atomic_ref<std::uint32_t>(state_->last_tile_total_count).store(stats.total_tiles, std::memory_order_release);
@@ -687,10 +703,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         UINT render_override_width = 0;
         UINT render_override_height = 0;
         frame_warp_lab::UpscaleFilter upscale_filter = frame_warp_lab::UpscaleFilter::bilinear;
+        frame_warp_lab::DrsMode drs_mode = frame_warp_lab::DrsMode::off;
+        std::int32_t drs_min_pct = 50;
+        std::int32_t drs_max_pct = 100;
         std::int32_t fixed_dt_us = 0;
         std::int32_t pending_step_frames = 0;
         std::uint32_t pending_capture_tag = 0;
         frame_warp_lab::AutoTileBudgetController auto_tile_budget;
+        frame_warp_lab::AutoDrsController auto_drs;
         wchar_t exe_path_buf[32768]{};
         GetModuleFileNameW(nullptr, exe_path_buf, static_cast<DWORD>(std::size(exe_path_buf)));
         const std::filesystem::path capture_dir = std::filesystem::path(exe_path_buf).parent_path() / L"captures";
@@ -754,7 +774,15 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 render_scale_pct,
                 static_cast<std::int32_t>(renderer.render_width()),
                 static_cast<std::int32_t>(renderer.render_height()),
+                static_cast<std::int32_t>(renderer.alloc_render_width()),
+                static_cast<std::int32_t>(renderer.alloc_render_height()),
                 upscale_filter,
+                drs_mode,
+                drs_min_pct,
+                drs_max_pct,
+                renderer.drs_scale_changes(),
+                renderer.drs_reallocations(),
+                auto_drs.last_target_scene_budget_us(),
                 fixed_dt_us,
                 auto_tile_budget.last_target_scene_budget_us(),
                 renderer.latest_completed_source().tile_stats);
@@ -1060,11 +1088,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                         coarse_fallback_enabled = message.lParam != 0;
                         runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, coarse_fallback_enabled ? 1 : 0, frame_warp_lab::ConfigKey::coarse_fallback);
                     } else if (command == frame_warp_lab::ControlCommand::set_render_scale) {
+                        drs_mode = frame_warp_lab::DrsMode::off;
                         render_scale_pct = std::clamp(static_cast<std::int32_t>(message.lParam), 25, 200);
                         render_override_width = 0;
                         render_override_height = 0;
                         renderer.set_render_resolution(0, 0, render_scale_pct);
-                        cadence_counter = 0;
                         runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, render_scale_pct, frame_warp_lab::ConfigKey::render_scale);
                     } else if (command == frame_warp_lab::ControlCommand::set_render_size) {
                         const auto packed = static_cast<std::uint32_t>(message.lParam);
@@ -1078,7 +1106,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                             render_override_height = std::clamp<UINT>(req_h, 120U, 4320U);
                         }
                         renderer.set_render_resolution(render_override_width, render_override_height, render_scale_pct);
-                        cadence_counter = 0;
                         runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, static_cast<std::int32_t>(renderer.render_width()), frame_warp_lab::ConfigKey::render_size);
                     } else if (command == frame_warp_lab::ControlCommand::set_upscale_filter) {
                         const auto raw = static_cast<std::int32_t>(message.lParam);
@@ -1086,6 +1113,21 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                             upscale_filter = static_cast<frame_warp_lab::UpscaleFilter>(raw);
                             runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, raw, frame_warp_lab::ConfigKey::upscale_filter);
                         }
+                    } else if (command == frame_warp_lab::ControlCommand::set_drs_mode) {
+                        const auto raw = static_cast<std::int32_t>(message.lParam);
+                        if (raw >= 0 && raw <= 2) {
+                            drs_mode = static_cast<frame_warp_lab::DrsMode>(raw);
+                            auto_drs.reset();
+                            runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, raw, frame_warp_lab::ConfigKey::drs_mode);
+                        }
+                    } else if (command == frame_warp_lab::ControlCommand::set_drs_min_pct) {
+                        drs_min_pct = std::clamp(static_cast<std::int32_t>(message.lParam), 25, 200);
+                        if (drs_max_pct < drs_min_pct) drs_max_pct = drs_min_pct;
+                        runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, drs_min_pct, frame_warp_lab::ConfigKey::drs_min_pct);
+                    } else if (command == frame_warp_lab::ControlCommand::set_drs_max_pct) {
+                        drs_max_pct = std::clamp(static_cast<std::int32_t>(message.lParam), 25, 200);
+                        if (drs_min_pct > drs_max_pct) drs_min_pct = drs_max_pct;
+                        runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, drs_max_pct, frame_warp_lab::ConfigKey::drs_max_pct);
                     } else if (command == frame_warp_lab::ControlCommand::resize_window) {
                         const auto packed = static_cast<std::uint32_t>(message.lParam);
                         const LONG requested_width = static_cast<LONG>(packed & 0xFFFFU);
@@ -1545,6 +1587,33 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                     hud_text_dirty = true;
                 }
             }
+            if (drs_mode != frame_warp_lab::DrsMode::off) {
+                bool drs_changed = false;
+                if (drs_mode == frame_warp_lab::DrsMode::sweep) {
+                    drs_changed = auto_drs.update_sweep(drs_min_pct, drs_max_pct, render_scale_pct);
+                } else if (active_source.valid) {
+                    drs_changed = auto_drs.update_deadline(
+                        pacer.target_period_us(),
+                        effective_divider,
+                        active_source.snapshot.source_frame_id,
+                        active_source.scene_gpu_us,
+                        last_present_gpu_us,
+                        gpu_metrics.missed_deadline,
+                        drs_min_pct,
+                        drs_max_pct,
+                        render_scale_pct);
+                }
+                if (drs_changed) {
+                    if (render_override_width > 0U && render_override_height > 0U) {
+                        const UINT scaled_w = std::clamp<UINT>(static_cast<UINT>(std::lround(static_cast<double>(render_override_width) * static_cast<double>(render_scale_pct) / 100.0)) & ~1U, 160U, 7680U);
+                        const UINT scaled_h = std::clamp<UINT>(static_cast<UINT>(std::lround(static_cast<double>(render_override_height) * static_cast<double>(render_scale_pct) / 100.0)) & ~1U, 120U, 4320U);
+                        renderer.set_render_resolution(scaled_w, scaled_h, render_scale_pct);
+                    } else {
+                        renderer.set_render_resolution(0, 0, render_scale_pct);
+                    }
+                    hud_text_dirty = true;
+                }
+            }
             runtime_state.update_present_variant(gpu_metrics.selected_present_variant);
             runtime_state.update_selective_tiles(
                 selective_tiles_enabled,
@@ -1556,7 +1625,15 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 render_scale_pct,
                 static_cast<std::int32_t>(renderer.render_width()),
                 static_cast<std::int32_t>(renderer.render_height()),
+                static_cast<std::int32_t>(renderer.alloc_render_width()),
+                static_cast<std::int32_t>(renderer.alloc_render_height()),
                 upscale_filter,
+                drs_mode,
+                drs_min_pct,
+                drs_max_pct,
+                renderer.drs_scale_changes(),
+                renderer.drs_reallocations(),
+                auto_drs.last_target_scene_budget_us(),
                 fixed_dt_us,
                 auto_tile_budget.last_target_scene_budget_us(),
                 active_source.tile_stats);
@@ -1607,6 +1684,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                     active_source.tile_stats.deferred_tiles,
                     active_source.tile_stats.critical_total_tiles,
                     active_source.tile_stats.critical_deferred_tiles,
+                    render_scale_pct,
                 },
                 static_cast<std::int64_t>(smoothed_present_interval_us));
         }

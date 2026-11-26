@@ -12,6 +12,7 @@ cbuffer TileSceneConstants : register(b0) {
     uint4 tile_params;
     uint4 cache_params;
     uint4 policy_params;
+    uint4 prev_and_alloc_dims;
 };
 
 Texture2D<float4> prev_color_texture : register(t0);
@@ -69,8 +70,8 @@ uint lookup_stbn_phase(uint tx, uint ty) {
     return (word >> ((col & 7u) * 4u)) & 15u;
 }
 
-float3 sample_catmull_rom_5tap(float2 uv, float2 tex_size, float2 inv_tex_size) {
-    float2 sample_pos = uv * tex_size;
+float3 sample_catmull_rom_5tap(float2 uv, float2 active_size, float2 inv_alloc_size, float2 uv_min, float2 uv_max) {
+    float2 sample_pos = uv * active_size;
     float2 tc1 = floor(sample_pos - 0.5) + 0.5;
     float2 f = sample_pos - tc1;
     float2 f2 = f * f;
@@ -84,9 +85,9 @@ float3 sample_catmull_rom_5tap(float2 uv, float2 tex_size, float2 inv_tex_size) 
     float2 w12 = w1 + w2;
     float2 offset12 = w2 / max(w12, float2(1e-4, 1e-4));
 
-    float2 tc0 = saturate((tc1 - 1.0) * inv_tex_size);
-    float2 tc3 = saturate((tc1 + 2.0) * inv_tex_size);
-    float2 tc12 = saturate((tc1 + offset12) * inv_tex_size);
+    float2 tc0 = clamp((tc1 - 1.0) * inv_alloc_size, uv_min, uv_max);
+    float2 tc3 = clamp((tc1 + 2.0) * inv_alloc_size, uv_min, uv_max);
+    float2 tc12 = clamp((tc1 + offset12) * inv_alloc_size, uv_min, uv_max);
 
     float3 s0 = prev_color_texture.SampleLevel(linear_clamp_sampler, float2(tc12.x, tc0.y), 0).rgb;
     float3 s1 = prev_color_texture.SampleLevel(linear_clamp_sampler, float2(tc0.x, tc12.y), 0).rgb;
@@ -301,10 +302,17 @@ void vis_classify_main(
             }
 
             if (has_prev_cache && projected_ok) {
+                uint prev_w = max(prev_and_alloc_dims.x, 1u);
+                uint prev_h = max(prev_and_alloc_dims.y, 1u);
+                float2 prev_active_size = float2((float)prev_w, (float)prev_h);
+                float2 alloc_size = max(float2((float)prev_and_alloc_dims.z, (float)prev_and_alloc_dims.w), prev_active_size);
+                float2 inv_alloc_size = rcp(alloc_size);
+                float2 prev_uv_min = 0.5 * inv_alloc_size;
+                float2 prev_uv_max = max((prev_active_size - 0.5) * inv_alloc_size, prev_uv_min);
                 int2 prev_coord = clamp(
-                    int2(previous_uv * float2((float)viewport_width, (float)viewport_height)),
+                    int2(previous_uv * prev_active_size),
                     int2(0, 0),
-                    int2((int)viewport_width - 1, (int)viewport_height - 1));
+                    int2((int)prev_w - 1, (int)prev_h - 1));
                 float prev_z = prev_depth_texture.Load(int3(prev_coord, 0));
                 uint prev_vis = prev_vis_texture.Load(int3(prev_coord, 0));
                 uint prev_mat = prev_vis & 255u;
@@ -313,10 +321,13 @@ void vis_classify_main(
                 if (policy_params.z != 0u) {
                     cached_color = sample_catmull_rom_5tap(
                         previous_uv,
-                        float2((float)viewport_width, (float)viewport_height),
-                        float2(camera_up_rcp_width.w, camera_forward_rcp_height.w));
+                        prev_active_size,
+                        inv_alloc_size,
+                        prev_uv_min,
+                        prev_uv_max);
                 } else {
-                    cached_color = prev_color_texture.SampleLevel(linear_clamp_sampler, previous_uv, 0).rgb;
+                    float2 prev_tex_uv = clamp(previous_uv * (prev_active_size * inv_alloc_size), prev_uv_min, prev_uv_max);
+                    cached_color = prev_color_texture.SampleLevel(linear_clamp_sampler, prev_tex_uv, 0).rgb;
                 }
                 float rel_z_err = abs(prev_z - expected_prev_z) / max(expected_prev_z, 0.25);
                 bool depth_match = rel_z_err < 0.035;

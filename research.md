@@ -272,7 +272,7 @@ Before expanding to complex rasterized mesh/PBR shaders, validate the architectu
 | 2 | PAR-5 history firewall | No unbounded recursive degradation | Partial (authoritative cache invariant enforced; long-run drift test & fg/bg separation pending) |
 | 3 | Damage-rate-aware scheduler | No sustained repair backlog under feasible load | Partial (deadline auto-budgeter + `age=255` + `4×4` coarse fallback done; damage-rate floor pending) |
 | 4 | Independent update frequencies | Stable output with reduced visibility and shading frequencies | Partial (camera/HUD vs. scene decoupled; decoupled visibility/shading/lighting rates pending) |
-| 5 | Multi-resolution scaling | Predictable performance at 1080p, 1440p and 4K | Proven (`v0.23.0` offscreen `1080p`/`1440p`/`4K` + `1080p` upscaling envelope) |
+| 5 | Multi-resolution scaling | Predictable performance at 1080p, 1440p and 4K | Proven (`v0.23.0`–`v0.24.0` zero-alloc per-frame DRS up/down + `1080p`/`1440p`/`4K` scaling & stacked `4K` DRS+PAR `12.24×`) |
 | 6 | Temporal video quality harness | Quality measured across entire motion sequences | Planned |
 | 7 | Physical display measurements | Verified displayed cadence and input latency | Planned (interactive FrameView / PresentMon run) |
 | 8 | Foreground DLSS-G validation | Actual generated frames with acceptable quality | Partial (Streamline ARM64 `6×` MFG verified; interactive focused run pending) |

@@ -10,7 +10,7 @@
 namespace frame_warp_lab {
 
 inline constexpr wchar_t window_class_name[] = L"FrameWarpLabWindow";
-inline constexpr std::uint32_t runtime_state_version = 22;
+inline constexpr std::uint32_t runtime_state_version = 23;
 inline constexpr std::size_t runtime_event_capacity = 64;
 inline constexpr std::size_t runtime_frame_trace_capacity = 256;
 inline constexpr std::size_t hud_graph_sample_count = 128;
@@ -54,6 +54,15 @@ enum class ControlCommand : WPARAM {
     set_render_scale = 30,
     set_render_size = 31,
     set_upscale_filter = 32,
+    set_drs_mode = 33,
+    set_drs_min_pct = 34,
+    set_drs_max_pct = 35,
+};
+
+enum class DrsMode : std::int32_t {
+    off = 0,
+    auto_deadline = 1,
+    sweep = 2,
 };
 
 enum class UpscaleFilter : std::int32_t {
@@ -185,6 +194,9 @@ enum class ConfigKey : std::int32_t {
     render_scale = 25,
     render_size = 26,
     upscale_filter = 27,
+    drs_mode = 28,
+    drs_min_pct = 29,
+    drs_max_pct = 30,
 };
 
 enum class RuntimeEventType : std::int32_t {
@@ -247,6 +259,7 @@ struct RuntimeFrameSample {
     std::uint32_t tile_deferred_count;
     std::uint32_t tile_critical_total;
     std::uint32_t tile_critical_deferred;
+    std::int32_t render_scale_pct;
 };
 
 struct RuntimeState {
@@ -345,7 +358,15 @@ struct RuntimeState {
     std::int32_t render_scale_pct;
     std::int32_t render_width;
     std::int32_t render_height;
+    std::int32_t alloc_render_width;
+    std::int32_t alloc_render_height;
     std::int32_t upscale_filter;
+    std::int32_t drs_mode;
+    std::int32_t drs_min_pct;
+    std::int32_t drs_max_pct;
+    std::int64_t drs_scale_changes;
+    std::int64_t drs_reallocations;
+    std::int64_t drs_target_scene_budget_us;
     std::int32_t fixed_dt_us;
     std::int64_t last_target_scene_budget_us;
     std::uint32_t last_tile_total_count;
@@ -437,6 +458,18 @@ inline const char* config_key_name(std::int32_t key) {
         case ConfigKey::render_scale: return "render_scale";
         case ConfigKey::render_size: return "render_size";
         case ConfigKey::upscale_filter: return "upscale_filter";
+        case ConfigKey::drs_mode: return "drs";
+        case ConfigKey::drs_min_pct: return "drs_min";
+        case ConfigKey::drs_max_pct: return "drs_max";
+        default: return "unknown";
+    }
+}
+
+inline const char* drs_mode_name(std::int32_t mode) {
+    switch (static_cast<DrsMode>(mode)) {
+        case DrsMode::off: return "off";
+        case DrsMode::auto_deadline: return "auto";
+        case DrsMode::sweep: return "sweep";
         default: return "unknown";
     }
 }

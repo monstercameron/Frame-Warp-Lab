@@ -3,6 +3,7 @@
 #include "runtime_state.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 
 namespace frame_warp_lab {
@@ -314,6 +315,112 @@ private:
     std::int64_t last_source_frame_id_ = -1;
     std::int64_t last_target_scene_budget_us_ = 0;
     std::int32_t stable_low_streak_ = 0;
+};
+
+class AutoDrsController {
+public:
+    void reset() {
+        smoothed_scene_us_ = 0.0;
+        smoothed_present_us_ = 80.0;
+        has_sample_ = false;
+        last_source_frame_id_ = -1;
+        last_target_scene_budget_us_ = 0;
+        stable_low_streak_ = 0;
+        sweep_direction_ = -1;
+    }
+
+    std::int64_t last_target_scene_budget_us() const { return last_target_scene_budget_us_; }
+
+    bool update_sweep(std::int32_t min_pct, std::int32_t max_pct, std::int32_t& in_out_scale_pct) {
+        const std::int32_t lo = std::clamp(min_pct, 25, 200);
+        const std::int32_t hi = std::clamp(std::max(lo, max_pct), 25, 200);
+        if (lo == hi) {
+            const bool changed = in_out_scale_pct != lo;
+            in_out_scale_pct = lo;
+            return changed;
+        }
+        const std::int32_t previous = in_out_scale_pct;
+        std::int32_t next = previous + sweep_direction_ * 5;
+        if (next <= lo) {
+            next = lo;
+            sweep_direction_ = 1;
+        } else if (next >= hi) {
+            next = hi;
+            sweep_direction_ = -1;
+        }
+        in_out_scale_pct = next;
+        return in_out_scale_pct != previous;
+    }
+
+    bool update_deadline(
+        std::int64_t target_period_us,
+        std::int32_t effective_divider,
+        std::int64_t source_frame_id,
+        std::int64_t scene_gpu_us,
+        std::int64_t present_gpu_us,
+        bool missed_deadline,
+        std::int32_t min_pct,
+        std::int32_t max_pct,
+        std::int32_t& in_out_scale_pct) {
+        const double period_us = static_cast<double>(std::max<std::int64_t>(target_period_us, 1000LL));
+        const double cadence = static_cast<double>(std::max<std::int32_t>(1, effective_divider));
+        if (present_gpu_us >= 0) {
+            smoothed_present_us_ = smoothed_present_us_ * 0.85 + static_cast<double>(present_gpu_us) * 0.15;
+        }
+        const double headroom_us = std::max(period_us * 0.22, smoothed_present_us_ * 2.5 + 650.0);
+        const double target_scene_us = std::max(450.0, period_us * cadence - smoothed_present_us_ - headroom_us);
+        last_target_scene_budget_us_ = static_cast<std::int64_t>(target_scene_us);
+
+        const std::int32_t lo = std::clamp(min_pct, 25, 200);
+        const std::int32_t hi = std::clamp(std::max(lo, max_pct), 25, 200);
+        if (scene_gpu_us < 0 || source_frame_id == last_source_frame_id_) {
+            return false;
+        }
+        last_source_frame_id_ = source_frame_id;
+        if (!has_sample_) {
+            smoothed_scene_us_ = static_cast<double>(scene_gpu_us);
+            has_sample_ = true;
+        } else {
+            smoothed_scene_us_ = smoothed_scene_us_ * 0.60 + static_cast<double>(scene_gpu_us) * 0.40;
+        }
+
+        const std::int32_t previous = in_out_scale_pct;
+        if (smoothed_scene_us_ > target_scene_us * 0.90 || (missed_deadline && smoothed_scene_us_ > target_scene_us * 0.72)) {
+            stable_low_streak_ = 0;
+            const double ratio = (target_scene_us * 0.82) / std::max(smoothed_scene_us_, 1.0);
+            const double linear_factor = std::sqrt(std::clamp(ratio, 0.25, 1.0));
+            const auto target_scale = std::clamp(
+                static_cast<std::int32_t>(std::floor(static_cast<double>(previous) * linear_factor)),
+                lo,
+                hi);
+            const std::int32_t max_drop = std::max(lo, previous - 10);
+            const std::int32_t stepped = std::max(target_scale, max_drop);
+            in_out_scale_pct = (stepped < previous) ? stepped : std::max(lo, previous - 2);
+            return in_out_scale_pct != previous;
+        }
+
+        if (smoothed_scene_us_ < target_scene_us * 0.74 && previous < hi) {
+            ++stable_low_streak_;
+            if (stable_low_streak_ >= 6) {
+                const std::int32_t step = smoothed_scene_us_ < target_scene_us * 0.48 ? 4 : 2;
+                in_out_scale_pct = std::min(hi, previous + step);
+                stable_low_streak_ = 0;
+                return in_out_scale_pct != previous;
+            }
+        } else {
+            stable_low_streak_ = 0;
+        }
+        return false;
+    }
+
+private:
+    double smoothed_scene_us_ = 0.0;
+    double smoothed_present_us_ = 80.0;
+    bool has_sample_ = false;
+    std::int64_t last_source_frame_id_ = -1;
+    std::int64_t last_target_scene_budget_us_ = 0;
+    std::int32_t stable_low_streak_ = 0;
+    std::int32_t sweep_direction_ = -1;
 };
 
 }

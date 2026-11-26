@@ -28,6 +28,8 @@ cbuffer PresentConstants : register(b0) {
     float4 prev_presented_camera_up_rcp_tan_y;
     float4 prev_presented_camera_forward_reset;
     float4 dlss_motion_params;
+    float4 source_subrect_params;
+    float4 prev_and_alloc_params;
 };
 
 cbuffer HudConstants : register(b1) {
@@ -67,8 +69,14 @@ VertexOutput vertex_main(uint vertex_id : SV_VertexID) {
     return output;
 }
 
-float3 sample_catmull_rom_5tap_tex(Texture2D<float4> tex, float2 uv, float2 tex_size, float2 inv_tex_size) {
-    float2 sample_pos = uv * tex_size;
+float2 map_subrect_uv(float2 norm_uv, float2 uv_scale, float2 inv_alloc_size) {
+    float2 uv_min = 0.5 * inv_alloc_size;
+    float2 uv_max = max(uv_scale - 0.5 * inv_alloc_size, uv_min);
+    return clamp(norm_uv * uv_scale, uv_min, uv_max);
+}
+
+float3 sample_catmull_rom_5tap_tex(Texture2D<float4> tex, float2 norm_uv, float2 active_size, float2 uv_scale, float2 inv_alloc_size) {
+    float2 sample_pos = norm_uv * active_size;
     float2 tc1 = floor(sample_pos - 0.5) + 0.5;
     float2 f = sample_pos - tc1;
     float2 f2 = f * f;
@@ -82,9 +90,11 @@ float3 sample_catmull_rom_5tap_tex(Texture2D<float4> tex, float2 uv, float2 tex_
     float2 w12 = w1 + w2;
     float2 offset12 = w2 / max(w12, float2(1e-4, 1e-4));
 
-    float2 tc0 = saturate((tc1 - 1.0) * inv_tex_size);
-    float2 tc3 = saturate((tc1 + 2.0) * inv_tex_size);
-    float2 tc12 = saturate((tc1 + offset12) * inv_tex_size);
+    float2 uv_min = 0.5 * inv_alloc_size;
+    float2 uv_max = max(uv_scale - 0.5 * inv_alloc_size, uv_min);
+    float2 tc0 = clamp((tc1 - 1.0) * inv_alloc_size, uv_min, uv_max);
+    float2 tc3 = clamp((tc1 + 2.0) * inv_alloc_size, uv_min, uv_max);
+    float2 tc12 = clamp((tc1 + offset12) * inv_alloc_size, uv_min, uv_max);
 
     float3 s0 = tex.SampleLevel(linear_clamp_sampler, float2(tc12.x, tc0.y), 0).rgb;
     float3 s1 = tex.SampleLevel(linear_clamp_sampler, float2(tc0.x, tc12.y), 0).rgb;
@@ -103,12 +113,15 @@ float3 sample_catmull_rom_5tap_tex(Texture2D<float4> tex, float2 uv, float2 tex_
     return clamp(bicubic, box_min, box_max);
 }
 
-float3 sample_cas_upscale_tex(Texture2D<float4> tex, float2 uv, float2 tex_size, float2 inv_tex_size) {
-    float3 e = sample_catmull_rom_5tap_tex(tex, uv, tex_size, inv_tex_size);
-    float3 b = tex.SampleLevel(linear_clamp_sampler, saturate(uv + float2(0.0, -inv_tex_size.y)), 0).rgb;
-    float3 d = tex.SampleLevel(linear_clamp_sampler, saturate(uv + float2(-inv_tex_size.x, 0.0)), 0).rgb;
-    float3 f = tex.SampleLevel(linear_clamp_sampler, saturate(uv + float2(inv_tex_size.x, 0.0)), 0).rgb;
-    float3 h = tex.SampleLevel(linear_clamp_sampler, saturate(uv + float2(0.0, inv_tex_size.y)), 0).rgb;
+float3 sample_cas_upscale_tex(Texture2D<float4> tex, float2 norm_uv, float2 active_size, float2 uv_scale, float2 inv_alloc_size) {
+    float3 e = sample_catmull_rom_5tap_tex(tex, norm_uv, active_size, uv_scale, inv_alloc_size);
+    float2 uv_min = 0.5 * inv_alloc_size;
+    float2 uv_max = max(uv_scale - 0.5 * inv_alloc_size, uv_min);
+    float2 center_uv = clamp(norm_uv * uv_scale, uv_min, uv_max);
+    float3 b = tex.SampleLevel(linear_clamp_sampler, clamp(center_uv + float2(0.0, -inv_alloc_size.y), uv_min, uv_max), 0).rgb;
+    float3 d = tex.SampleLevel(linear_clamp_sampler, clamp(center_uv + float2(-inv_alloc_size.x, 0.0), uv_min, uv_max), 0).rgb;
+    float3 f = tex.SampleLevel(linear_clamp_sampler, clamp(center_uv + float2(inv_alloc_size.x, 0.0), uv_min, uv_max), 0).rgb;
+    float3 h = tex.SampleLevel(linear_clamp_sampler, clamp(center_uv + float2(0.0, inv_alloc_size.y), uv_min, uv_max), 0).rgb;
 
     float3 min_rgb = min(min(min(d, e), min(f, b)), h);
     float3 max_rgb = max(max(max(d, e), max(f, b)), h);
@@ -120,17 +133,18 @@ float3 sample_cas_upscale_tex(Texture2D<float4> tex, float2 uv, float2 tex_size,
     return clamp(result, min_rgb * 0.92, max_rgb * 1.06 + 0.01);
 }
 
-float3 sample_upscaled_color(Texture2D<float4> tex, float2 uv, float2 source_size, float2 source_texel_size, int filter_mode) {
+float3 sample_upscaled_color(Texture2D<float4> tex, float2 norm_uv, float2 active_size, float2 uv_scale, float2 inv_alloc_size, int filter_mode) {
     if (filter_mode == 1) {
-        return sample_catmull_rom_5tap_tex(tex, uv, source_size, source_texel_size);
+        return sample_catmull_rom_5tap_tex(tex, norm_uv, active_size, uv_scale, inv_alloc_size);
     }
     if (filter_mode == 2) {
-        return sample_cas_upscale_tex(tex, uv, source_size, source_texel_size);
+        return sample_cas_upscale_tex(tex, norm_uv, active_size, uv_scale, inv_alloc_size);
     }
+    float2 tex_uv = map_subrect_uv(norm_uv, uv_scale, inv_alloc_size);
     if (filter_mode == 3) {
-        return tex.SampleLevel(point_clamp_sampler, uv, 0).rgb;
+        return tex.SampleLevel(point_clamp_sampler, tex_uv, 0).rgb;
     }
-    return tex.SampleLevel(linear_clamp_sampler, uv, 0).rgb;
+    return tex.SampleLevel(linear_clamp_sampler, tex_uv, 0).rgb;
 }
 
 #if PRESENT_VARIANT != 0
@@ -206,6 +220,8 @@ ReprojectionSample evaluate_reprojection_camera(
     float2 target_uv,
     float2 viewport_size,
     float2 texel_size,
+    float2 depth_uv_scale,
+    float2 inv_alloc_size,
     int iteration_count,
     bool check_neighbors) {
     ReprojectionSample result;
@@ -236,7 +252,7 @@ ReprojectionSample evaluate_reprojection_camera(
         return result;
     }
 
-    float sampled_depth = depth_texture.SampleLevel(point_clamp_sampler, candidate_uv, 0);
+    float sampled_depth = depth_texture.SampleLevel(point_clamp_sampler, map_subrect_uv(candidate_uv, depth_uv_scale, inv_alloc_size), 0);
     float ray_distance = sampled_depth * rcp(max(ref_ray_z, 0.1));
     float2 projected_uv = candidate_uv;
     float projected_ref_z = sampled_depth;
@@ -257,7 +273,7 @@ ReprojectionSample evaluate_reprojection_camera(
                 projected_ref_z)) {
             return result;
         }
-        sampled_depth = depth_texture.SampleLevel(point_clamp_sampler, projected_uv, 0);
+        sampled_depth = depth_texture.SampleLevel(point_clamp_sampler, map_subrect_uv(projected_uv, depth_uv_scale, inv_alloc_size), 0);
         float3 surface_world = reconstruct_camera_world_position(
             projected_uv, sampled_depth, ref_position, ref_right, ref_up, ref_forward, ref_tan_x, ref_tan_y);
         ray_distance = max(dot(surface_world - target_origin, target_ray), 0.05);
@@ -286,10 +302,10 @@ ReprojectionSample evaluate_reprojection_camera(
 
     bool consistent = (pixel_error <= reprojection_thresholds.x) && (relative_depth_error <= reprojection_thresholds.y);
     if (check_neighbors && consistent) {
-        float depth_left = depth_texture.SampleLevel(point_clamp_sampler, projected_uv - float2(texel_size.x, 0.0), 0);
-        float depth_right = depth_texture.SampleLevel(point_clamp_sampler, projected_uv + float2(texel_size.x, 0.0), 0);
-        float depth_up = depth_texture.SampleLevel(point_clamp_sampler, projected_uv - float2(0.0, texel_size.y), 0);
-        float depth_down = depth_texture.SampleLevel(point_clamp_sampler, projected_uv + float2(0.0, texel_size.y), 0);
+        float depth_left = depth_texture.SampleLevel(point_clamp_sampler, map_subrect_uv(projected_uv - float2(texel_size.x, 0.0), depth_uv_scale, inv_alloc_size), 0);
+        float depth_right = depth_texture.SampleLevel(point_clamp_sampler, map_subrect_uv(projected_uv + float2(texel_size.x, 0.0), depth_uv_scale, inv_alloc_size), 0);
+        float depth_up = depth_texture.SampleLevel(point_clamp_sampler, map_subrect_uv(projected_uv - float2(0.0, texel_size.y), depth_uv_scale, inv_alloc_size), 0);
+        float depth_down = depth_texture.SampleLevel(point_clamp_sampler, map_subrect_uv(projected_uv + float2(0.0, texel_size.y), depth_uv_scale, inv_alloc_size), 0);
         float max_neighbor_jump = max(
             max(abs(depth_left - sampled_depth), abs(depth_right - sampled_depth)),
             max(abs(depth_up - sampled_depth), abs(depth_down - sampled_depth))) * inv_safe_depth;
@@ -303,10 +319,10 @@ ReprojectionSample evaluate_reprojection_camera(
     return result;
 }
 
-float3 sample_conservative_hole_fill(float2 sample_uv, float2 texel_size, out float out_bg_depth, out float2 out_bg_uv) {
+float3 sample_conservative_hole_fill(float2 sample_uv, float2 texel_size, float2 src_uv_scale, float2 inv_alloc_size, out float out_bg_depth, out float2 out_bg_uv) {
     float2 clamped_uv = saturate(sample_uv);
     float2 probe_step = texel_size * 3.0;
-    float best_depth = scene_depth_texture.SampleLevel(point_clamp_sampler, clamped_uv, 0);
+    float best_depth = scene_depth_texture.SampleLevel(point_clamp_sampler, map_subrect_uv(clamped_uv, src_uv_scale, inv_alloc_size), 0);
     float2 best_bg_uv = clamped_uv;
     float2 bg_offsets[4] = {
         float2(-probe_step.x, 0.0),
@@ -317,7 +333,7 @@ float3 sample_conservative_hole_fill(float2 sample_uv, float2 texel_size, out fl
     [unroll]
     for (int b = 0; b < 4; ++b) {
         float2 tap_uv = saturate(clamped_uv + bg_offsets[b]);
-        float tap_depth = scene_depth_texture.SampleLevel(point_clamp_sampler, tap_uv, 0);
+        float tap_depth = scene_depth_texture.SampleLevel(point_clamp_sampler, map_subrect_uv(tap_uv, src_uv_scale, inv_alloc_size), 0);
         if (tap_depth > best_depth) {
             best_depth = tap_depth;
             best_bg_uv = tap_uv;
@@ -325,16 +341,17 @@ float3 sample_conservative_hole_fill(float2 sample_uv, float2 texel_size, out fl
     }
     out_bg_depth = best_depth;
     out_bg_uv = best_bg_uv;
-    return pow(saturate(scene_color_texture.SampleLevel(linear_clamp_sampler, best_bg_uv, 0).rgb), 1.0 / 2.2);
+    return pow(saturate(scene_color_texture.SampleLevel(linear_clamp_sampler, map_subrect_uv(best_bg_uv, src_uv_scale, inv_alloc_size), 0).rgb), 1.0 / 2.2);
 }
 
 #endif
 
 #if PRESENT_VARIANT == 4
 
-float2 sample_independent_object_motion(float2 sample_uv) {
-    float2 total_mv = scene_motion_texture.SampleLevel(point_clamp_sampler, sample_uv, 0);
-    float depth_val = scene_depth_texture.SampleLevel(point_clamp_sampler, sample_uv, 0);
+float2 sample_independent_object_motion(float2 sample_uv, float2 src_uv_scale, float2 inv_alloc_size) {
+    float2 mapped_uv = map_subrect_uv(sample_uv, src_uv_scale, inv_alloc_size);
+    float2 total_mv = scene_motion_texture.SampleLevel(point_clamp_sampler, mapped_uv, 0);
+    float depth_val = scene_depth_texture.SampleLevel(point_clamp_sampler, mapped_uv, 0);
     float3 world_pos = reconstruct_camera_world_position(
         sample_uv,
         depth_val,
@@ -362,7 +379,7 @@ float2 sample_independent_object_motion(float2 sample_uv) {
     return total_mv - static_mv;
 }
 
-ReprojectionSample evaluate_frame_gen(float2 uv, float2 viewport_size, float2 texel_size, float alpha) {
+ReprojectionSample evaluate_frame_gen(float2 uv, float2 viewport_size, float2 texel_size, float2 src_uv_scale, float2 inv_alloc_size, float alpha) {
     ReprojectionSample result;
     result.source_uv = uv;
     result.linear_depth = 1000.0;
@@ -370,7 +387,7 @@ ReprojectionSample evaluate_frame_gen(float2 uv, float2 viewport_size, float2 te
 
     float2 search_radius = texel_size * 4.0;
     float2 best_uv = uv;
-    float nearest_depth = scene_depth_texture.SampleLevel(point_clamp_sampler, uv, 0);
+    float nearest_depth = scene_depth_texture.SampleLevel(point_clamp_sampler, map_subrect_uv(uv, src_uv_scale, inv_alloc_size), 0);
     float2 offsets[4] = {
         float2(-search_radius.x, 0.0),
         float2(search_radius.x, 0.0),
@@ -380,33 +397,33 @@ ReprojectionSample evaluate_frame_gen(float2 uv, float2 viewport_size, float2 te
     [unroll]
     for (int i = 0; i < 4; ++i) {
         float2 tap_uv = saturate(uv + offsets[i]);
-        float tap_depth = scene_depth_texture.SampleLevel(point_clamp_sampler, tap_uv, 0);
+        float tap_depth = scene_depth_texture.SampleLevel(point_clamp_sampler, map_subrect_uv(tap_uv, src_uv_scale, inv_alloc_size), 0);
         if (tap_depth < nearest_depth) {
             nearest_depth = tap_depth;
             best_uv = tap_uv;
         }
     }
 
-    float2 mv = scene_motion_texture.SampleLevel(point_clamp_sampler, best_uv, 0);
+    float2 mv = scene_motion_texture.SampleLevel(point_clamp_sampler, map_subrect_uv(best_uv, src_uv_scale, inv_alloc_size), 0);
     float2 candidate_uv = uv + mv * alpha;
     if (candidate_uv.x < 0.0 || candidate_uv.x > 1.0 || candidate_uv.y < 0.0 || candidate_uv.y > 1.0) {
         return result;
     }
 
-    float2 refined_mv = scene_motion_texture.SampleLevel(point_clamp_sampler, candidate_uv, 0);
+    float2 refined_mv = scene_motion_texture.SampleLevel(point_clamp_sampler, map_subrect_uv(candidate_uv, src_uv_scale, inv_alloc_size), 0);
     float2 final_uv = uv + refined_mv * alpha;
     if (final_uv.x < 0.0 || final_uv.x > 1.0 || final_uv.y < 0.0 || final_uv.y > 1.0) {
         return result;
     }
 
-    float2 verified_mv = scene_motion_texture.SampleLevel(point_clamp_sampler, final_uv, 0);
-    float sampled_depth = scene_depth_texture.SampleLevel(point_clamp_sampler, final_uv, 0);
+    float2 verified_mv = scene_motion_texture.SampleLevel(point_clamp_sampler, map_subrect_uv(final_uv, src_uv_scale, inv_alloc_size), 0);
+    float sampled_depth = scene_depth_texture.SampleLevel(point_clamp_sampler, map_subrect_uv(final_uv, src_uv_scale, inv_alloc_size), 0);
     float motion_disagreement_px = length((verified_mv - refined_mv) * alpha * viewport_size);
     float inv_safe_depth = rcp(max(sampled_depth, 0.25));
-    float depth_l = scene_depth_texture.SampleLevel(point_clamp_sampler, final_uv - float2(texel_size.x, 0.0), 0);
-    float depth_r = scene_depth_texture.SampleLevel(point_clamp_sampler, final_uv + float2(texel_size.x, 0.0), 0);
-    float depth_u = scene_depth_texture.SampleLevel(point_clamp_sampler, final_uv - float2(0.0, texel_size.y), 0);
-    float depth_d = scene_depth_texture.SampleLevel(point_clamp_sampler, final_uv + float2(0.0, texel_size.y), 0);
+    float depth_l = scene_depth_texture.SampleLevel(point_clamp_sampler, map_subrect_uv(final_uv - float2(texel_size.x, 0.0), src_uv_scale, inv_alloc_size), 0);
+    float depth_r = scene_depth_texture.SampleLevel(point_clamp_sampler, map_subrect_uv(final_uv + float2(texel_size.x, 0.0), src_uv_scale, inv_alloc_size), 0);
+    float depth_u = scene_depth_texture.SampleLevel(point_clamp_sampler, map_subrect_uv(final_uv - float2(0.0, texel_size.y), src_uv_scale, inv_alloc_size), 0);
+    float depth_d = scene_depth_texture.SampleLevel(point_clamp_sampler, map_subrect_uv(final_uv + float2(0.0, texel_size.y), src_uv_scale, inv_alloc_size), 0);
     float max_jump = max(
         max(abs(depth_l - sampled_depth), abs(depth_r - sampled_depth)),
         max(abs(depth_u - sampled_depth), abs(depth_d - sampled_depth))) * inv_safe_depth;
@@ -639,12 +656,17 @@ float4 pixel_main(VertexOutput input) : SV_Target {
     float2 viewport_size = viewport_and_flags.xy;
     float2 display_texel_size = float2(source_camera_right_rcp_width.w, source_camera_up_rcp_height.w);
     float2 uv = input.position.xy * display_texel_size;
-    float2 source_size = max(float2(homography_col_x.w, homography_col_y.w), float2(1.0, 1.0));
+    float2 source_size = max(source_subrect_params.xy, float2(1.0, 1.0));
+    float2 src_uv_scale = max(source_subrect_params.zw, float2(1e-4, 1e-4));
+    float2 prev_uv_scale = max(prev_and_alloc_params.xy, float2(1e-4, 1e-4));
+    float2 inv_alloc_size = max(prev_and_alloc_params.zw, float2(1e-6, 1e-6));
+    float2 prev_active_size = max(prev_uv_scale / inv_alloc_size, float2(1.0, 1.0));
     float2 texel_size = rcp(source_size);
+    float2 prev_texel_size = rcp(prev_active_size);
     int upscale_filter = (int)(homography_col_z.w + 0.5);
 
 #if PRESENT_VARIANT == 0
-    float3 linear_color = sample_upscaled_color(scene_color_texture, uv, source_size, texel_size, upscale_filter);
+    float3 linear_color = sample_upscaled_color(scene_color_texture, uv, source_size, src_uv_scale, inv_alloc_size, upscale_filter);
     float3 output_color = pow(saturate(linear_color), 1.0 / 2.2);
     return float4(composite_overlays(input.position.xy, viewport_size, output_color), 1.0);
 #elif PRESENT_VARIANT == 1
@@ -658,7 +680,7 @@ float4 pixel_main(VertexOutput input) : SV_Target {
             reprojection_stats.InterlockedAdd(0, invalid_wave, previous_invalid);
         }
     }
-    float3 output_color = pow(saturate(sample_upscaled_color(scene_color_texture, sample_uv, source_size, texel_size, upscale_filter)), 1.0 / 2.2);
+    float3 output_color = pow(saturate(sample_upscaled_color(scene_color_texture, sample_uv, source_size, src_uv_scale, inv_alloc_size, upscale_filter)), 1.0 / 2.2);
     return float4(composite_overlays(input.position.xy, viewport_size, output_color), 1.0);
 #elif PRESENT_VARIANT == 2 || PRESENT_VARIANT == 3
     ReprojectionSample reproj = evaluate_reprojection_camera(
@@ -672,6 +694,8 @@ float4 pixel_main(VertexOutput input) : SV_Target {
         uv,
         viewport_size,
         texel_size,
+        src_uv_scale,
+        inv_alloc_size,
         PRESENT_VARIANT == 2 ? 2 : 4,
         PRESENT_VARIANT == 3);
     float2 sample_uv = saturate(reproj.source_uv);
@@ -686,8 +710,8 @@ float4 pixel_main(VertexOutput input) : SV_Target {
     float unused_bg_depth = 1000.0;
     float2 unused_bg_uv = sample_uv;
     float3 output_color = reproj.valid
-        ? pow(saturate(sample_upscaled_color(scene_color_texture, sample_uv, source_size, texel_size, upscale_filter)), 1.0 / 2.2)
-        : sample_conservative_hole_fill(sample_uv, texel_size, unused_bg_depth, unused_bg_uv);
+        ? pow(saturate(sample_upscaled_color(scene_color_texture, sample_uv, source_size, src_uv_scale, inv_alloc_size, upscale_filter)), 1.0 / 2.2)
+        : sample_conservative_hole_fill(sample_uv, texel_size, src_uv_scale, inv_alloc_size, unused_bg_depth, unused_bg_uv);
     return float4(composite_overlays(input.position.xy, viewport_size, output_color), 1.0);
 #else
     int diagnostic_view = (int)(viewport_and_flags.z + 0.5);
@@ -713,6 +737,8 @@ float4 pixel_main(VertexOutput input) : SV_Target {
             uv,
             viewport_size,
             texel_size,
+            src_uv_scale,
+            inv_alloc_size,
             4,
             true);
         sample_uv = saturate(reproj.source_uv);
@@ -729,7 +755,9 @@ float4 pixel_main(VertexOutput input) : SV_Target {
                 previous_camera_position_tan_y.w,
                 uv,
                 viewport_size,
-                texel_size,
+                prev_texel_size,
+                prev_uv_scale,
+                inv_alloc_size,
                 4,
                 true);
             if (hist.valid) {
@@ -740,7 +768,7 @@ float4 pixel_main(VertexOutput input) : SV_Target {
         }
 #endif
     } else if (synthesis_mode == 2) {
-        ReprojectionSample gen = evaluate_frame_gen(uv, viewport_size, texel_size, extrapolation_alpha);
+        ReprojectionSample gen = evaluate_frame_gen(uv, viewport_size, texel_size, src_uv_scale, inv_alloc_size, extrapolation_alpha);
         sample_uv = saturate(gen.source_uv);
         pixel_valid = gen.valid;
         if (!pixel_valid && has_previous_history) {
@@ -754,7 +782,9 @@ float4 pixel_main(VertexOutput input) : SV_Target {
                 previous_camera_position_tan_y.w,
                 uv,
                 viewport_size,
-                texel_size,
+                prev_texel_size,
+                prev_uv_scale,
+                inv_alloc_size,
                 4,
                 true);
             if (hist.valid) {
@@ -775,13 +805,15 @@ float4 pixel_main(VertexOutput input) : SV_Target {
             uv,
             viewport_size,
             texel_size,
+            src_uv_scale,
+            inv_alloc_size,
             4,
             true);
         sample_uv = saturate(reproj.source_uv);
         pixel_valid = reproj.valid;
 
         if (pixel_valid && has_previous_history && extrapolation_alpha > 0.01) {
-            float2 obj_mv = sample_independent_object_motion(sample_uv);
+            float2 obj_mv = sample_independent_object_motion(sample_uv, src_uv_scale, inv_alloc_size);
             float obj_speed = length(obj_mv);
             if (obj_speed < 0.0008) {
                 float2 probe_radius = texel_size * 6.0;
@@ -794,7 +826,7 @@ float4 pixel_main(VertexOutput input) : SV_Target {
                 [unroll]
                 for (int p = 0; p < 4; ++p) {
                     float2 probe_uv = saturate(sample_uv + probes[p]);
-                    float2 probe_mv = sample_independent_object_motion(probe_uv);
+                    float2 probe_mv = sample_independent_object_motion(probe_uv, src_uv_scale, inv_alloc_size);
                     float probe_speed = length(probe_mv);
                     if (probe_speed > obj_speed) {
                         obj_speed = probe_speed;
@@ -805,7 +837,7 @@ float4 pixel_main(VertexOutput input) : SV_Target {
             if (obj_speed > 0.0008) {
                 float2 extrapolated_uv = sample_uv + obj_mv * extrapolation_alpha;
                 if (extrapolated_uv.x >= 0.0 && extrapolated_uv.x <= 1.0 && extrapolated_uv.y >= 0.0 && extrapolated_uv.y <= 1.0) {
-                    float2 verify_mv = sample_independent_object_motion(extrapolated_uv);
+                    float2 verify_mv = sample_independent_object_motion(extrapolated_uv, src_uv_scale, inv_alloc_size);
                     if (length(verify_mv) > 0.0006 && length((verify_mv - obj_mv) * viewport_size) < 12.0) {
                         sample_uv = extrapolated_uv;
                     }
@@ -824,7 +856,9 @@ float4 pixel_main(VertexOutput input) : SV_Target {
                 previous_camera_position_tan_y.w,
                 uv,
                 viewport_size,
-                texel_size,
+                prev_texel_size,
+                prev_uv_scale,
+                inv_alloc_size,
                 4,
                 true);
             if (hist.valid) {
@@ -851,20 +885,20 @@ float4 pixel_main(VertexOutput input) : SV_Target {
     float3 output_color = float3(0.0, 0.0, 0.0);
     if (diagnostic_view == 1) {
         float linear_depth = recovered_from_history
-            ? prev_depth_texture.SampleLevel(point_clamp_sampler, sample_uv, 0)
-            : scene_depth_texture.SampleLevel(point_clamp_sampler, sample_uv, 0);
+            ? prev_depth_texture.SampleLevel(point_clamp_sampler, map_subrect_uv(sample_uv, prev_uv_scale, inv_alloc_size), 0)
+            : scene_depth_texture.SampleLevel(point_clamp_sampler, map_subrect_uv(sample_uv, src_uv_scale, inv_alloc_size), 0);
         float normalized_depth = saturate(1.0 - linear_depth / 32.0);
         output_color = float3(normalized_depth, normalized_depth * 0.9, normalized_depth * 0.75);
     } else if (diagnostic_view == 2) {
         float2 motion = recovered_from_history
-            ? prev_motion_texture.SampleLevel(point_clamp_sampler, sample_uv, 0)
-            : scene_motion_texture.SampleLevel(point_clamp_sampler, sample_uv, 0);
+            ? prev_motion_texture.SampleLevel(point_clamp_sampler, map_subrect_uv(sample_uv, prev_uv_scale, inv_alloc_size), 0)
+            : scene_motion_texture.SampleLevel(point_clamp_sampler, map_subrect_uv(sample_uv, src_uv_scale, inv_alloc_size), 0);
         float2 scaled = clamp(motion * 24.0, -1.0, 1.0);
         output_color = float3(saturate(scaled.x * 0.5 + 0.5), saturate(scaled.y * 0.5 + 0.5), saturate(length(scaled)));
     } else {
         float3 linear_color = recovered_from_history
-            ? sample_upscaled_color(prev_color_texture, sample_uv, source_size, texel_size, upscale_filter)
-            : sample_upscaled_color(scene_color_texture, sample_uv, source_size, texel_size, upscale_filter);
+            ? sample_upscaled_color(prev_color_texture, sample_uv, prev_active_size, prev_uv_scale, inv_alloc_size, upscale_filter)
+            : sample_upscaled_color(scene_color_texture, sample_uv, source_size, src_uv_scale, inv_alloc_size, upscale_filter);
         output_color = pow(saturate(linear_color), 1.0 / 2.2);
         if (synthesis_active && recovered_from_history && diagnostic_view == 3) {
             output_color = float3(0.08, 0.95, 0.85);
@@ -872,7 +906,7 @@ float4 pixel_main(VertexOutput input) : SV_Target {
             if (diagnostic_view == 3) {
                 output_color = float3(1.0, 0.12, 0.78);
             } else {
-                output_color = sample_conservative_hole_fill(sample_uv, texel_size, filled_depth, filled_uv);
+                output_color = sample_conservative_hole_fill(sample_uv, texel_size, src_uv_scale, inv_alloc_size, filled_depth, filled_uv);
                 used_hole_fill = true;
             }
         }
@@ -951,8 +985,8 @@ float4 pixel_main(VertexOutput input) : SV_Target {
     float sample_linear_depth = used_hole_fill
         ? filled_depth
         : (recovered_from_history
-            ? prev_depth_texture.SampleLevel(point_clamp_sampler, geom_uv, 0)
-            : scene_depth_texture.SampleLevel(point_clamp_sampler, geom_uv, 0));
+            ? prev_depth_texture.SampleLevel(point_clamp_sampler, map_subrect_uv(geom_uv, prev_uv_scale, inv_alloc_size), 0)
+            : scene_depth_texture.SampleLevel(point_clamp_sampler, map_subrect_uv(geom_uv, src_uv_scale, inv_alloc_size), 0));
 
     float out_clip_depth = 1.0;
     float2 out_motion = float2(0.0, 0.0);
@@ -997,7 +1031,7 @@ float4 pixel_main(VertexOutput input) : SV_Target {
                 out_motion = prev_pres_uv - uv;
             }
             if (!recovered_from_history && !used_hole_fill && pixel_valid) {
-                float2 obj_mv = sample_independent_object_motion(geom_uv);
+                float2 obj_mv = sample_independent_object_motion(geom_uv, src_uv_scale, inv_alloc_size);
                 out_motion += obj_mv * object_motion_scale;
             }
         }
