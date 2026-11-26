@@ -10,7 +10,7 @@
 namespace frame_warp_lab {
 
 inline constexpr wchar_t window_class_name[] = L"FrameWarpLabWindow";
-inline constexpr std::uint32_t runtime_state_version = 10;
+inline constexpr std::uint32_t runtime_state_version = 11;
 inline constexpr std::size_t runtime_event_capacity = 64;
 inline constexpr std::size_t runtime_frame_trace_capacity = 256;
 inline constexpr std::size_t hud_graph_sample_count = 128;
@@ -47,6 +47,8 @@ enum class PresentationMode : std::int32_t {
     full_render = 0,
     repeat = 1,
     reproject = 2,
+    frame_gen = 3,
+    combined = 4,
 };
 
 enum class DiagnosticView : std::int32_t {
@@ -69,6 +71,8 @@ enum class FrameKind : std::int32_t {
     repeated = 1,
     warped = 2,
     fallback = 3,
+    generated = 4,
+    combined = 5,
 };
 
 enum class FallbackReason : std::int32_t {
@@ -110,6 +114,7 @@ struct RuntimeFrameSample {
     std::int64_t scene_gpu_us;
     std::int64_t present_gpu_us;
     std::uint32_t invalid_pixel_count;
+    std::uint32_t temporal_recovered_count;
     std::uint32_t total_pixel_count;
     std::int32_t presentation_mode;
     std::int32_t frame_kind;
@@ -138,6 +143,8 @@ struct RuntimeState {
     std::int64_t rendered_frame_count;
     std::int64_t repeated_frame_count;
     std::int64_t warped_frame_count;
+    std::int64_t generated_frame_count;
+    std::int64_t combined_frame_count;
     std::int64_t fallback_frame_count;
     std::int64_t async_overlap_count;
     std::int64_t missed_deadline_count;
@@ -154,6 +161,7 @@ struct RuntimeState {
     std::int64_t pcl_markers_emitted;
     std::int64_t pcl_pings_received;
     std::uint32_t last_invalid_pixel_count;
+    std::uint32_t last_temporal_recovered_count;
     std::uint32_t last_total_pixel_count;
     std::int32_t presentation_mode;
     std::int32_t pacer_mode;
@@ -214,6 +222,8 @@ inline const char* presentation_mode_name(std::int32_t mode) {
         case PresentationMode::full_render: return "full_render";
         case PresentationMode::repeat: return "repeat";
         case PresentationMode::reproject: return "reproject";
+        case PresentationMode::frame_gen: return "frame_gen";
+        case PresentationMode::combined: return "combined";
         default: return "unknown";
     }
 }
@@ -224,6 +234,8 @@ inline const char* frame_kind_name(std::int32_t kind) {
         case FrameKind::repeated: return "repeated";
         case FrameKind::warped: return "warped";
         case FrameKind::fallback: return "fallback";
+        case FrameKind::generated: return "generated";
+        case FrameKind::combined: return "combined";
         default: return "unknown";
     }
 }

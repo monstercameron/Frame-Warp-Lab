@@ -34,6 +34,7 @@ struct SceneConstantsData {
 struct PresentConstantsData {
     float viewport_and_flags[4];
     float warp_flags_and_aspect[4];
+    float synthesis_params[4];
     float source_camera_position_tan_y[4];
     float source_camera_right_unused[4];
     float source_camera_up_unused[4];
@@ -42,6 +43,10 @@ struct PresentConstantsData {
     float target_camera_right_unused[4];
     float target_camera_up_unused[4];
     float target_camera_forward_unused[4];
+    float previous_camera_position_tan_y[4];
+    float previous_camera_right_rcp_tan_x[4];
+    float previous_camera_up_rcp_tan_y[4];
+    float previous_camera_forward_tan_x[4];
 };
 
 struct HudConstantsData {
@@ -54,7 +59,7 @@ struct HudConstantsData {
 };
 
 static_assert(sizeof(SceneConstantsData) <= 256);
-static_assert(sizeof(PresentConstantsData) <= 256);
+static_assert(sizeof(PresentConstantsData) <= 512);
 static_assert(sizeof(HudConstantsData) <= 2560);
 
 void check(HRESULT result, const char* operation) {
@@ -426,7 +431,7 @@ bool Renderer::submit_scene_async(
     const float aspect_ratio = static_cast<float>(viewport_width_) / static_cast<float>(viewport_height_);
     const float rcp_width = 1.0f / static_cast<float>(viewport_width_);
     const float rcp_height = 1.0f / static_cast<float>(viewport_height_);
-    const std::size_t constant_offset = static_cast<std::size_t>(slot_index) * constant_buffer_stride;
+    const std::size_t constant_offset = static_cast<std::size_t>(slot_index) * scene_constant_buffer_stride;
     auto* scene_constants = reinterpret_cast<SceneConstantsData*>(mapped_scene_constants_ + constant_offset);
     const float tan_y = snapshot.camera.tan_half_fov_y;
     const float tan_x = tan_y * aspect_ratio;
@@ -519,6 +524,7 @@ FrameExecutionMetrics Renderer::present_from_source(const PresentRequest& reques
         0,
         0,
         0,
+        0,
         false,
         false,
         has_scene_in_flight(),
@@ -548,19 +554,21 @@ FrameExecutionMetrics Renderer::present_from_source(const PresentRequest& reques
             }
         }
         if (buffer_warped_[buffer_index] && mapped_reprojection_stats_) {
-            metrics.completed_invalid_pixel_count = mapped_reprojection_stats_[buffer_index];
+            metrics.completed_invalid_pixel_count = mapped_reprojection_stats_[buffer_index * 2U + 0U];
+            metrics.completed_temporal_recovered_count = mapped_reprojection_stats_[buffer_index * 2U + 1U];
         }
     }
 
+    const bool synthesis_active = request.synthesis_mode != SynthesisMode::passthrough;
     const auto submit_begin_time = std::chrono::steady_clock::now();
     latency_monitor.emit_marker(
-        request.warp_enabled ? LatencyMarker::late_warp_submit_start : LatencyMarker::render_submit_start,
+        synthesis_active ? LatencyMarker::late_warp_submit_start : LatencyMarker::render_submit_start,
         request.display_frame_id);
 
     const float aspect_ratio = static_cast<float>(viewport_width_) / static_cast<float>(viewport_height_);
     const float rcp_width = 1.0f / static_cast<float>(viewport_width_);
     const float rcp_height = 1.0f / static_cast<float>(viewport_height_);
-    const std::size_t constant_offset = static_cast<std::size_t>(buffer_index) * constant_buffer_stride;
+    const std::size_t constant_offset = static_cast<std::size_t>(buffer_index) * present_constant_buffer_stride;
     const std::size_t hud_offset = static_cast<std::size_t>(buffer_index) * hud_constant_buffer_stride;
 
     auto* present_constants = reinterpret_cast<PresentConstantsData*>(mapped_present_constants_ + constant_offset);
@@ -568,6 +576,9 @@ FrameExecutionMetrics Renderer::present_from_source(const PresentRequest& reques
     const float source_tan_x = source_tan_y * aspect_ratio;
     const float target_tan_y = request.target_camera.tan_half_fov_y;
     const float target_tan_x = target_tan_y * aspect_ratio;
+    const CameraBasis& history_camera = request.has_previous_history ? request.previous_source_camera : request.source_snapshot.camera;
+    const float prev_tan_y = history_camera.tan_half_fov_y;
+    const float prev_tan_x = prev_tan_y * aspect_ratio;
     simd::store_float4(
         present_constants->viewport_and_flags,
         static_cast<float>(viewport_width_),
@@ -576,10 +587,16 @@ FrameExecutionMetrics Renderer::present_from_source(const PresentRequest& reques
         request.overlay_enabled ? 1.0f : 0.0f);
     simd::store_float4(
         present_constants->warp_flags_and_aspect,
-        request.warp_enabled ? 1.0f : 0.0f,
+        synthesis_active ? 1.0f : 0.0f,
         aspect_ratio,
         request.flash_indicator_enabled ? 1.0f : 0.0f,
         request.flash_triggered ? 1.0f : 0.0f);
+    simd::store_float4(
+        present_constants->synthesis_params,
+        static_cast<float>(static_cast<std::int32_t>(request.synthesis_mode)),
+        request.extrapolation_alpha,
+        request.has_previous_history ? 1.0f : 0.0f,
+        0.0f);
     write_float4(present_constants->source_camera_position_tan_y, request.source_snapshot.camera.position, source_tan_y);
     write_float4(present_constants->source_camera_right_unused, request.source_snapshot.camera.right, rcp_width);
     write_float4(present_constants->source_camera_up_unused, request.source_snapshot.camera.up, rcp_height);
@@ -588,6 +605,10 @@ FrameExecutionMetrics Renderer::present_from_source(const PresentRequest& reques
     write_float4(present_constants->target_camera_right_unused, request.target_camera.right, 1.0f / target_tan_x);
     write_float4(present_constants->target_camera_up_unused, request.target_camera.up, 1.0f / target_tan_y);
     write_float4(present_constants->target_camera_forward_unused, request.target_camera.forward, target_tan_x);
+    write_float4(present_constants->previous_camera_position_tan_y, history_camera.position, prev_tan_y);
+    write_float4(present_constants->previous_camera_right_rcp_tan_x, history_camera.right, 1.0f / prev_tan_x);
+    write_float4(present_constants->previous_camera_up_rcp_tan_y, history_camera.up, 1.0f / prev_tan_y);
+    write_float4(present_constants->previous_camera_forward_tan_x, history_camera.forward, prev_tan_x);
 
     if (request.overlay_enabled && request.hud) {
         auto* hud_destination = reinterpret_cast<HudConstantsData*>(mapped_hud_constants_ + hud_offset);
@@ -603,10 +624,10 @@ FrameExecutionMetrics Renderer::present_from_source(const PresentRequest& reques
     present_command_list_->RSSetScissorRects(1, &scissor);
     present_command_list_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
-    if (request.warp_enabled) {
+    if (synthesis_active) {
         const auto stats_to_copy_dest = transition_barrier(reprojection_stats_uav_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST);
         present_command_list_->ResourceBarrier(1, &stats_to_copy_dest);
-        present_command_list_->CopyBufferRegion(reprojection_stats_uav_.Get(), 0, reprojection_stats_zero_upload_.Get(), 0, sizeof(std::uint32_t));
+        present_command_list_->CopyBufferRegion(reprojection_stats_uav_.Get(), 0, reprojection_stats_zero_upload_.Get(), 0, 2U * sizeof(std::uint32_t));
         const auto stats_to_uav = transition_barrier(reprojection_stats_uav_.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         present_command_list_->ResourceBarrier(1, &stats_to_uav);
     }
@@ -633,6 +654,12 @@ FrameExecutionMetrics Renderer::present_from_source(const PresentRequest& reques
     present_command_list_->SetGraphicsRootDescriptorTable(1, source_srv_gpu);
     present_command_list_->SetGraphicsRootUnorderedAccessView(2, reprojection_stats_uav_->GetGPUVirtualAddress());
     present_command_list_->SetGraphicsRootConstantBufferView(3, hud_constant_buffer_->GetGPUVirtualAddress() + hud_offset);
+    const std::int32_t history_slot_index = (request.has_previous_history && request.previous_source_slot_index >= 0)
+        ? request.previous_source_slot_index
+        : request.source_slot_index;
+    auto prev_srv_gpu = shader_resource_heap_->GetGPUDescriptorHandleForHeapStart();
+    prev_srv_gpu.ptr += static_cast<UINT64>(history_slot_index) * targets_per_source_slot * shader_resource_descriptor_stride_;
+    present_command_list_->SetGraphicsRootDescriptorTable(4, prev_srv_gpu);
     present_command_list_->DrawInstanced(3, 1, 0, 0);
 
     const auto back_buffer_to_present = transition_barrier(render_targets_[buffer_index].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
@@ -649,15 +676,15 @@ FrameExecutionMetrics Renderer::present_from_source(const PresentRequest& reques
             static_cast<UINT64>(query_base) * sizeof(std::uint64_t));
     }
 
-    if (request.warp_enabled) {
+    if (synthesis_active) {
         const auto stats_to_copy_source = transition_barrier(reprojection_stats_uav_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
         present_command_list_->ResourceBarrier(1, &stats_to_copy_source);
         present_command_list_->CopyBufferRegion(
             reprojection_stats_readback_.Get(),
-            static_cast<UINT64>(buffer_index) * sizeof(std::uint32_t),
+            static_cast<UINT64>(buffer_index) * 2U * sizeof(std::uint32_t),
             reprojection_stats_uav_.Get(),
             0,
-            sizeof(std::uint32_t));
+            2U * sizeof(std::uint32_t));
         const auto stats_restore_uav = transition_barrier(reprojection_stats_uav_.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         present_command_list_->ResourceBarrier(1, &stats_restore_uav);
     }
@@ -668,7 +695,7 @@ FrameExecutionMetrics Renderer::present_from_source(const PresentRequest& reques
 
     const auto submit_end_time = std::chrono::steady_clock::now();
     latency_monitor.emit_marker(
-        request.warp_enabled ? LatencyMarker::late_warp_submit_end : LatencyMarker::render_submit_end,
+        synthesis_active ? LatencyMarker::late_warp_submit_end : LatencyMarker::render_submit_end,
         request.display_frame_id);
     metrics.render_submit_cpu_us = std::chrono::duration_cast<std::chrono::microseconds>(submit_end_time - submit_begin_time).count();
 
@@ -677,7 +704,7 @@ FrameExecutionMetrics Renderer::present_from_source(const PresentRequest& reques
     const auto present_begin_time = std::chrono::steady_clock::now();
     metrics.present_call_time = present_begin_time;
     latency_monitor.emit_marker(
-        request.warp_enabled ? LatencyMarker::late_warp_present_start : LatencyMarker::present_start,
+        synthesis_active ? LatencyMarker::late_warp_present_start : LatencyMarker::present_start,
         request.display_frame_id);
 
     const UINT sync_interval = request.vsync_enabled ? 1U : 0U;
@@ -686,7 +713,7 @@ FrameExecutionMetrics Renderer::present_from_source(const PresentRequest& reques
 
     const auto present_end_time = std::chrono::steady_clock::now();
     latency_monitor.emit_marker(
-        request.warp_enabled ? LatencyMarker::late_warp_present_end : LatencyMarker::present_end,
+        synthesis_active ? LatencyMarker::late_warp_present_end : LatencyMarker::present_end,
         request.display_frame_id);
     metrics.present_call_cpu_us = std::chrono::duration_cast<std::chrono::microseconds>(present_end_time - present_begin_time).count();
 
@@ -694,9 +721,12 @@ FrameExecutionMetrics Renderer::present_from_source(const PresentRequest& reques
     check(present_queue_->Signal(present_fence_.Get(), fence_value), "Signal present fence");
     buffer_fence_values_[buffer_index] = fence_value;
     buffer_has_data_[buffer_index] = true;
-    buffer_warped_[buffer_index] = request.warp_enabled;
+    buffer_warped_[buffer_index] = synthesis_active;
     buffer_total_pixels_[buffer_index] = viewport_width_ * viewport_height_;
     source_slots_[static_cast<std::size_t>(request.source_slot_index)].last_read_present_fence = fence_value;
+    if (history_slot_index >= 0 && history_slot_index != request.source_slot_index) {
+        source_slots_[static_cast<std::size_t>(history_slot_index)].last_read_present_fence = fence_value;
+    }
 
     return metrics;
 }
@@ -791,7 +821,13 @@ void Renderer::create_pipelines() {
     srv_range.BaseShaderRegister = 0;
     srv_range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
 
-    std::array<D3D12_ROOT_PARAMETER, 4> present_parameters{};
+    D3D12_DESCRIPTOR_RANGE prev_srv_range{};
+    prev_srv_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    prev_srv_range.NumDescriptors = targets_per_source_slot;
+    prev_srv_range.BaseShaderRegister = 3;
+    prev_srv_range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+    std::array<D3D12_ROOT_PARAMETER, 5> present_parameters{};
     present_parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
     present_parameters[0].Descriptor.ShaderRegister = 0;
     present_parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
@@ -805,6 +841,10 @@ void Renderer::create_pipelines() {
     present_parameters[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
     present_parameters[3].Descriptor.ShaderRegister = 1;
     present_parameters[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    present_parameters[4].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    present_parameters[4].DescriptorTable.NumDescriptorRanges = 1;
+    present_parameters[4].DescriptorTable.pDescriptorRanges = &prev_srv_range;
+    present_parameters[4].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
     std::array<D3D12_STATIC_SAMPLER_DESC, 2> samplers{};
     samplers[0].Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
@@ -851,8 +891,8 @@ void Renderer::create_pipelines() {
 }
 
 void Renderer::create_constant_buffers() {
-    const std::size_t scene_total_size = static_cast<std::size_t>(source_slot_count) * constant_buffer_stride;
-    const std::size_t present_total_size = static_cast<std::size_t>(swap_chain_buffer_count) * constant_buffer_stride;
+    const std::size_t scene_total_size = static_cast<std::size_t>(source_slot_count) * scene_constant_buffer_stride;
+    const std::size_t present_total_size = static_cast<std::size_t>(swap_chain_buffer_count) * present_constant_buffer_stride;
     const std::size_t total_hud_size = static_cast<std::size_t>(swap_chain_buffer_count) * hud_constant_buffer_stride;
     scene_constant_buffer_ = create_buffer(device_.Get(), D3D12_HEAP_TYPE_UPLOAD, scene_total_size, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ, "Create scene constant buffer");
     present_constant_buffer_ = create_buffer(device_.Get(), D3D12_HEAP_TYPE_UPLOAD, present_total_size, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ, "Create present constant buffer");
@@ -933,7 +973,7 @@ void Renderer::create_reprojection_stats_resources() {
     reprojection_stats_readback_ = create_buffer(
         device_.Get(),
         D3D12_HEAP_TYPE_READBACK,
-        static_cast<std::size_t>(swap_chain_buffer_count) * sizeof(std::uint32_t),
+        static_cast<std::size_t>(swap_chain_buffer_count) * 2U * sizeof(std::uint32_t),
         D3D12_RESOURCE_FLAG_NONE,
         D3D12_RESOURCE_STATE_COPY_DEST,
         "Create reprojection stats readback buffer");

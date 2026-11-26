@@ -1,5 +1,22 @@
 # Development log
 
+## v0.12.0 — Motion-vector frame generation, temporal history recovery, and combined generation + late warp
+
+- Added two new synthesis presentation modes in `src/runtime_state.h` (`runtime_state_version = 11`), `src/renderer.h`, `src/renderer.cpp`, `shaders/present.hlsl`, `src/main.cpp`, and `src/cli.cpp` (`schema_version: 7`):
+  - `frame_gen` (`FrameKind::generated`, hotkey `4`, CLI `set <pid> mode frame_gen`): 5-tap foreground-nearest motion dilation + 2-step iterative backward motion-vector extrapolation from `T_n` scaled by `extrapolation_alpha = clamp(source_age / source_period, 0.0, 1.75)`, followed by depth-gated temporal history recovery from `T_{n-1}` (`prev_color_texture` / `prev_depth_texture` bound via the 3-slot source ring).
+  - `combined` (`FrameKind::combined`, hotkey `5`, CLI `set <pid> mode combined`): 4-iteration depth-guided late camera warp toward the just-in-time target pose, layered with analytical static-camera motion subtraction to isolate and extrapolate independently moving objects (e.g., the orbiting sphere), plus depth-gated temporal color/depth history recovery from `T_{n-1}` for disocclusion holes.
+- Extended the `reprojection_stats` UAV (`register(u1)`) to record both unrecovered holes (`invalid_pixel_ratio`) and temporally recovered pixels (`temporal_recovered_ratio`), highlighted in magenta (unrecovered) and teal (recovered from `T_{n-1}`) in `view=holes`.
+- Verified zero-warning ARM64 Release and Debug builds (plus Debug smoke test) and live 120-frame Release comparisons on `NVIDIA RTX Spark N1X` (`1264x681`, `120 Hz` DWM deadline lock, `/4` divider, `stress=24`, `scene_gpu_us` ~5,633 µs, 30–35 async overlaps per 120 frames):
+  - `occlusion_sweep`:
+    - `reproject`: 0 missed deadlines, `cpu_present_interval_us` median **8,333 µs** (p95 8,502 µs), `present_gpu_us` median **151 µs**, `invalid_pixel_ratio` mean **0.808%**, `temporal_recovered_ratio` 0.000%.
+    - `frame_gen`: 0 missed deadlines, `cpu_present_interval_us` median **8,333 µs** (p95 8,486 µs), `present_gpu_us` median **85 µs**, `invalid_pixel_ratio` mean **0.055%**, `temporal_recovered_ratio` mean **0.016%**.
+    - `combined`: 0 missed deadlines, `cpu_present_interval_us` median **8,333 µs** (p95 **8,333 µs**), `present_gpu_us` median **232 µs**, `invalid_pixel_ratio` mean **0.675%**, `temporal_recovered_ratio` mean **0.023%** (max 0.066%).
+  - `fast_pan`:
+    - `reproject`: 1 missed deadline, `present_gpu_us` median **149 µs**, `invalid_pixel_ratio` mean **2.062%**.
+    - `frame_gen`: 0 missed deadlines, `present_gpu_us` median **89 µs**, `invalid_pixel_ratio` mean **2.258%**, `temporal_recovered_ratio` mean **0.120%** (max 0.252%).
+    - `combined`: 0 missed deadlines, `present_gpu_us` median **228 µs**, `invalid_pixel_ratio` mean **2.670%**, `temporal_recovered_ratio` mean **0.019%**.
+- Honest limitations: `frame_gen` extrapolation relies on constant-velocity motion vectors and has weaker consistency checks than full 3D depth round-trip reprojection; during rapid `fast_pan`, newly exposed viewport edges are absent from both `T_n` and `T_{n-1}` (motivating future oversized render guard bands). NVIDIA DLSS-G via Streamline remains a separate future integration.
+
 ## v0.11.0 — Dual-queue asynchronous GPU execution and 3-slot source history ring
 
 - Refactored `src/renderer.h` and `src/renderer.cpp` from a single serialized direct command queue into two independent D3D12 command queues: a `D3D12_COMMAND_QUEUE_PRIORITY_NORMAL` `scene_queue_` for heavy G-buffer rendering and a `D3D12_COMMAND_QUEUE_PRIORITY_HIGH` `present_queue_` (with automatic NORMAL fallback) for late reprojection, HUD compositing, and `Present()`, each with its own fence, event handle, command list, and GPU timestamp query heap.

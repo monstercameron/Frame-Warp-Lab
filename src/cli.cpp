@@ -223,6 +223,8 @@ int print_status(const WindowInstance& instance) {
     const std::int64_t rendered_frames = std::atomic_ref<std::int64_t>(state->rendered_frame_count).load(std::memory_order_acquire);
     const std::int64_t repeated_frames = std::atomic_ref<std::int64_t>(state->repeated_frame_count).load(std::memory_order_acquire);
     const std::int64_t warped_frames = std::atomic_ref<std::int64_t>(state->warped_frame_count).load(std::memory_order_acquire);
+    const std::int64_t generated_frames = std::atomic_ref<std::int64_t>(state->generated_frame_count).load(std::memory_order_acquire);
+    const std::int64_t combined_frames = std::atomic_ref<std::int64_t>(state->combined_frame_count).load(std::memory_order_acquire);
     const std::int64_t fallback_frames = std::atomic_ref<std::int64_t>(state->fallback_frame_count).load(std::memory_order_acquire);
     const std::int64_t async_overlaps = std::atomic_ref<std::int64_t>(state->async_overlap_count).load(std::memory_order_acquire);
     const std::int64_t missed_deadlines = std::atomic_ref<std::int64_t>(state->missed_deadline_count).load(std::memory_order_acquire);
@@ -239,6 +241,7 @@ int print_status(const WindowInstance& instance) {
     const std::int64_t pcl_markers_emitted = std::atomic_ref<std::int64_t>(state->pcl_markers_emitted).load(std::memory_order_acquire);
     const std::int64_t pcl_pings_received = std::atomic_ref<std::int64_t>(state->pcl_pings_received).load(std::memory_order_acquire);
     const std::uint32_t invalid_pixels = std::atomic_ref<std::uint32_t>(state->last_invalid_pixel_count).load(std::memory_order_acquire);
+    const std::uint32_t temporal_recovered_pixels = std::atomic_ref<std::uint32_t>(state->last_temporal_recovered_count).load(std::memory_order_acquire);
     const std::uint32_t total_pixels = std::atomic_ref<std::uint32_t>(state->last_total_pixel_count).load(std::memory_order_acquire);
     const std::int32_t presentation_mode = std::atomic_ref<std::int32_t>(state->presentation_mode).load(std::memory_order_acquire);
     const std::int32_t pacer_mode = std::atomic_ref<std::int32_t>(state->pacer_mode).load(std::memory_order_acquire);
@@ -264,7 +267,7 @@ int print_status(const WindowInstance& instance) {
 
     RECT client_rectangle{};
     const bool has_client_size = GetClientRect(instance.window, &client_rectangle) != 0;
-    std::cout << "{\"ok\":true,\"schema_version\":6,\"process_id\":" << instance.process_id
+    std::cout << "{\"ok\":true,\"schema_version\":7,\"process_id\":" << instance.process_id
               << ",\"running\":" << (running ? "true" : "false")
               << ",\"present_calls_completed\":" << present_count
               << ",\"display_frame_id\":" << display_frame_id
@@ -272,6 +275,8 @@ int print_status(const WindowInstance& instance) {
               << ",\"frame_counts\":{\"rendered\":" << rendered_frames
               << ",\"repeated\":" << repeated_frames
               << ",\"warped\":" << warped_frames
+              << ",\"generated\":" << generated_frames
+              << ",\"combined\":" << combined_frames
               << ",\"fallback\":" << fallback_frames << "}"
               << ",\"resize_count\":" << resize_count << ",\"client_size_px\":";
     if (has_client_size) std::cout << "{\"width\":" << client_rectangle.right - client_rectangle.left << ",\"height\":" << client_rectangle.bottom - client_rectangle.top << "}";
@@ -304,6 +309,9 @@ int print_status(const WindowInstance& instance) {
     std::cout << ",\"invalid_pixel_count\":" << invalid_pixels
               << ",\"invalid_pixel_ratio\":";
     print_ratio(invalid_pixels, total_pixels);
+    std::cout << ",\"temporal_recovered_count\":" << temporal_recovered_pixels
+              << ",\"temporal_recovered_ratio\":";
+    print_ratio(temporal_recovered_pixels, total_pixels);
     std::cout << ",\"note\":\"cpu_present_interval_us and smoothed_present_fps reflect Present return cadence, not physical display scanout\"}"
               << ",\"latency\":{\"raw_input_enabled\":" << (raw_input_enabled ? "true" : "false")
               << ",\"flash_indicator_enabled\":" << (flash_indicator_enabled ? "true" : "false")
@@ -326,7 +334,7 @@ int print_status(const WindowInstance& instance) {
               << "},\"diagnostic_view\":\"" << frame_warp_lab::diagnostic_view_name(diagnostic_view)
               << "\",\"stress_level\":" << stress_level
               << ",\"overlay_enabled\":" << (overlay_enabled ? "true" : "false") << "}"
-              << ",\"features\":{\"scene\":\"cpu_camera_gbuffer\",\"hud\":\"2d_frametime_graph_and_readout\",\"async_gpu\":\"dual_queue_3slot_ring\",\"reprojection\":\"depth_camera_warp\",\"nvidia_pcl_markers\":\"etw_tracelogging_active\",\"frame_generation\":\"not_implemented\",\"vrs\":\"not_implemented\"}}\n";
+              << ",\"features\":{\"scene\":\"cpu_camera_gbuffer\",\"hud\":\"2d_frametime_graph_and_readout\",\"async_gpu\":\"dual_queue_3slot_ring\",\"reprojection\":\"depth_camera_warp\",\"nvidia_pcl_markers\":\"etw_tracelogging_active\",\"frame_generation\":\"mv_extrapolation_and_temporal_history\",\"vrs\":\"not_implemented\"}}\n";
     return 0;
 }
 
@@ -388,9 +396,12 @@ int print_trace(const WindowInstance& instance, std::size_t max_samples, bool in
     std::vector<std::int64_t> scene_gpu_times;
     std::vector<std::int64_t> present_gpu_times;
     std::vector<double> invalid_ratios;
+    std::vector<double> temporal_recovered_ratios;
     std::int64_t rendered_count = 0;
     std::int64_t repeated_count = 0;
     std::int64_t warped_count = 0;
+    std::int64_t generated_count = 0;
+    std::int64_t combined_count = 0;
     std::int64_t fallback_count = 0;
     std::int64_t async_overlap_count = 0;
     std::int64_t missed_deadline_count = 0;
@@ -414,18 +425,21 @@ int print_trace(const WindowInstance& instance, std::size_t max_samples, bool in
         if (copy.present_gpu_us >= 0) present_gpu_times.push_back(copy.present_gpu_us);
         if (copy.gpu_slot_warped && copy.total_pixel_count > 0) {
             invalid_ratios.push_back(static_cast<double>(copy.invalid_pixel_count) / static_cast<double>(copy.total_pixel_count));
+            temporal_recovered_ratios.push_back(static_cast<double>(copy.temporal_recovered_count) / static_cast<double>(copy.total_pixel_count));
         }
         switch (static_cast<frame_warp_lab::FrameKind>(copy.frame_kind)) {
             case frame_warp_lab::FrameKind::rendered: ++rendered_count; break;
             case frame_warp_lab::FrameKind::repeated: ++repeated_count; break;
             case frame_warp_lab::FrameKind::warped: ++warped_count; break;
             case frame_warp_lab::FrameKind::fallback: ++fallback_count; break;
+            case frame_warp_lab::FrameKind::generated: ++generated_count; break;
+            case frame_warp_lab::FrameKind::combined: ++combined_count; break;
         }
         if (copy.async_overlapped) ++async_overlap_count;
         if (copy.missed_deadline) ++missed_deadline_count;
     }
 
-    std::cout << "{\"ok\":true,\"schema_version\":6,\"process_id\":" << instance.process_id
+    std::cout << "{\"ok\":true,\"schema_version\":7,\"process_id\":" << instance.process_id
               << ",\"capacity\":" << frame_warp_lab::runtime_frame_trace_capacity
               << ",\"total_frames_recorded\":" << total_samples
               << ",\"sample_count\":" << captured.size()
@@ -434,6 +448,8 @@ int print_trace(const WindowInstance& instance, std::size_t max_samples, bool in
               << ",\"summary\":{\"frame_kinds\":{\"rendered\":" << rendered_count
               << ",\"repeated\":" << repeated_count
               << ",\"warped\":" << warped_count
+              << ",\"generated\":" << generated_count
+              << ",\"combined\":" << combined_count
               << ",\"fallback\":" << fallback_count
               << "},\"async_overlaps\":" << async_overlap_count
               << ",\"missed_deadlines\":" << missed_deadline_count
@@ -455,6 +471,8 @@ int print_trace(const WindowInstance& instance, std::size_t max_samples, bool in
     print_metric_summary(present_gpu_times);
     std::cout << ",\"invalid_pixel_ratio\":";
     print_double_summary(invalid_ratios);
+    std::cout << ",\"temporal_recovered_ratio\":";
+    print_double_summary(temporal_recovered_ratios);
     std::cout << "}";
 
     if (include_samples) {
@@ -484,6 +502,9 @@ int print_trace(const WindowInstance& instance, std::size_t max_samples, bool in
             std::cout << ",\"invalid_pixel_count\":" << sample.invalid_pixel_count
                       << ",\"invalid_pixel_ratio\":";
             print_ratio(sample.invalid_pixel_count, sample.total_pixel_count);
+            std::cout << ",\"temporal_recovered_count\":" << sample.temporal_recovered_count
+                      << ",\"temporal_recovered_ratio\":";
+            print_ratio(sample.temporal_recovered_count, sample.total_pixel_count);
             std::cout << ",\"diagnostic_view\":\"" << frame_warp_lab::diagnostic_view_name(sample.diagnostic_view)
                       << "\",\"camera_path\":\"" << frame_warp_lab::camera_path_name(sample.camera_path)
                       << "\",\"stress_level\":" << sample.stress_level
@@ -503,7 +524,9 @@ int apply_setting(const WindowInstance& instance, const std::wstring& key, const
         if (value == L"full_render") parameter = static_cast<LPARAM>(frame_warp_lab::PresentationMode::full_render);
         else if (value == L"repeat") parameter = static_cast<LPARAM>(frame_warp_lab::PresentationMode::repeat);
         else if (value == L"reproject") parameter = static_cast<LPARAM>(frame_warp_lab::PresentationMode::reproject);
-        else return fail("invalid_value", "Expected mode in {full_render, repeat, reproject}");
+        else if (value == L"frame_gen") parameter = static_cast<LPARAM>(frame_warp_lab::PresentationMode::frame_gen);
+        else if (value == L"combined") parameter = static_cast<LPARAM>(frame_warp_lab::PresentationMode::combined);
+        else return fail("invalid_value", "Expected mode in {full_render, repeat, reproject, frame_gen, combined}");
     } else if (key == L"divider") {
         unsigned long parsed = 0;
         if (!parse_unsigned_long(value.c_str(), parsed) || parsed < 1 || parsed > static_cast<unsigned long>(frame_warp_lab::max_source_divider)) {
@@ -670,14 +693,14 @@ int print_capabilities() {
 
 int wmain(int argument_count, wchar_t** arguments) {
     if (argument_count == 2 && std::wstring(arguments[1]) == L"help") {
-        std::cout << "{\"ok\":true,\"schema_version\":6,\"commands\":[\"help\",\"start\",\"instances\",\"status <pid>\",\"events <pid>\",\"trace <pid> [limit] [summary]\",\"set <pid> <key> <value>\",\"pause <pid>\",\"resume <pid>\",\"reset <pid>\",\"stop <pid>\",\"capabilities\"],\"settings\":{\"mode\":[\"full_render\",\"repeat\",\"reproject\"],\"pacer\":[\"deadline\",\"vsync_only\",\"unlocked\"],\"target_fps\":\"0 or 30..500\",\"async_gpu\":[\"on\",\"off\"],\"divider\":\"1..8\",\"vsync\":[\"on\",\"off\"],\"view\":[\"final\",\"depth\",\"motion\",\"holes\"],\"path\":[\"corridor_sway\",\"fast_pan\",\"occlusion_sweep\",\"camera_cut\",\"manual\"],\"stress\":\"0..64\",\"overlay\":[\"on\",\"off\"],\"flash\":[\"on\",\"off\"]}}\n";
+        std::cout << "{\"ok\":true,\"schema_version\":7,\"commands\":[\"help\",\"start\",\"instances\",\"status <pid>\",\"events <pid>\",\"trace <pid> [limit] [summary]\",\"set <pid> <key> <value>\",\"pause <pid>\",\"resume <pid>\",\"reset <pid>\",\"stop <pid>\",\"capabilities\"],\"settings\":{\"mode\":[\"full_render\",\"repeat\",\"reproject\",\"frame_gen\",\"combined\"],\"pacer\":[\"deadline\",\"vsync_only\",\"unlocked\"],\"target_fps\":\"0 or 30..500\",\"async_gpu\":[\"on\",\"off\"],\"divider\":\"1..8\",\"vsync\":[\"on\",\"off\"],\"view\":[\"final\",\"depth\",\"motion\",\"holes\"],\"path\":[\"corridor_sway\",\"fast_pan\",\"occlusion_sweep\",\"camera_cut\",\"manual\"],\"stress\":\"0..64\",\"overlay\":[\"on\",\"off\"],\"flash\":[\"on\",\"off\"]}}\n";
         return 0;
     }
     if (argument_count == 2 && std::wstring(arguments[1]) == L"capabilities") return print_capabilities();
     if (argument_count == 2 && std::wstring(arguments[1]) == L"start") return start_instance();
     const auto instances = find_instances();
     if (argument_count == 2 && std::wstring(arguments[1]) == L"instances") {
-        std::cout << "{\"ok\":true,\"schema_version\":6,\"instances\":[";
+        std::cout << "{\"ok\":true,\"schema_version\":7,\"instances\":[";
         for (std::size_t index = 0; index < instances.size(); ++index) {
             if (index) std::cout << ',';
             std::cout << "{\"process_id\":" << instances[index].process_id << "}";

@@ -40,6 +40,13 @@ struct CompletedSourceInfo {
     std::int64_t scene_gpu_us;
 };
 
+enum class SynthesisMode : std::int32_t {
+    passthrough = 0,
+    reproject = 1,
+    frame_gen = 2,
+    combined = 3,
+};
+
 struct FrameExecutionMetrics {
     std::chrono::steady_clock::time_point present_call_time;
     std::int64_t completed_scene_gpu_us;
@@ -47,6 +54,7 @@ struct FrameExecutionMetrics {
     std::int64_t render_submit_cpu_us;
     std::int64_t present_call_cpu_us;
     std::uint32_t completed_invalid_pixel_count;
+    std::uint32_t completed_temporal_recovered_count;
     std::uint32_t completed_total_pixel_count;
     bool completed_slot_valid;
     bool completed_slot_warped;
@@ -58,14 +66,18 @@ struct FrameExecutionMetrics {
 struct PresentRequest {
     std::uint64_t display_frame_id;
     std::int32_t source_slot_index;
+    std::int32_t previous_source_slot_index;
     SceneSnapshot source_snapshot;
+    CameraBasis previous_source_camera;
     CameraBasis target_camera;
     const HudOverlayState* hud;
     DiagnosticView diagnostic_view;
+    SynthesisMode synthesis_mode;
+    float extrapolation_alpha;
+    bool has_previous_history;
     bool overlay_enabled;
     bool flash_indicator_enabled;
     bool flash_triggered;
-    bool warp_enabled;
     bool vsync_enabled;
 };
 
@@ -105,7 +117,8 @@ private:
     static constexpr UINT source_slot_count = 3;
     static constexpr UINT targets_per_source_slot = 3;
     static constexpr UINT timestamps_per_pass = 2;
-    static constexpr std::size_t constant_buffer_stride = 256;
+    static constexpr std::size_t scene_constant_buffer_stride = 256;
+    static constexpr std::size_t present_constant_buffer_stride = 512;
     static constexpr std::size_t hud_constant_buffer_stride = 2560;
 
     class OsHandle {
