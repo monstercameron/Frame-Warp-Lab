@@ -13,6 +13,8 @@ Imagine a long indoor test hall with a clear sightline and several stations alon
 5. **Interactive target:** a clearly visible reticle and a target that responds to an input make responsiveness observable. Show timestamps and event IDs in logs. A counter alone is not a physical input-to-photon measurement.
 6. **Stress station:** adjustable, measured GPU workload increases rendering cost without changing the camera path. Include controllable spikes as well as steady load to reveal whether warp and presentation can still meet deadlines when the GPU is busy. Calibrate the load per machine instead of assuming a fixed workload means a fixed frame rate.
 
+The fine-detail station also serves as a VRS quality test: include fine text, thin high-contrast edges and moving patterns across shading-rate boundaries. Offer a shading-rate visualization and deterministic masks so changes in GPU time and visible quality can be attributed to a known pattern.
+
 ## Comparison modes
 
 - **Full-rate reference:** render the same scene and deterministic path at the highest sustainable rate. For offline visual comparisons, capture reference images at the exact timestamps being evaluated; live high-rate output is not automatically ground truth if its timestamps differ.
@@ -26,6 +28,8 @@ All test modes target the verified upper refresh bound of the selected monitor a
 ## Controls and scenarios
 
 Provide source-rate caps, camera speed, workload intensity, workload spikes, and a toggle between manual and scripted camera motion. Run slow pans, fast pans, lateral movement behind pillars, a stop-and-reverse, moving-object crossings, and camera cuts. A cut should invalidate old history and use a safe fallback. Test with and without VSync or VRR where available, recording the actual display configuration rather than assuming a requested mode is active.
+
+When supported, compare VRS disabled and enabled within the combined generation-and-warp mode, using the same source workload and verified upper-bound refresh target. Log the device's VRS tier, selected rates and mask, plus shading and full-frame GPU timing. Report unsupported rates and preserve a full-rate fallback. Do not count VRS support as proven until the D3D12 capability query and actual rendering have been tested.
 
 Render the HUD separately where practical, at presentation cadence; report the HUD's update cadence separately from the 3D scene. Include frame IDs and source age, but provide a clean-view toggle so overlays do not obscure visual defects.
 
