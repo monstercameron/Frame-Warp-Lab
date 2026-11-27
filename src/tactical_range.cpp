@@ -327,6 +327,12 @@ struct TacticalRangeSimulation::Impl {
     CameraBasis active_camera{};
     Float3 prev_camera_pos{0.0f, 1.55f, 1.4f};
     bool has_prev_camera_pos = false;
+    bool has_prev_pistol_local = false;
+    Mat4x4 prev_gun_local{};
+    Mat4x4 prev_slide_local{};
+    Mat4x4 prev_hammer_local{};
+    Mat4x4 prev_trigger_local{};
+    Mat4x4 prev_mag_local{};
     Float3 muzzle_world_pos{0.0f, 1.4f, 2.0f};
     float tracer_timer = 0.0f;
     Float3 tracer_start{};
@@ -740,6 +746,7 @@ struct TacticalRangeSimulation::Impl {
         impact_timer = 0.0f;
         hit_marker_timer = 0.0f;
         phys_accum = 0.0;
+        has_prev_pistol_local = false;
         for (auto& tr : ecs.transforms().components()) {
             tr.has_prev = false;
         }
@@ -869,8 +876,9 @@ struct TacticalRangeSimulation::Impl {
         const Mat4x4 cam_world = camera_basis_to_world_mat4(camera);
         const Mat4x4 prev_cam_world = camera_basis_to_world_mat4(previous_camera);
         const Mat4x4 gun_local = compute_pistol_root_local(*w);
+        const Mat4x4 p_gun_l = has_prev_pistol_local ? prev_gun_local : gun_local;
         const Mat4x4 gun_world = mul_mat4(cam_world, gun_local);
-        const Mat4x4 prev_gun_world = mul_mat4(prev_cam_world, gun_local);
+        const Mat4x4 prev_gun_world = mul_mat4(prev_cam_world, p_gun_l);
 
         const float slide_z_back = -w->slide_blowback * 0.042f;
         const Mat4x4 slide_local = make_translation_mat4(
@@ -878,19 +886,19 @@ struct TacticalRangeSimulation::Impl {
             pistol_slide_offset.y,
             pistol_slide_offset.z + slide_z_back);
         const Mat4x4 slide_world = mul_mat4(gun_world, slide_local);
-        const Mat4x4 prev_slide_world = mul_mat4(prev_gun_world, slide_local);
+        const Mat4x4 prev_slide_world = mul_mat4(prev_gun_world, has_prev_pistol_local ? prev_slide_local : slide_local);
 
         const Mat4x4 hammer_local = mul_mat4(
             make_translation_mat4(pistol_hammer_offset.x, pistol_hammer_offset.y, pistol_hammer_offset.z),
             make_rot_x(-w->hammer_cock * 0.82f));
         const Mat4x4 hammer_world = mul_mat4(gun_world, hammer_local);
-        const Mat4x4 prev_hammer_world = mul_mat4(prev_gun_world, hammer_local);
+        const Mat4x4 prev_hammer_world = mul_mat4(prev_gun_world, has_prev_pistol_local ? prev_hammer_local : hammer_local);
 
         const Mat4x4 trigger_local = mul_mat4(
             make_translation_mat4(pistol_trigger_offset.x, pistol_trigger_offset.y, pistol_trigger_offset.z),
             make_rot_x(w->trigger_pull * 0.34f));
         const Mat4x4 trigger_world = mul_mat4(gun_world, trigger_local);
-        const Mat4x4 prev_trigger_world = mul_mat4(prev_gun_world, trigger_local);
+        const Mat4x4 prev_trigger_world = mul_mat4(prev_gun_world, has_prev_pistol_local ? prev_trigger_local : trigger_local);
 
         float mag_drop = 0.0f;
         if (w->reloading) {
@@ -905,7 +913,14 @@ struct TacticalRangeSimulation::Impl {
             pistol_magazine_offset.y - mag_drop,
             pistol_magazine_offset.z - mag_drop * 0.32f);
         const Mat4x4 mag_world = mul_mat4(gun_world, mag_local);
-        const Mat4x4 prev_mag_world = mul_mat4(prev_gun_world, mag_local);
+        const Mat4x4 prev_mag_world = mul_mat4(prev_gun_world, has_prev_pistol_local ? prev_mag_local : mag_local);
+
+        prev_gun_local = gun_local;
+        prev_slide_local = slide_local;
+        prev_hammer_local = hammer_local;
+        prev_trigger_local = trigger_local;
+        prev_mag_local = mag_local;
+        has_prev_pistol_local = true;
 
         update_entity_xform(pistol_frame_entity, gun_world, true, prev_gun_world);
         update_entity_xform(pistol_slide_entity, slide_world, true, prev_slide_world);

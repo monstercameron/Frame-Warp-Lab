@@ -2499,8 +2499,8 @@ void Renderer::create_pipelines() {
     range_trans_pso.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_SRC_ALPHA;
     range_trans_pso.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
     range_trans_pso.BlendState.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
-    range_trans_pso.BlendState.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ONE;
-    range_trans_pso.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_ZERO;
+    range_trans_pso.BlendState.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ZERO;
+    range_trans_pso.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_ONE;
     range_trans_pso.BlendState.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
     range_trans_pso.DepthStencilState.DepthEnable = FALSE;
     range_trans_pso.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;

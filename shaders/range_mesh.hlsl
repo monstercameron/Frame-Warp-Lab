@@ -149,7 +149,7 @@ SceneOutput range_ps_main(RangeVertexOut input) {
     }
 
     SceneOutput out_px;
-    out_px.color = float4(shaded, 0.0);
+    out_px.color = float4(shaded, draw_meta.y != 0u ? -1.0 : 0.0);
     out_px.depth = view_z;
     out_px.motion = motion_vector;
     return out_px;

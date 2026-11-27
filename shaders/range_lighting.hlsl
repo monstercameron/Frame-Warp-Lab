@@ -569,13 +569,6 @@ float3 eval_range_diffuse_irradiance(
         irr += eval_range_multibounce_gi(world_pos, n, scene_time, shader_flags) * ao;
     }
 
-    if (muzzle_light_pos_intensity.w > 0.01) {
-        float3 to_m = muzzle_light_pos_intensity.xyz - world_pos;
-        float md2 = max(dot(to_m, to_m), 0.08);
-        float nol_m = saturate(dot(n, to_m * rsqrt(md2)));
-        irr += float3(20.0, 12.0, 4.2) * (k_pbr_inv_pi * nol_m * muzzle_light_pos_intensity.w / (1.0 + 1.3 * md2));
-    }
-
     return irr;
 }
 
@@ -851,12 +844,20 @@ float3 eval_range_composite_final(
     float3 f0,
     float2 dfg,
     float3 energy_comp,
+    float4 muzzle_light_pos_intensity,
     SamplerState clamp_sampler) {
     float cc_roughness = 0.12;
     float3 diffuse_color = albedo * (1.0 - metallic);
+    float3 total_diff_irr = cached_diffuse_irr;
+    if (muzzle_light_pos_intensity.w > 0.01) {
+        float3 to_m = muzzle_light_pos_intensity.xyz - world_pos;
+        float md2 = max(dot(to_m, to_m), 0.08);
+        float nol_m = saturate(dot(n, to_m * rsqrt(md2)));
+        total_diff_irr += float3(20.0, 12.0, 4.2) * (k_pbr_inv_pi * nol_m * muzzle_light_pos_intensity.w / (1.0 + 1.3 * md2));
+    }
     float3 env_spec = pbr_env_cubemap.SampleLevel(clamp_sampler, refl, perceptual_roughness * 4.0).rgb;
     float spec_ao = pbr_specular_ao(nov, ao, perceptual_roughness);
-    float3 color = diffuse_color * cached_diffuse_irr + env_spec * (f0 * dfg.x + dfg.y) * energy_comp * spec_ao * 0.42;
+    float3 color = diffuse_color * total_diff_irr + env_spec * (f0 * dfg.x + dfg.y) * energy_comp * spec_ao * 0.42;
 
     if (clearcoat > 0.005) {
         float2 dfg_cc = pbr_dfg_lut.SampleLevel(clamp_sampler, float2(nov, cc_roughness), 0.0);

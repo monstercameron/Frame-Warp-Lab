@@ -81,6 +81,7 @@ groupshared uint g_disoccluded_count;
 groupshared uint g_moving_count;
 groupshared uint g_non_sky_count;
 groupshared uint g_max_age_in_tile;
+groupshared uint g_vm_dirty_count;
 groupshared uint g_tile_min_x;
 groupshared uint g_tile_min_y;
 groupshared uint g_tile_min_z;
@@ -88,6 +89,14 @@ groupshared uint g_tile_max_x;
 groupshared uint g_tile_max_y;
 groupshared uint g_tile_max_z;
 groupshared uint g_tile_light_mask;
+
+float encode_cache_age(float age, bool is_vm) {
+    return is_vm ? -(age + 1.0) : age;
+}
+
+float decode_cache_age(float raw_a) {
+    return (raw_a < -0.5) ? (-raw_a - 1.0) : raw_a;
+}
 
 uint float_to_sortable_uint(float f) {
     uint u = asuint(f);
@@ -364,7 +373,7 @@ void shade_vis_pixel(uint2 pixel_coord, uint width, uint height) {
     float em_w = v0.emissive_weight * b.x + v1.emissive_weight * b.y + v2.emissive_weight * b.z;
 
     uint sc_mask = max(cache_params.y, 262143u);
-    uint muzzle_bit = (muzzle_light_pos_intensity.w > 0.01) ? 1u : 0u;
+    uint muzzle_bit = (!use_split_diff_spec && muzzle_light_pos_intensity.w > 0.01) ? 1u : 0u;
     uint shadow_sig_cur = ((shader_flags & (8u | 32u)) != 0u && !is_viewmodel)
         ? eval_range_shadow_signature(world_pos, scene_time, shader_flags)
         : 0u;
@@ -384,7 +393,7 @@ void shade_vis_pixel(uint2 pixel_coord, uint width, uint height) {
         float3 diff_irr = eval_range_diffuse_irradiance(
             world_pos, mat_n, mat_ao, is_viewmodel, scene_time, shader_flags,
             muzzle_light_pos_intensity, linear_clamp_sampler);
-        out_color_uav[pixel_coord] = float4(diff_irr, 0.0);
+        out_color_uav[pixel_coord] = float4(diff_irr, encode_cache_age(0.0, is_viewmodel));
         if (use_surface_cache) {
             uint slot0 = 0u;
             uint sc_key = compute_surface_cache_key(inst.entity_meta.x, local_pos, local_n, view_dist, is_viewmodel, light_rev, sc_mask, slot0);
@@ -426,7 +435,7 @@ void shade_vis_pixel(uint2 pixel_coord, uint width, uint height) {
         pbr_hero_orm,
         linear_clamp_sampler);
 
-    out_color_uav[pixel_coord] = float4(shaded, 0.0);
+    out_color_uav[pixel_coord] = float4(shaded, encode_cache_age(0.0, is_viewmodel));
     if (use_surface_cache) {
         uint slot0 = 0u;
         uint sc_key = compute_surface_cache_key(inst.entity_meta.x, local_pos, local_n, view_dist, is_viewmodel, light_rev, sc_mask, slot0);
@@ -458,6 +467,7 @@ void range_vis_classify_main(
     bool use_subtile_interleave = use_priority_stbn && ((policy_params.x & 2u) != 0u);
     bool use_reactive_invalidation = (policy_params.x & 4u) != 0u;
     bool use_shadow_delta_invalidation = (policy_params.x & 8u) != 0u;
+    bool use_split_diff_spec = (policy_params.x & 32u) != 0u;
     bool use_surface_cache = (policy_params.x & 64u) != 0u;
     uint shader_flags = (uint)(range_flags.w + 0.5);
     float curr_scene_time = previous_camera_forward_time.w;
@@ -471,6 +481,7 @@ void range_vis_classify_main(
         g_moving_count = 0u;
         g_non_sky_count = 0u;
         g_max_age_in_tile = 0u;
+        g_vm_dirty_count = 0u;
     }
     GroupMemoryBarrierWithGroupSync();
 
@@ -490,10 +501,12 @@ void range_vis_classify_main(
             float2 curr_uv = (float2(pixel_coord) + 0.5) * float2(camera_up_rcp_width.w, camera_forward_rcp_height.w);
             float2 prev_uv = curr_uv + motion;
 
-            bool is_moving = is_vm || (muzzle_light_pos_intensity.w > 0.02);
+            bool near_muzzle_unified = (!use_split_diff_spec) && (muzzle_light_pos_intensity.w > 0.02) && is_vm;
+            bool vm_dynamic = is_vm && (dot(motion, motion) > 1.6e-7 || muzzle_light_pos_intensity.w > 0.02);
+            bool is_moving = vm_dynamic || near_muzzle_unified;
             bool is_reactive_miss = false;
             bool is_shadow_delta_miss = false;
-            if (inst_enc > 1u) {
+            if (inst_enc > 1u && !is_vm) {
                 InstanceData inst = range_instances[inst_enc - 1u];
                 float3 d_tr = float3(
                     inst.model[0][3] - inst.prev_model[0][3],
@@ -532,6 +545,9 @@ void range_vis_classify_main(
             if (is_moving) {
                 InterlockedAdd(g_moving_count, 1u);
             }
+            if (vm_dynamic) {
+                InterlockedAdd(g_vm_dirty_count, 1u);
+            }
 
             bool cache_valid = false;
             bool sc_warm_start = false;
@@ -540,7 +556,7 @@ void range_vis_classify_main(
             float4 reprojected_mg0 = float4(0.0, 0.0, 0.0, 0.5);
             float4 reprojected_mg1 = float4(0.5, 0.5, 0.5, 0.0);
 
-            if (has_prev && !is_reactive_miss && !is_shadow_delta_miss && prev_uv.x > 0.001 && prev_uv.x < 0.999 && prev_uv.y > 0.001 && prev_uv.y < 0.999) {
+            if (has_prev && !is_reactive_miss && !is_shadow_delta_miss && !near_muzzle_unified && prev_uv.x > 0.001 && prev_uv.x < 0.999 && prev_uv.y > 0.001 && prev_uv.y < 0.999) {
                 float2 prev_active_size = float2(max(prev_and_alloc_dims.x, 1u), max(prev_and_alloc_dims.y, 1u));
                 float2 inv_alloc_size = float2(rcp(float(max(prev_and_alloc_dims.z, 1u))), rcp(float(max(prev_and_alloc_dims.w, 1u))));
                 float2 uv_min = 0.5 * inv_alloc_size;
@@ -552,16 +568,18 @@ void range_vis_classify_main(
                 float prev_d = prev_depth_texture.Load(int3(prev_px, 0));
                 float rel_depth_err = abs(prev_d - depth) / max(depth, 0.25);
                 bool cutout_strict = ((shader_flags & 512u) != 0u) && !is_vm;
+                bool prev_is_vm = ((prev_vis >> 24u) & 1u) != 0u;
                 bool vis_match = cutout_strict
                     ? (prev_vis == vis_word)
-                    : (prev_vis != 0u && (prev_vis >> 25u) == inst_enc);
+                    : (prev_vis != 0u && (prev_vis >> 25u) == inst_enc && (prev_is_vm == is_vm));
 
-                if (vis_match && rel_depth_err < (cutout_strict ? 0.035 : 0.065)) {
+                if (vis_match && rel_depth_err < ((cutout_strict || is_vm) ? 0.035 : 0.065)) {
                     float4 prev_col_age = prev_color_texture.Load(int3(prev_px, 0));
-                    if (prev_col_age.a < 253.5) {
-                        uint prev_age = (uint)clamp(prev_col_age.a, 0.0, 249.0);
+                    float decoded_prev_age = decode_cache_age(prev_col_age.a);
+                    if (decoded_prev_age < 253.5) {
+                        uint prev_age = (uint)clamp(decoded_prev_age, 0.0, 249.0);
                         next_age = min(prev_age + 1u, 250u);
-                        if (use_catmull_rom) {
+                        if (use_catmull_rom && !is_vm) {
                             cached_rgb = sample_catmull_rom_5tap(prev_uv, prev_active_size, inv_alloc_size, uv_min, uv_max);
                         } else {
                             cached_rgb = prev_color_texture.SampleLevel(linear_clamp_sampler, prev_tex_uv, 0).rgb;
@@ -571,7 +589,7 @@ void range_vis_classify_main(
                 }
             }
 
-            if (!cache_valid && use_surface_cache && has_prev && !is_reactive_miss && !is_shadow_delta_miss) {
+            if (!cache_valid && use_surface_cache && has_prev && !is_reactive_miss && !is_shadow_delta_miss && !near_muzzle_unified) {
                 uint sc_tri = vis_word & 0xFFFFFFu;
                 uint sc_base = sc_tri * 3u;
                 RangeVertexGpu sv0 = range_vertices[range_indices[sc_base + 0u]];
@@ -593,8 +611,8 @@ void range_vis_classify_main(
                 float3 sc_local_p = sv0.position * sb.x + sv1.position * sb.y + sv2.position * sb.z;
                 float3 sc_local_n = normalize(sv0.normal * sb.x + sv1.normal * sb.y + sv2.normal * sb.z);
                 uint sc_mask = max(cache_params.y, 262143u);
-                uint sc_split_bit = ((policy_params.x & 32u) != 0u) ? 1u : 0u;
-                uint sc_muz_bit = (muzzle_light_pos_intensity.w > 0.01) ? 1u : 0u;
+                uint sc_split_bit = use_split_diff_spec ? 1u : 0u;
+                uint sc_muz_bit = (!use_split_diff_spec && muzzle_light_pos_intensity.w > 0.01) ? 1u : 0u;
                 uint sc_sh_sig = ((shader_flags & (8u | 32u)) != 0u && !is_vm) ? eval_range_shadow_signature(sc_world_p, curr_scene_time, shader_flags) : 0u;
                 uint sc_epoch = (policy_params.x >> 16u) & 0xFFFFu;
                 uint sc_rev = (shader_flags & 255u) | (sc_split_bit << 8u) | (sc_muz_bit << 9u) | ((sc_sh_sig & 63u) << 10u) | (sc_epoch << 16u);
@@ -619,7 +637,7 @@ void range_vis_classify_main(
             }
 
             if (cache_valid) {
-                out_color_uav[pixel_coord] = float4(cached_rgb, sc_warm_start ? 252.0 : (float)next_age);
+                out_color_uav[pixel_coord] = float4(cached_rgb, encode_cache_age(sc_warm_start ? 252.0 : (float)next_age, is_vm));
                 if (sc_warm_start) {
                     InterlockedAdd(g_dirty_pixel_count, 1u);
                 }
@@ -627,16 +645,34 @@ void range_vis_classify_main(
             } else {
                 float3 fallback_rgb = float3(0.035, 0.050, 0.068);
                 if (has_prev) {
+                    int2 prev_max = int2(prev_and_alloc_dims.xy) - int2(1, 1);
                     float2 prev_active_size = float2(max(prev_and_alloc_dims.x, 1u), max(prev_and_alloc_dims.y, 1u));
-                    float2 inv_alloc_size = float2(rcp(float(max(prev_and_alloc_dims.z, 1u))), rcp(float(max(prev_and_alloc_dims.w, 1u))));
-                    float2 uv_min = 0.5 * inv_alloc_size;
-                    float2 uv_max = (prev_active_size - 0.5) * inv_alloc_size;
-                    float2 clamped_uv = clamp(prev_uv, float2(0.0, 0.0), float2(1.0, 1.0)) * prev_active_size * inv_alloc_size;
-                    fallback_rgb = prev_color_texture.SampleLevel(linear_clamp_sampler, clamp(clamped_uv, uv_min, uv_max), 0).rgb;
+                    int2 fb_px = clamp(int2(prev_uv * prev_active_size), int2(0, 0), prev_max);
+                    uint fb_vis = prev_vis_texture.Load(int3(fb_px, 0));
+                    bool fb_is_vm = ((fb_vis >> 24u) & 1u) != 0u;
+                    if (!is_vm && fb_is_vm) {
+                        static const int2 probe_ofs[8] = {
+                            int2(-12, 0), int2(12, 0), int2(0, -12), int2(0, 12),
+                            int2(-28, 0), int2(28, 0), int2(0, -28), int2(0, 28)
+                        };
+                        [unroll]
+                        for (int pi = 0; pi < 8; ++pi) {
+                            int2 cand_px = clamp(fb_px + probe_ofs[pi], int2(0, 0), prev_max);
+                            uint cand_vis = prev_vis_texture.Load(int3(cand_px, 0));
+                            if (((cand_vis >> 24u) & 1u) == 0u) {
+                                fb_px = cand_px;
+                                break;
+                            }
+                        }
+                    }
+                    fallback_rgb = prev_color_texture.Load(int3(fb_px, 0)).rgb;
                 }
-                out_color_uav[pixel_coord] = float4(fallback_rgb, 255.0);
+                out_color_uav[pixel_coord] = float4(fallback_rgb, encode_cache_age(255.0, is_vm));
                 InterlockedAdd(g_dirty_pixel_count, 1u);
                 InterlockedAdd(g_disoccluded_count, 1u);
+                if (is_vm) {
+                    InterlockedAdd(g_vm_dirty_count, 1u);
+                }
                 InterlockedMax(g_max_age_in_tile, 255u);
             }
         }
@@ -661,7 +697,7 @@ void range_vis_classify_main(
 
         float2 tile_uv = (float2(group_id.xy) + 0.5) / float2(max(tiles_x, 1u), max(tiles_y, 1u));
         float reticle_dist = length(tile_uv - float2(0.5, 0.5));
-        bool has_critical = force_full || (g_disoccluded_count > 0u) || (g_moving_count > 0u);
+        bool has_critical = force_full || (g_vm_dirty_count > 0u) || (g_disoccluded_count > 0u) || (g_moving_count > 0u);
         bool has_dirty = has_critical || (g_dirty_pixel_count > 0u);
 
         if (g_non_sky_count == 0u) {
@@ -671,12 +707,14 @@ void range_vis_classify_main(
             tile_indirect_args_uav.InterlockedAdd(16u, 1u, unused_cached);
         } else if (has_dirty || periodic_refresh || g_max_age_in_tile >= 16u) {
             uint bucket = 7u;
-            if (force_full || (has_critical && reticle_dist < 0.35)) {
+            if (force_full || (g_vm_dirty_count > 0u)) {
                 bucket = 0u;
-            } else if (has_critical) {
+            } else if (has_critical && reticle_dist < 0.42) {
                 bucket = 1u;
-            } else if (g_dirty_pixel_count > 0u) {
+            } else if (has_critical) {
                 bucket = 2u;
+            } else if (g_dirty_pixel_count > 0u) {
+                bucket = 3u;
             } else if (g_max_age_in_tile >= 24u) {
                 bucket = 4u;
             } else if (reticle_dist < 0.35) {
@@ -930,7 +968,7 @@ void range_vis_composite_main(
 
     bool active_px = in_bounds && (vis_word != 0u);
     if (in_bounds && vis_word == 0u) {
-        out_final_color_uav[pixel_coord] = float4(0.035, 0.050, 0.068, 1.0);
+        out_final_color_uav[pixel_coord] = float4(0.035, 0.050, 0.068, 0.0);
     }
 
     uint shader_flags = (uint)(range_flags.w + 0.5);
@@ -1028,23 +1066,23 @@ void range_vis_composite_main(
 
         float4 irr_age = out_color_uav[pixel_coord];
         cached_irr = irr_age.rgb;
-        if (irr_age.a > 251.5 && irr_age.a < 252.5) {
+        float irr_age_f = decode_cache_age(irr_age.a);
+        if (irr_age_f > 251.5 && irr_age_f < 252.5) {
             cached_irr *= mat_ao;
-            out_color_uav[pixel_coord] = float4(cached_irr, 18.0);
+            out_color_uav[pixel_coord] = float4(cached_irr, encode_cache_age(18.0, is_viewmodel));
         }
-        if (use_surface_cache && irr_age.a >= 24.0) {
+        if (use_surface_cache && irr_age_f >= 24.0) {
             float3 local_pos = v0.position * b.x + v1.position * b.y + v2.position * b.z;
             float3 local_n = normalize(v0.normal * b.x + v1.normal * b.y + v2.normal * b.z);
-            uint sc_muz_bit = (muzzle_light_pos_intensity.w > 0.01) ? 1u : 0u;
             uint sc_sh_sig = ((shader_flags & (8u | 32u)) != 0u && !is_viewmodel) ? eval_range_shadow_signature(world_pos, scene_time, shader_flags) : 0u;
             uint sc_epoch = (policy_params.x >> 16u) & 0xFFFFu;
-            uint sc_rev = (shader_flags & 255u) | (1u << 8u) | (sc_muz_bit << 9u) | ((sc_sh_sig & 63u) << 10u) | (sc_epoch << 16u);
+            uint sc_rev = (shader_flags & 255u) | (1u << 8u) | ((sc_sh_sig & 63u) << 10u) | (sc_epoch << 16u);
             uint sc_slot0 = 0u;
             uint sc_key = compute_surface_cache_key(inst.entity_meta.x, local_pos, local_n, length(world_pos - cam_pos), is_viewmodel, sc_rev, sc_mask, sc_slot0);
             float3 sc_irr;
             uint sc_age;
             bool sc_hit = read_surface_cache(sc_key, sc_slot0, frame_id, 24u, sc_mask, sc_irr, sc_age);
-            if (sc_hit && (float)sc_age < irr_age.a) {
+            if (sc_hit && (float)sc_age < irr_age_f) {
                 cached_irr = lerp(cached_irr, sc_irr * mat_ao, 0.35);
             }
             uint w_hits = WaveActiveCountBits(sc_hit);
@@ -1120,7 +1158,8 @@ void range_vis_composite_main(
             f0,
             dfg,
             energy_comp,
+            muzzle_light_pos_intensity,
             linear_clamp_sampler);
-        out_final_color_uav[pixel_coord] = float4(final_rgb, 1.0);
+        out_final_color_uav[pixel_coord] = float4(final_rgb, is_viewmodel ? -1.0 : 0.0);
     }
 }
