@@ -441,6 +441,20 @@ Following the 8-shader theory stress audit (`v0.26.0`), PBR/anisotropic texturin
    - Verified exact conservative spotlight cone-vs-tile-sphere culling (`14 → 9.21` lights/tile, `0` D3D12 Debug Layer errors).
    - **Honest empirical crossover**: at 14 lights, tiled AABB culling + branched light loops ran **5–14% slower** than unrolled 14-light specular (`1,519` vs `1,411 µs` at 1080p; `6,970` vs `5,994 µs` at 4K) because `groupshared` reductions + barriers + lost DXC unrolling outweigh skipping ~5 spotlights, and procedural material evaluation (`sample_range_pbr_material`) accounts for ~45% of composite ALU cost. Unrolled specular remains the default for 14 lights, while the verified clustered path is ready for Priority 10's 32–64+ light scenes.
 
+### `v0.37.0` Four Production Scaling Ceilings Investigation
+
+1. **Split-Shading Material Re-Evaluation Wall (Ceiling #1)**:
+   - Empirically tested temporal Thin Material G-Buffer reprojection (`1.61×` faster at 720p, but 24-frame temporal resampling blurred high-frequency cracks/normals from `33.2 → 25.8 dB`), SIMT per-lane `QuadReadLaneAt` specular sharing (`0%` 4K speedup due to warp leader occupancy), and `cs_6_0` `QuadReadAcross` derivatives (`-3.7 dB` on triangle boundaries).
+   - Confirmed exact 3-ray analytical derivatives (`665 µs`, `33.19 dB`, `SSIM 0.9805`, `tRMSE 3.89`) as the cleanest default and established that accelerating Split Composite further requires a **dedicated 1/4-thread-count half-res specular pass** or texture-backed materials.
+2. **Normal/AO-Decoupled EMA Surface-Space Cache (Ceiling #2)**:
+   - Stripped micro-AO out of 3D surface cells, added 16-sample running EMA accumulation inside the existing 16-byte cell layout, and turned disocclusion hits into soft warm-starts with lazy Bucket 2/4 refinement.
+3. **Real-Game Stress Modes & Killer GI Result (Ceiling #3)**:
+   - **Deforming/Skinned Meshes (`deform`)**: bind-pose rest-position surface-cache keying held **`SSIM 0.9614 / tRMSE 4.84`** at `1.59×` (`Split+SC`) and `3.49×` (`PAR3+SC`) while targets continuously flexed.
+   - **Alpha-Tested Thin Geometry (`alpha_cutout`)**: hardware VisBuffer `clip()` + strict triangle-ID validation held **`SSIM 0.9630`** at `1.31–2.88×`.
+   - **16-Ray Multi-Bounce Hemisphere GI (`gi_bounce`)**: proved the core high-cost-shading thesis — at **4K @ 120 Hz**, Forward 1×1 GT stalled to **`13.99 ms` (`5` missed deadlines)**, while **`PAR3+SC` ran in `3.73 ms` (`3.75×` faster)** and **`Split+SC` ran in `5.89 ms` (`2.38×` faster, inside the 120 Hz budget at `SSIM 0.9662`)**; at **1080p GI**, speedups reached **`5.04×` (`PAR3+SC`)** and **`3.87×` (`Split+SC`)**.
+4. **D3D12 RenderGraph Foundation (Ceiling #4)**:
+   - Extracted automatic D3D12 resource-state tracking and batched pass barriers into `src/render_graph.h` (`RenderGraphContext`), migrating the full Range VisBuffer/PAR-3/Composite/Transparency graph with `0` Debug Layer errors.
+
 ## Questions to resolve
 
 - Which resolution and monitor should the first experiment target, and what is that configuration's verified upper refresh bound?

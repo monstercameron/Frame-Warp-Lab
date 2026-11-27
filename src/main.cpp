@@ -234,6 +234,7 @@ public:
         bool split_diff_spec_enabled,
         bool surface_cache_enabled,
         bool clustered_lighting_enabled,
+        bool thin_gbuf_enabled,
         std::int32_t surface_cache_mb,
         bool par_bypass_active,
         std::int32_t smoothed_damage_pct,
@@ -265,6 +266,7 @@ public:
         std::atomic_ref<std::int32_t>(state_->split_diff_spec_enabled).store(split_diff_spec_enabled ? 1 : 0, std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->surface_cache_enabled).store(surface_cache_enabled ? 1 : 0, std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->clustered_lighting_enabled).store(clustered_lighting_enabled ? 1 : 0, std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->thin_gbuf_enabled).store(thin_gbuf_enabled ? 1 : 0, std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->surface_cache_mb).store(surface_cache_mb, std::memory_order_release);
         std::atomic_ref<std::uint32_t>(state_->last_sc_hits).store(stats.sc_hits, std::memory_order_release);
         std::atomic_ref<std::uint32_t>(state_->last_sc_misses).store(stats.sc_misses, std::memory_order_release);
@@ -810,6 +812,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         bool split_diff_spec_enabled = true;
         bool surface_cache_enabled = true;
         bool clustered_lighting_enabled = false;
+        bool thin_gbuf_enabled = false;
         std::int32_t surface_cache_mb = 4;
         std::int32_t render_scale_pct = 100;
         UINT render_override_width = 0;
@@ -917,6 +920,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 split_diff_spec_enabled,
                 surface_cache_enabled,
                 clustered_lighting_enabled,
+                thin_gbuf_enabled,
                 surface_cache_mb,
                 auto_tile_budget_enabled && auto_tile_budget.par_bypass_active(),
                 auto_tile_budget.smoothed_damage_pct(),
@@ -1126,6 +1130,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
             } else if (command == frame_warp_lab::ControlCommand::set_clustered_lighting) {
                 clustered_lighting_enabled = message_lparam != 0;
                 runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, clustered_lighting_enabled ? 1 : 0, frame_warp_lab::ConfigKey::clustered_lighting);
+            } else if (command == frame_warp_lab::ControlCommand::set_thin_gbuf) {
+                thin_gbuf_enabled = message_lparam != 0;
+                runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, thin_gbuf_enabled ? 1 : 0, frame_warp_lab::ConfigKey::thin_gbuf);
             } else if (command == frame_warp_lab::ControlCommand::set_surface_cache_mb) {
                 const auto mb = static_cast<std::int32_t>(message_lparam);
                 if (mb == 4 || mb == 16 || mb == 64) {
@@ -1133,7 +1140,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                     runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, surface_cache_mb, frame_warp_lab::ConfigKey::surface_cache_mb);
                 }
             } else if (command == frame_warp_lab::ControlCommand::set_shader_flags) {
-                shader_flags = static_cast<std::uint32_t>(message_lparam) & 0xFFU;
+                shader_flags = static_cast<std::uint32_t>(message_lparam) & 0xFFFFU;
                 renderer.invalidate_source_history();
                 runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, static_cast<std::int32_t>(shader_flags), frame_warp_lab::ConfigKey::shader_flags);
             } else if (command == frame_warp_lab::ControlCommand::set_pbr_enabled) {
@@ -1652,6 +1659,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                     split_diff_spec_enabled,
                     surface_cache_enabled,
                     clustered_lighting_enabled,
+                    thin_gbuf_enabled,
                     surface_cache_mb,
                     frame_id_u64,
                     latency_monitor,
@@ -2034,6 +2042,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 split_diff_spec_enabled,
                 surface_cache_enabled,
                 clustered_lighting_enabled,
+                thin_gbuf_enabled,
                 surface_cache_mb,
                 auto_tile_budget_enabled && auto_tile_budget.par_bypass_active(),
                 auto_tile_budget.smoothed_damage_pct(),

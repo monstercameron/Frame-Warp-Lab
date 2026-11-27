@@ -10,7 +10,7 @@
 namespace frame_warp_lab {
 
 inline constexpr wchar_t window_class_name[] = L"FrameWarpLabWindow";
-inline constexpr std::uint32_t runtime_state_version = 34;
+inline constexpr std::uint32_t runtime_state_version = 35;
 inline constexpr std::size_t runtime_event_capacity = 64;
 inline constexpr std::size_t runtime_frame_trace_capacity = 256;
 inline constexpr std::size_t hud_graph_sample_count = 128;
@@ -75,6 +75,7 @@ enum class ControlCommand : WPARAM {
     set_unified_controller = 51,
     set_clustered_lighting = 52,
     set_surface_cache_mb = 53,
+    set_thin_gbuf = 54,
 };
 
 enum class SceneKind : std::int32_t {
@@ -233,6 +234,7 @@ enum class ConfigKey : std::int32_t {
     unified_controller = 41,
     clustered_lighting = 42,
     surface_cache_mb = 43,
+    thin_gbuf = 44,
 };
 
 enum class RuntimeEventType : std::int32_t {
@@ -432,6 +434,7 @@ struct RuntimeState {
     std::int32_t split_diff_spec_enabled;
     std::int32_t surface_cache_enabled;
     std::int32_t clustered_lighting_enabled;
+    std::int32_t thin_gbuf_enabled;
     std::int32_t surface_cache_mb;
     std::uint32_t last_sc_hits;
     std::uint32_t last_sc_misses;
@@ -565,6 +568,7 @@ inline const char* config_key_name(std::int32_t key) {
         case ConfigKey::unified_controller: return "unified_controller";
         case ConfigKey::clustered_lighting: return "clustered_lighting";
         case ConfigKey::surface_cache_mb: return "surface_cache_mb";
+        case ConfigKey::thin_gbuf: return "thin_gbuf";
         default: return "unknown";
     }
 }

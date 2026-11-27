@@ -1,5 +1,29 @@
 # Development log
 
+## v0.37.0 — Four Technical Ceilings Sprint: Automatic D3D12 `RenderGraphContext`, Normal/AO-Decoupled EMA Surface Cache, Real-Game Stress (`deform`, `alpha_cutout`, `gi_bounce` 16-Ray Multi-Bounce GI) & Split-Composite Empirical Audit
+
+- Addressed all four production scaling ceilings identified after `v0.36.x` (`src/render_graph.h`, `src/renderer.h`, `src/renderer.cpp`, `src/runtime_state.h`, `src/main.cpp`, `src/cli.cpp`, `shaders/range_lighting.hlsl`, `shaders/range_mesh.hlsl`, `shaders/range_vis_par.hlsl`, `CMakeLists.txt`, `scripts/run_four_ceilings_suite.ps1`, `scripts/run_thin_gbuf_and_decoupled_cache_experiment.ps1`, `research.md`):
+  - **Ceiling #4 — Automatic D3D12 `RenderGraphContext` (`src/render_graph.h`)**:
+    - Built a lightweight zero-overhead D3D12 barrier tracker and declarative pass executor (`track`, `transition`, `uav`, `flush_barriers`, `execute_pass`) and migrated the entire Gun Range `VisBuffer → PAR-3 Classify/Admit/Shade → Split Composite → Readback → Forward Transparency` pipeline off manual barrier arrays (`0` D3D12 Debug Layer errors).
+  - **Ceiling #2 — Normal/AO-Decoupled EMA Surface-Space Cache (`shaders/range_vis_par.hlsl`)**:
+    - Decoupled micro-AO out of surface-cache entries (`diff_irr / max(mat_ao, 0.20)` on write, exact 1×1 `mat_ao` re-applied on warm-start retrieval via age tag `252.0`), implemented running exponential moving average sample accumulation (`sample_count 1..16` in the upper 16 bits of cell `c.z`), and converted disocclusion surface-cache hits into soft warm-starts (instant Frame-0 radiance + lazy Bucket 2/4 refinement).
+  - **Ceiling #1 — Split-Shading Composite Wall Empirical Audit (`thin_gbuf` / Morton Quad-Wave / Wave-Uniform Culling)**:
+    - Built and A/B-tested three composite acceleration paths (`set <pid> thin_gbuf on|off`): (1) temporal Thin Material G-Buffer reprojection (`476 µs` at 720p, `1.61×` faster, *but* 24-frame temporal resampling blurred high-frequency albedo/normals to `25.8 dB / tRMSE 13.0`), (2) per-lane `QuadReadLaneAt` 2×2 rough-specular sharing (`0%` 4K SIMT speedup because 8 leader lanes keep all 32 warp lanes active), and (3) `cs_6_0` `QuadReadAcross` derivatives + `WaveActiveAllTrue` matte culling (`29.48 dB` vs `33.19 dB` for exact 3-ray analytical derivatives at matched `664–665 µs`). Kept exact 3-ray analytical derivatives as the default (`PSNR 33.19 dB / SSIM 0.9805 / tRMSE 3.89`) and logged the hardware lesson: accelerating Split Composite further requires a **dedicated 1/4-thread-count half-res specular pass** or texture-backed materials, while expensive diffuse/GI shading already amortizes Split Composite cleanly (`2.38–3.87×` speedup over GT).
+  - **Ceiling #3 — Real-Game Failure Modes & Killer GI Opportunity (`shader_feature` expanded to 16-bit: `deform=256`, `alpha_cutout=512`, `gi_bounce=1024`)**:
+    - **`deform` (Skinned / Vertex-Deforming Meshes)**: added continuous sinusoidal torso flexing on all 8 swinging targets in `range_vs_main` + `range_vis_par.hlsl` while keying the persistent surface cache on **bind-pose rest `v.position`**, preserving surface-cache validity under deformation.
+    - **`alpha_cutout` (Thin Alpha-Tested Geometry)**: added high-frequency diagonal chain-link grating `clip()` cutouts in `range_ps_main` & `range_vis_ps_main` paired with strict exact-triangle `vis_word == prev_vis` temporal validation in `range_vis_classify_main`.
+    - **`gi_bounce` (16-Ray Cosine-Weighted Multi-Bounce Hemisphere GI)**: implemented a 16-ray analytical room-box + colored-wall/floor/beacon multi-bounce indirect lighting integrator evaluated in Forward GT (100% pixels) vs `PAR-3 15%` + EMA Surface-Space Cache (15% tiles + multi-frame cell accumulation).
+- Verified zero code comments across all C++/HLSL files, clean ARM64 Release + Debug builds, Debug D3D12 Debug Layer (`DEBUG_D3D12_ZERO_ERRORS_OK` with all 3 new flags `shader_feature=1792` active), and `scripts/run_four_ceilings_suite.ps1` on **NVIDIA RTX Spark N1X**:
+  - **Baseline 720p `occlusion_sweep` (`15% PAR-3`, `GT = 1,190 µs`)**: `Split+Surf 4 MiB (3-Ray Full)` = **`665 µs (1.79×)`**, **`PSNR 33.19 dB`**, **`SSIM 0.9805`**, **`tRMSE 3.89`**.
+  - **Real-Game Stress (`720p occlusion_sweep`, `15% PAR-3`, `16 MiB` cache)**:
+    - **`deform`** (`GT 1,036 µs`): `PAR3+SC 297 µs (3.49×)` · **`Split+SC 652 µs (1.59×), SSIM 0.9614, tRMSE 4.84`**
+    - **`alpha_cutout`** (`GT 923 µs`): `PAR3+SC 321 µs (2.88×)` · **`Split+SC 703 µs (1.31×), SSIM 0.9630, tRMSE 6.71`**
+    - **`gi_bounce`** (`GT 2,039 µs`): **`PAR3+SC 357 µs (5.71×!)`** · **`Split+SC 738 µs (2.76×!), PSNR 29.97 dB, SSIM 0.9662, tRMSE 4.52`**
+  - **16-Ray Multi-Bounce GI Resolution Scaling (`1080p / 1440p / 4K @ 120 Hz`, `corridor_sway`, `15% PAR-3`, `16 MiB` cache)**:
+    - **`1080p GI`**: `Forward GT 5,912 µs` → **`PAR3+SC 1,174 µs (5.04×!)`** · **`Split+SC 1,527 µs (3.87×!)`**
+    - **`1440p GI`**: `Forward GT 6,787 µs` → **`PAR3+SC 1,828 µs (3.71×!)`** · **`Split+SC 2,992 µs (2.27×!)`**
+    - **`4K GI`**: `Forward GT 13,986 µs` (`5` missed deadlines!) → **`PAR3+SC 3,732 µs (3.75×!)`** · **`Split+SC 5,885 µs (2.38×!, under 8.33 ms 120 Hz!)`**
+
 ## v0.36.1 — Fix Fatal Stack Use-After-Free Race in `EngineJobSystem::parallel_for`
 
 - Fixed a deterministic concurrency crash in `src/job_system.cpp` (`EngineJobSystem::parallel_for`) that triggered after ~3–6 seconds of running the Gun Range (`~400–700` frames at 120 Hz):

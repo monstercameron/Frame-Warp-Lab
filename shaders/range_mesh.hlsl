@@ -91,8 +91,11 @@ float2 project_prev_camera_uv(float3 prev_world_pos) {
 
 RangeVertexOut range_vs_main(RangeVertexIn input) {
     InstanceData inst = instance_buffer[draw_meta.x];
-    float4 wp = mul(inst.model, float4(input.position, 1.0));
-    float4 pwp = mul(inst.prev_model, float4(input.position, 1.0));
+    uint sflags = (uint)(range_flags.w + 0.5);
+    float3 cur_local = eval_range_deform_local_pos(input.position, inst.entity_meta.y, previous_camera_forward_time.w, sflags);
+    float3 prv_local = eval_range_deform_local_pos(input.position, inst.entity_meta.y, range_flags.z, sflags);
+    float4 wp = mul(inst.model, float4(cur_local, 1.0));
+    float4 pwp = mul(inst.prev_model, float4(prv_local, 1.0));
     float3 wn = normalize(mul(inst.model, float4(input.normal, 0.0)).xyz);
     float3 wt = normalize(mul(inst.model, float4(input.tangent, 0.0)).xyz);
 
@@ -110,6 +113,10 @@ RangeVertexOut range_vs_main(RangeVertexIn input) {
 }
 
 SceneOutput range_ps_main(RangeVertexOut input) {
+    uint sflags = (uint)(range_flags.w + 0.5);
+    if (eval_range_alpha_cutout_discard(input.uv, input.material_id, sflags)) {
+        discard;
+    }
     float3 shaded = shade_range_surface_pbr(
         input.world_pos,
         input.world_normal,
@@ -149,6 +156,10 @@ SceneOutput range_ps_main(RangeVertexOut input) {
 }
 
 VisBufferOut range_vis_ps_main(RangeVertexOut input, uint prim_id : SV_PrimitiveID) {
+    uint sflags = (uint)(range_flags.w + 0.5);
+    if (eval_range_alpha_cutout_discard(input.uv, input.material_id, sflags)) {
+        discard;
+    }
     uint inst_encoded = (draw_meta.x + 1u) & 0x7Fu;
     uint vm_bit = draw_meta.y & 1u;
     uint tri_id = (draw_meta.z + prim_id) & 0xFFFFFFu;

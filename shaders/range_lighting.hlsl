@@ -94,6 +94,87 @@ float3 eval_spot_light(
     return pbr_eval_direct_light(n, view_dir, l, eff_rad, diffuse_color, f0, perceptual_roughness, alpha, energy_comp, clearcoat, cc_alpha);
 }
 
+float3 eval_range_deform_local_pos(float3 bind_pos, uint mesh_kind, float scene_time, uint shader_flags) {
+    if ((shader_flags & 256u) == 0u || mesh_kind != 1u) {
+        return bind_pos;
+    }
+    float flex = saturate(bind_pos.y + 0.55);
+    float3 p = bind_pos;
+    p.x += 0.095 * sin(scene_time * 3.8 + bind_pos.y * 2.6) * flex;
+    p.z += 0.055 * cos(scene_time * 2.9 + bind_pos.y * 3.1) * flex;
+    return p;
+}
+
+bool eval_range_alpha_cutout_discard(float2 uv, uint material_id, uint shader_flags) {
+    if ((shader_flags & 512u) == 0u || material_id != 6u) {
+        return false;
+    }
+    float2 g = abs(frac(uv * 18.0 + float2(uv.y * 18.0, -uv.x * 18.0)) - 0.5);
+    float wire = min(g.x, g.y);
+    return wire > 0.16;
+}
+
+float3 eval_range_multibounce_gi(float3 world_pos, float3 n, float scene_time, uint shader_flags) {
+    if ((shader_flags & 1024u) == 0u) {
+        return float3(0.0, 0.0, 0.0);
+    }
+    float3 up = abs(n.y) < 0.99 ? float3(0.0, 1.0, 0.0) : float3(1.0, 0.0, 0.0);
+    float3 t = normalize(cross(up, n));
+    float3 b = cross(n, t);
+    float3 room_min = float3(-6.4, 0.0, -1.5);
+    float3 room_max = float3( 6.4, 4.7, 31.5);
+    float3 gi_acc = float3(0.0, 0.0, 0.0);
+    uint seed = asuint(floor(world_pos.x * 37.0)) * 73856093u ^ asuint(floor(world_pos.z * 37.0)) * 83492791u;
+    float base_phi = (float)(seed & 1023u) * (6.2831853 / 1024.0);
+    [loop]
+    for (uint s = 0u; s < 16u; ++s) {
+        float u1 = ((float)s + 0.5) * (1.0 / 16.0);
+        float phi = base_phi + (float)s * 2.39996323;
+        float r = sqrt(u1);
+        float z = sqrt(max(1.0 - u1, 1e-4));
+        float3 dir = normalize(t * (r * cos(phi)) + b * (r * sin(phi)) + n * z);
+        float3 inv_d = rcp(select(abs(dir) > 1e-4, dir, float3(1e-4, 1e-4, 1e-4)));
+        float3 t0 = (room_min - world_pos) * inv_d;
+        float3 t1 = (room_max - world_pos) * inv_d;
+        float3 tmax = max(t0, t1);
+        float hit_t = min(tmax.x, min(tmax.y, tmax.z));
+        hit_t = clamp(hit_t, 0.05, 36.0);
+        float3 hp = world_pos + dir * hit_t;
+
+        float3 wall_albedo = float3(0.32, 0.34, 0.36);
+        float3 wall_rad = float3(0.0, 0.0, 0.0);
+        if (hp.y > 4.45) {
+            wall_albedo = float3(0.28, 0.30, 0.33);
+            float strip = step(abs(hp.x), 1.45) * step(abs(frac((hp.z - 2.8) * (1.0 / 5.2)) - 0.5), 0.14);
+            wall_rad = float3(3.4, 3.6, 3.9) * strip + float3(0.38, 0.40, 0.44);
+        } else if (hp.y < 0.12) {
+            wall_albedo = float3(0.26, 0.27, 0.29);
+            float bay = exp(-abs(hp.z - 14.0) * 0.08);
+            wall_rad = float3(0.55, 0.56, 0.58) * (0.45 + 0.55 * bay);
+        } else if (abs(hp.x) > 6.15) {
+            wall_albedo = float3(0.38, 0.22, 0.18);
+            float red_glow = exp(-dot(hp - float3(sign(hp.x) * 5.95, 2.4, 5.2), hp - float3(sign(hp.x) * 5.95, 2.4, 5.2)) * 0.12);
+            float amb_glow = exp(-dot(hp - float3(sign(hp.x) * 5.60, 2.5, 28.0), hp - float3(sign(hp.x) * 5.60, 2.5, 28.0)) * 0.09);
+            wall_rad = float3(0.25, 0.26, 0.28) + float3(1.65, 0.18, 0.14) * red_glow + float3(1.55, 0.78, 0.18) * amb_glow;
+        } else if (hp.z > 30.8) {
+            wall_albedo = float3(0.22, 0.24, 0.27);
+            wall_rad = float3(0.42, 0.34, 0.24);
+        } else {
+            float cyan_glow = exp(-dot(hp.xy - float2(0.0, 1.0), hp.xy - float2(0.0, 1.0)) * 0.18);
+            wall_rad = float3(0.18, 0.22, 0.26) + float3(0.14, 0.85, 1.30) * cyan_glow;
+        }
+
+        float occ = 1.0;
+        if (hit_t > 1.2 && hp.y < 2.2) {
+            float d_lane = abs(frac((world_pos.x + dir.x * 1.1) * 0.45) - 0.5);
+            occ = lerp(0.55, 1.0, smoothstep(0.04, 0.14, d_lane));
+        }
+        float atten = 1.0 / (1.0 + 0.035 * hit_t * hit_t);
+        gi_acc += (wall_albedo * wall_rad * occ * (0.45 + 0.55 * atten));
+    }
+    return gi_acc * (0.95 / 16.0);
+}
+
 float3 eval_range_moving_spot_pos(float scene_time) {
     return float3(3.1 * sin(scene_time * 1.65), 4.05, 11.2 + 4.4 * cos(scene_time * 1.15));
 }
@@ -302,6 +383,10 @@ float3 shade_range_surface_pbr(
         }
     }
 
+    if ((shader_flags & 1024u) != 0u) {
+        color += diffuse_color * eval_range_multibounce_gi(world_pos, n, scene_time, shader_flags) * ao;
+    }
+
     if (muzzle_light_pos_intensity.w > 0.01) {
         float3 to_m = muzzle_light_pos_intensity.xyz - world_pos;
         float md2 = max(dot(to_m, to_m), 0.08);
@@ -480,6 +565,10 @@ float3 eval_range_diffuse_irradiance(
         }
     }
 
+    if ((shader_flags & 1024u) != 0u) {
+        irr += eval_range_multibounce_gi(world_pos, n, scene_time, shader_flags) * ao;
+    }
+
     if (muzzle_light_pos_intensity.w > 0.01) {
         float3 to_m = muzzle_light_pos_intensity.xyz - world_pos;
         float md2 = max(dot(to_m, to_m), 0.08);
@@ -584,51 +673,26 @@ bool test_range_light_against_aabb(uint light_idx, float3 aabb_min, float3 aabb_
     return true;
 }
 
-float3 eval_range_specular_and_composite(
+float3 eval_range_direct_specular_only(
     float3 world_pos,
-    float3 cached_diffuse_irr,
-    float3 albedo,
     float3 n,
-    float3 geo_n,
-    float2 uv,
-    float ao,
+    float3 view_dir,
+    float nov,
+    float3 refl,
+    float3 f0,
     float perceptual_roughness,
+    float alpha,
+    float3 energy_comp,
     float metallic,
     float clearcoat,
-    uint material_id,
-    float4 tint_emissive,
-    float emissive_weight,
+    float cc_alpha,
     bool is_viewmodel,
     float scene_time,
     uint shader_flags,
     uint tile_light_mask,
     bool roughness_cull_enabled,
-    float3 cam_pos,
-    float3 cam_forward,
-    float4 muzzle_light_pos_intensity,
-    SamplerState clamp_sampler) {
-    float3 view_dir = normalize(cam_pos - world_pos);
-    float nov = max(dot(n, view_dir), 1e-4);
-    float alpha = max(0.008, perceptual_roughness * perceptual_roughness);
-    float cc_roughness = 0.12;
-    float cc_alpha = cc_roughness * cc_roughness;
-    float3 f0 = lerp(float3(0.04, 0.04, 0.04), albedo, metallic);
-    float3 diffuse_color = albedo * (1.0 - metallic);
-    float2 dfg = pbr_dfg_lut.SampleLevel(clamp_sampler, float2(nov, perceptual_roughness), 0.0);
-    float3 energy_comp = 1.0 + f0 * (rcp(max(dfg.x + dfg.y, 0.08)) - 1.0);
-
-    float3 refl = reflect(-view_dir, n);
-    float3 env_spec = pbr_env_cubemap.SampleLevel(clamp_sampler, refl, perceptual_roughness * 4.0).rgb;
-    float spec_ao = pbr_specular_ao(nov, ao, perceptual_roughness);
-    float3 color = diffuse_color * cached_diffuse_irr + env_spec * (f0 * dfg.x + dfg.y) * energy_comp * spec_ao * 0.42;
-
-    if (clearcoat > 0.005) {
-        float2 dfg_cc = pbr_dfg_lut.SampleLevel(clamp_sampler, float2(nov, cc_roughness), 0.0);
-        float fc_ibl = (0.04 + 0.96 * pow(saturate(1.0 - nov), 5.0)) * clearcoat;
-        float3 env_cc = pbr_env_cubemap.SampleLevel(clamp_sampler, reflect(-view_dir, geo_n), cc_roughness * 4.0).rgb;
-        color = color * (1.0 - fc_ibl) + env_cc * (0.04 * dfg_cc.x + dfg_cc.y) * clearcoat * spec_ao * 0.55;
-    }
-
+    float4 muzzle_light_pos_intensity) {
+    float3 direct_spec = float3(0.0, 0.0, 0.0);
     bool skip_minor_spec = roughness_cull_enabled && !is_viewmodel && (perceptual_roughness >= 0.94) && (metallic < 0.01) && (clearcoat < 0.01);
 
     static const float area_z[5] = { 5.4, 10.6, 15.8, 21.0, 26.2 };
@@ -683,25 +747,25 @@ float3 eval_range_specular_and_composite(
                 float fc = (0.04 + 0.96 * pow(1.0 - voh, 5.0)) * clearcoat;
                 sp = sp * (1.0 - fc) + area_rad[ai] * area_term * (d_cc * v_cc * fc * nol_spec * facing_spec);
             }
-            color += sp;
+            direct_spec += sp;
         }
     }
 
     if (!skip_minor_spec) {
         if ((tile_light_mask & (1u << 5u)) != 0u)
-            color += eval_spot_specular_only(world_pos, n, view_dir, nov, float3(0.0, 4.24, 8.2), normalize(float3(0.0, -0.88, 0.47)), 0.84, 0.58, float3(24.0, 22.8, 20.5), 0.075, f0, alpha, energy_comp, clearcoat, cc_alpha);
+            direct_spec += eval_spot_specular_only(world_pos, n, view_dir, nov, float3(0.0, 4.24, 8.2), normalize(float3(0.0, -0.88, 0.47)), 0.84, 0.58, float3(24.0, 22.8, 20.5), 0.075, f0, alpha, energy_comp, clearcoat, cc_alpha);
         if ((tile_light_mask & (1u << 6u)) != 0u)
-            color += eval_spot_specular_only(world_pos, n, view_dir, nov, float3(-0.35, 4.24, 14.4), normalize(float3(0.0, -0.89, 0.45)), 0.82, 0.54, float3(25.0, 23.0, 19.5), 0.065, f0, alpha, energy_comp, clearcoat, cc_alpha);
+            direct_spec += eval_spot_specular_only(world_pos, n, view_dir, nov, float3(-0.35, 4.24, 14.4), normalize(float3(0.0, -0.89, 0.45)), 0.82, 0.54, float3(25.0, 23.0, 19.5), 0.065, f0, alpha, energy_comp, clearcoat, cc_alpha);
         if ((tile_light_mask & (1u << 7u)) != 0u)
-            color += eval_spot_specular_only(world_pos, n, view_dir, nov, float3(0.25, 4.24, 21.0), normalize(float3(0.0, -0.88, 0.47)), 0.82, 0.54, float3(26.0, 23.2, 19.0), 0.060, f0, alpha, energy_comp, clearcoat, cc_alpha);
+            direct_spec += eval_spot_specular_only(world_pos, n, view_dir, nov, float3(0.25, 4.24, 21.0), normalize(float3(0.0, -0.88, 0.47)), 0.82, 0.54, float3(26.0, 23.2, 19.0), 0.060, f0, alpha, energy_comp, clearcoat, cc_alpha);
         if ((tile_light_mask & (1u << 8u)) != 0u)
-            color += eval_spot_specular_only(world_pos, n, view_dir, nov, float3(-5.95, 3.15, 4.25), normalize(float3(0.76, -0.52, 0.39)), 0.72, 0.25, float3(22.0, 1.4, 0.9), 0.11, f0, alpha, energy_comp, clearcoat, cc_alpha);
+            direct_spec += eval_spot_specular_only(world_pos, n, view_dir, nov, float3(-5.95, 3.15, 4.25), normalize(float3(0.76, -0.52, 0.39)), 0.72, 0.25, float3(22.0, 1.4, 0.9), 0.11, f0, alpha, energy_comp, clearcoat, cc_alpha);
         if ((tile_light_mask & (1u << 9u)) != 0u)
-            color += eval_spot_specular_only(world_pos, n, view_dir, nov, float3(5.95, 3.15, 4.25), normalize(float3(-0.76, -0.52, 0.39)), 0.72, 0.25, float3(22.0, 1.4, 0.9), 0.11, f0, alpha, energy_comp, clearcoat, cc_alpha);
+            direct_spec += eval_spot_specular_only(world_pos, n, view_dir, nov, float3(5.95, 3.15, 4.25), normalize(float3(-0.76, -0.52, 0.39)), 0.72, 0.25, float3(22.0, 1.4, 0.9), 0.11, f0, alpha, energy_comp, clearcoat, cc_alpha);
         if ((tile_light_mask & (1u << 10u)) != 0u)
-            color += eval_spot_specular_only(world_pos, n, view_dir, nov, float3(-5.60, 3.38, 28.5), normalize(float3(0.68, -0.54, 0.49)), 0.74, 0.30, float3(22.0, 10.5, 1.6), 0.075, f0, alpha, energy_comp, clearcoat, cc_alpha);
+            direct_spec += eval_spot_specular_only(world_pos, n, view_dir, nov, float3(-5.60, 3.38, 28.5), normalize(float3(0.68, -0.54, 0.49)), 0.74, 0.30, float3(22.0, 10.5, 1.6), 0.075, f0, alpha, energy_comp, clearcoat, cc_alpha);
         if ((tile_light_mask & (1u << 11u)) != 0u)
-            color += eval_spot_specular_only(world_pos, n, view_dir, nov, float3(5.60, 3.38, 28.5), normalize(float3(-0.68, -0.54, 0.49)), 0.74, 0.30, float3(22.0, 10.5, 1.6), 0.075, f0, alpha, energy_comp, clearcoat, cc_alpha);
+            direct_spec += eval_spot_specular_only(world_pos, n, view_dir, nov, float3(5.60, 3.38, 28.5), normalize(float3(-0.68, -0.54, 0.49)), 0.74, 0.30, float3(22.0, 10.5, 1.6), 0.075, f0, alpha, energy_comp, clearcoat, cc_alpha);
 
         static const float3 cyan_pos[2] = { float3(-2.15, 0.92, 4.35), float3(2.15, 0.92, 4.35) };
         [unroll]
@@ -724,7 +788,7 @@ float3 eval_range_specular_and_composite(
                     float fc = (0.04 + 0.96 * pow(saturate(1.0 - saturate(dot(lc, hc))), 5.0)) * clearcoat;
                     sp_c = sp_c * (1.0 - fc) + (d_cc * v_cc * fc) * rad_c;
                 }
-                color += sp_c;
+                direct_spec += sp_c;
             }
         }
     }
@@ -741,7 +805,7 @@ float3 eval_range_specular_and_composite(
             float d_ggx = pbr_d_ggx(saturate(dot(n, h)), alpha);
             float vis = pbr_v_smith_ggx_correlated(nov, nol, alpha);
             float3 f = pbr_f_schlick(saturate(dot(l, h)), f0, 1.0);
-            color += (d_ggx * vis) * f * energy_comp * float3(34.0, 26.0, 12.0) * (nol * dyn_vis / (1.0 + 0.14 * dyn_d2));
+            direct_spec += (d_ggx * vis) * f * energy_comp * float3(34.0, 26.0, 12.0) * (nol * dyn_vis / (1.0 + 0.14 * dyn_d2));
         }
     }
 
@@ -755,9 +819,52 @@ float3 eval_range_specular_and_composite(
             float d_ggx = pbr_d_ggx(saturate(dot(n, h)), alpha);
             float vis = pbr_v_smith_ggx_correlated(nov, nol, alpha);
             float3 f = pbr_f_schlick(saturate(dot(l, h)), f0, 1.0);
-            color += (d_ggx * vis) * f * energy_comp * float3(20.0, 12.0, 4.2) * (nol * muzzle_light_pos_intensity.w / (1.0 + 1.3 * md2));
+            direct_spec += (d_ggx * vis) * f * energy_comp * float3(20.0, 12.0, 4.2) * (nol * muzzle_light_pos_intensity.w / (1.0 + 1.3 * md2));
         }
     }
+    return direct_spec;
+}
+
+float3 eval_range_composite_final(
+    float3 world_pos,
+    float3 cached_diffuse_irr,
+    float3 direct_spec,
+    float3 albedo,
+    float3 n,
+    float3 geo_n,
+    float2 uv,
+    float ao,
+    float perceptual_roughness,
+    float metallic,
+    float clearcoat,
+    uint material_id,
+    float4 tint_emissive,
+    float emissive_weight,
+    bool is_viewmodel,
+    float scene_time,
+    uint shader_flags,
+    float3 cam_pos,
+    float3 cam_forward,
+    float3 view_dir,
+    float nov,
+    float3 refl,
+    float3 f0,
+    float2 dfg,
+    float3 energy_comp,
+    SamplerState clamp_sampler) {
+    float cc_roughness = 0.12;
+    float3 diffuse_color = albedo * (1.0 - metallic);
+    float3 env_spec = pbr_env_cubemap.SampleLevel(clamp_sampler, refl, perceptual_roughness * 4.0).rgb;
+    float spec_ao = pbr_specular_ao(nov, ao, perceptual_roughness);
+    float3 color = diffuse_color * cached_diffuse_irr + env_spec * (f0 * dfg.x + dfg.y) * energy_comp * spec_ao * 0.42;
+
+    if (clearcoat > 0.005) {
+        float2 dfg_cc = pbr_dfg_lut.SampleLevel(clamp_sampler, float2(nov, cc_roughness), 0.0);
+        float fc_ibl = (0.04 + 0.96 * pow(saturate(1.0 - nov), 5.0)) * clearcoat;
+        float3 env_cc = pbr_env_cubemap.SampleLevel(clamp_sampler, reflect(-view_dir, geo_n), cc_roughness * 4.0).rgb;
+        color = color * (1.0 - fc_ibl) + env_cc * (0.04 * dfg_cc.x + dfg_cc.y) * clearcoat * spec_ao * 0.55;
+    }
+    color += direct_spec;
 
     float em_pulse = ((shader_flags & 16u) != 0u) ? (0.20 + 1.65 * (0.5 + 0.5 * sin(scene_time * 9.5 + world_pos.z * 0.7))) : 1.0;
     if (emissive_weight > 25.0) {

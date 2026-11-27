@@ -151,6 +151,7 @@ public:
         bool split_diff_spec_enabled,
         bool surface_cache_enabled,
         bool clustered_lighting_enabled,
+        bool thin_gbuf_enabled,
         std::int32_t surface_cache_mb,
         std::uint64_t frame_id,
         LatencyMonitor& latency_monitor,
@@ -188,7 +189,7 @@ private:
     static constexpr UINT rtv_targets_per_dlss_slot = 3;
     static constexpr UINT source_slot_count = 3;
     static constexpr UINT targets_per_source_slot = 3;
-    static constexpr UINT compute_descriptors_per_source_slot = 9;
+    static constexpr UINT compute_descriptors_per_source_slot = 13;
     static constexpr UINT pbr_srv_descriptor_count = 8;
     static constexpr UINT surface_cache_max_cells = 4194304;
     static constexpr UINT max_dirty_tile_capacity = 131072;
@@ -218,6 +219,8 @@ private:
         Microsoft::WRL::ComPtr<ID3D12Resource> motion_target;
         Microsoft::WRL::ComPtr<ID3D12Resource> vis_target;
         Microsoft::WRL::ComPtr<ID3D12Resource> tile_map_target;
+        Microsoft::WRL::ComPtr<ID3D12Resource> mat_gbuf0_target;
+        Microsoft::WRL::ComPtr<ID3D12Resource> mat_gbuf1_target;
         Microsoft::WRL::ComPtr<ID3D12CommandAllocator> command_allocator;
         SceneSnapshot snapshot{};
         std::chrono::steady_clock::time_point capture_time{};

@@ -344,6 +344,7 @@ int print_status(const WindowInstance& instance) {
     const std::int32_t split_diff_spec_enabled = std::atomic_ref<std::int32_t>(state->split_diff_spec_enabled).load(std::memory_order_acquire);
     const std::int32_t surface_cache_enabled = std::atomic_ref<std::int32_t>(state->surface_cache_enabled).load(std::memory_order_acquire);
     const std::int32_t clustered_lighting_enabled = std::atomic_ref<std::int32_t>(state->clustered_lighting_enabled).load(std::memory_order_acquire);
+    const std::int32_t thin_gbuf_enabled = std::atomic_ref<std::int32_t>(state->thin_gbuf_enabled).load(std::memory_order_acquire);
     const std::int32_t surface_cache_mb = std::atomic_ref<std::int32_t>(state->surface_cache_mb).load(std::memory_order_acquire);
     const std::uint32_t sc_hits = std::atomic_ref<std::uint32_t>(state->last_sc_hits).load(std::memory_order_acquire);
     const std::uint32_t sc_misses = std::atomic_ref<std::uint32_t>(state->last_sc_misses).load(std::memory_order_acquire);
@@ -541,6 +542,7 @@ int print_status(const WindowInstance& instance) {
               << ",\"split_diff_spec_enabled\":" << (split_diff_spec_enabled ? "true" : "false")
               << ",\"surface_cache_enabled\":" << (surface_cache_enabled ? "true" : "false")
               << ",\"clustered_lighting_enabled\":" << (clustered_lighting_enabled ? "true" : "false")
+              << ",\"thin_gbuf_enabled\":" << (thin_gbuf_enabled ? "true" : "false")
               << ",\"surface_cache\":{\"capacity_mb\":" << surface_cache_mb
               << ",\"hits\":" << sc_hits
               << ",\"misses\":" << sc_misses
@@ -990,6 +992,11 @@ int apply_setting(const WindowInstance& instance, const std::wstring& key, const
         if (value == L"on" || value == L"1" || value == L"true") parameter = 1;
         else if (value == L"off" || value == L"0" || value == L"false") parameter = 0;
         else return fail("invalid_value", "Expected clustered_lighting in {on, off}");
+    } else if (key == L"thin_gbuf") {
+        command = frame_warp_lab::ControlCommand::set_thin_gbuf;
+        if (value == L"on" || value == L"1" || value == L"true") parameter = 1;
+        else if (value == L"off" || value == L"0" || value == L"false") parameter = 0;
+        else return fail("invalid_value", "Expected thin_gbuf in {on, off}");
     } else if (key == L"surface_cache_mb") {
         command = frame_warp_lab::ControlCommand::set_surface_cache_mb;
         if (value == L"4") parameter = 4;
@@ -1008,9 +1015,12 @@ int apply_setting(const WindowInstance& instance, const std::wstring& key, const
         else if (value == L"hard_shadows") parameter = 32;
         else if (value == L"normal_map") parameter = 64;
         else if (value == L"transparent") parameter = 128;
+        else if (value == L"deform") parameter = 256;
+        else if (value == L"alpha_cutout") parameter = 512;
+        else if (value == L"gi_bounce") parameter = 1024;
         else if (value == L"all") parameter = 255;
-        else if (parse_unsigned_long(value.c_str(), parsed) && parsed <= 255UL) parameter = static_cast<LPARAM>(parsed);
-        else return fail("invalid_value", "Expected shader_feature in {none, hf_checker, anim_uv, specular, moving_light, emissive, hard_shadows, normal_map, transparent, all, 0..255}");
+        else if (parse_unsigned_long(value.c_str(), parsed) && parsed <= 65535UL) parameter = static_cast<LPARAM>(parsed);
+        else return fail("invalid_value", "Expected shader_feature in {none, hf_checker, anim_uv, specular, moving_light, emissive, hard_shadows, normal_map, transparent, deform, alpha_cutout, gi_bounce, all, 0..65535}");
     } else if (key == L"pbr") {
         command = frame_warp_lab::ControlCommand::set_pbr_enabled;
         if (value == L"on" || value == L"1" || value == L"true") parameter = 1;
