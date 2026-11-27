@@ -124,11 +124,11 @@ struct PlayerControllerComponent {
     Float3 velocity{0.0f, 0.0f, 0.0f};
     float yaw = 0.0f;
     float pitch = 0.0f;
-    float eye_height = 1.62f;
-    float stand_eye_height = 1.62f;
-    float crouch_eye_height = 1.08f;
-    float capsule_radius = 0.34f;
-    float capsule_height = 1.76f;
+    float eye_height = 1.60f;
+    float stand_eye_height = 1.60f;
+    float crouch_eye_height = 1.04f;
+    float capsule_radius = 0.28f;
+    float capsule_height = 1.72f;
     float move_forward = 0.0f;
     float move_right = 0.0f;
     bool jump_pressed = false;

@@ -36,6 +36,7 @@ struct HudOverlayState {
     float target_frame_ms;
     std::uint32_t alignment_padding;
     bool tactical_hud_enabled;
+    bool tactical_radar_enabled;
     TacticalHudSnapshot tactical_hud;
 };
 

@@ -1,5 +1,21 @@
 # Development log
 
+## v0.39.1 — Smooth `de_dust2` Ramp/Mesh Capsule Collision Solver & Remove Overhead Range Radar in `de_dust2`
+
+- Fixed walking collision snags, ramp blocking, and multi-triangle seam jitter on `de_dust2`, and removed the Gun Range overhead radar map while in `de_dust2` mode (`src/tactical_range.cpp`, `assets/scripts/player_controller.lua`, `src/ecs.h`, `src/renderer.h`, `src/renderer.cpp`, `src/main.cpp`, `shaders/present.hlsl`, `CMakeLists.txt`):
+  - **Active-Edge + Opposing-Normal Jolt Capsule Sweeps (`src/tactical_range.cpp`)**:
+    - Enabled `EActiveEdgeMode::CollideOnlyWithActive` + `mActiveEdgeMovementDirection` and added a custom `OpposingShapeCastCollector` filtering out contacts whose surface normal does not oppose the sweep direction (`n.Dot(sweep_dir) >= -0.005f`), eliminating false floor-seam stalls and wall-glue when moving parallel to or away from surfaces.
+    - Replaced summed multi-triangle overlap pushing in `resolve_capsule_overlap` with a 4-iteration sequential deepest-contact Gauss-Seidel depenetration solver, eliminating `4×–10×` corner/seam push explosions.
+  - **3D Ramp/Slope Climbing & Corner Anti-Jitter in Lua (`assets/scripts/player_controller.lua`, `src/ecs.h`)**:
+    - Fixed walkable slopes (`ny >= 0.65`) being projected against horizontal wall normals — remaining motion now projects cleanly along the 3D slope plane (`slope_y = -(rem_x * nx + rem_z * nz) / ny`), climbing `de_dust2` ramps at full speed with zero sideways drift.
+    - Added 2-wall corner/crease velocity locking (`dot < 0.85`), unified downward ground-snap sweeping, steep-edge sliding, and slimmed `capsule_radius` (`0.34 → 0.28 m`, `1.72 m` height) for effortless doorway clearance.
+  - **Hide Overhead Range Map in `de_dust2` (`src/renderer.h/.cpp`, `src/main.cpp`, `shaders/present.hlsl`)**:
+    - Added `HudOverlayState::tactical_radar_enabled` (`!in_dust2_scene`), encoded into `tactical_flags.x` (`2.0` = Gun Range with radar, `1.0` = `de_dust2` without radar), and gated the top-left `MAP TGT:` radar panel in `present.hlsl` on `tactical_flags.x > 1.5`.
+- Verified zero code comments, clean ARM64 Release + Debug builds, Debug D3D12 Layer (`DEBUG_DUST2: gnd=True cols=0 errs=0`), live overlay-on screenshot confirming the top-left overhead map is removed in `de_dust2`, and full movement verification:
+  - Flat `de_dust2` cobblestone sprint (`15.22 m` forward): exact `4.80 m/s` / `7.20 m/s`, `y = 3.645 m` constant to `±0.000 m`, **`cols = 0`** (zero false seam hits).
+  - `de_dust2` sand ramp climb (`x: 21.91 → 32.65 m`): climbed **`+2.43 m`** (`y: 3.645 → 6.072 m`) at full **`7.20 m/s`** with zero sideways drift (`z = 36.094 m`), `grounded = true`, `wall = false`.
+  - Corner slide & backward breakaway: locked smoothly in sandstone corners (`±0.002 m`), immediately broke away backward at `7.20 m/s` with zero wall-glue; `de_dust2` jump (`3.645 → 4.626 → 3.645 m`) and Gun Range bench stop (`z = 2.970 m`, exact `3.25 - 0.28 m`) both verified with `0` Lua errors.
+
 ## v0.39.0 — Lua-Driven First-Person Player Camera Physics & Jolt Capsule Collision Detection (Gun Range + Full `de_dust2` Triangle Mesh)
 
 - Built a hot-reloadable (`F6`) **Lua 5.4.7 first-person player camera physics & collision controller** (`assets/scripts/player_controller.lua`) backed by **Jolt Physics** narrow-phase collision queries (`CastRay`, `CastShape` capsule sweeps, and `CollideShapeWithInternalEdgeRemoval` depenetration) across both the **Gun Range** (`BoxShape` bay floor, walls, firing bench, crates, and steel targets) and the full **`de_dust2` `54,165`-triangle `JPH::MeshShape`** (`src/ecs.h`, `src/ecs.cpp`, `src/lua_engine.h`, `src/lua_engine.cpp`, `src/tactical_range.h`, `src/tactical_range.cpp`, `src/simulation.h`, `src/runtime_state.h`, `src/main.cpp`, `src/cli.cpp`, `CMakeLists.txt`):

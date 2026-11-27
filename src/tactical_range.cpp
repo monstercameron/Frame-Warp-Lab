@@ -905,6 +905,7 @@ struct TacticalRangeSimulation::Impl {
             if (dlen < 1e-6f) {
                 return out;
             }
+            const JPH::Vec3 disp_dir(disp.x / dlen, disp.y / dlen, disp.z / dlen);
             JPH::CapsuleShape cap(std::max(0.05f, half_height), std::max(0.05f, radius));
             const JPH::RShapeCast shape_cast = JPH::RShapeCast::sFromWorldTransform(
                 &cap,
@@ -913,23 +914,49 @@ struct TacticalRangeSimulation::Impl {
                 JPH::Vec3(disp.x, disp.y, disp.z));
             JPH::ShapeCastSettings scs{};
             scs.mBackFaceModeTriangles = JPH::EBackFaceMode::CollideWithBackFaces;
+            scs.mActiveEdgeMode = JPH::EActiveEdgeMode::CollideOnlyWithActive;
+            scs.mActiveEdgeMovementDirection = disp_dir;
             scs.mReturnDeepestPoint = true;
-            JPH::ClosestHitCollisionCollector<JPH::CastShapeCollector> collector;
+
+            class OpposingShapeCastCollector final : public JPH::CastShapeCollector {
+            public:
+                explicit OpposingShapeCastCollector(JPH::Vec3 dir) : sweep_dir_(dir) {}
+                void AddHit(const JPH::ShapeCastResult& hit) override {
+                    JPH::Vec3 n = -hit.mPenetrationAxis;
+                    const float nlen = n.Length();
+                    if (nlen <= 1e-5f) return;
+                    n = n / nlen;
+                    if (n.Dot(sweep_dir_) >= -0.005f) return;
+                    if (hit.mFraction < best_fraction_) {
+                        best_fraction_ = hit.mFraction;
+                        best_point_ = hit.mContactPointOn2;
+                        best_normal_ = n;
+                        has_hit_ = true;
+                        UpdateEarlyOutFraction(hit.mFraction);
+                    }
+                }
+                bool has_hit_ = false;
+                float best_fraction_ = 2.0f;
+                JPH::Vec3 best_point_ = JPH::Vec3::sZero();
+                JPH::Vec3 best_normal_ = JPH::Vec3::sZero();
+            private:
+                JPH::Vec3 sweep_dir_;
+            };
+
+            OpposingShapeCastCollector collector(disp_dir);
             PlayerCollisionBodyFilter bfilter(casings);
             physics.GetNarrowPhaseQuery().CastShape(shape_cast, scs, JPH::RVec3::sZero(), collector, {}, {}, bfilter);
-            if (collector.HadHit()) {
+            if (collector.has_hit_) {
                 out.hit = true;
-                out.fraction = std::clamp(collector.mHit.mFraction, 0.0f, 1.0f);
+                out.fraction = std::clamp(collector.best_fraction_, 0.0f, 1.0f);
                 out.point = {
-                    static_cast<float>(collector.mHit.mContactPointOn2.GetX()),
-                    static_cast<float>(collector.mHit.mContactPointOn2.GetY()),
-                    static_cast<float>(collector.mHit.mContactPointOn2.GetZ())};
-                JPH::Vec3 n = -collector.mHit.mPenetrationAxis;
-                const float nlen = n.Length();
-                if (nlen > 1e-5f) {
-                    n = n / nlen;
-                    out.normal = {n.GetX(), n.GetY(), n.GetZ()};
-                }
+                    static_cast<float>(collector.best_point_.GetX()),
+                    static_cast<float>(collector.best_point_.GetY()),
+                    static_cast<float>(collector.best_point_.GetZ())};
+                out.normal = {
+                    collector.best_normal_.GetX(),
+                    collector.best_normal_.GetY(),
+                    collector.best_normal_.GetZ()};
             }
             return out;
         };
@@ -938,35 +965,47 @@ struct TacticalRangeSimulation::Impl {
             JPH::CapsuleShape cap(std::max(0.05f, half_height), std::max(0.05f, radius));
             JPH::CollideShapeSettings css{};
             css.mBackFaceMode = JPH::EBackFaceMode::CollideWithBackFaces;
+            css.mActiveEdgeMode = JPH::EActiveEdgeMode::CollideOnlyWithActive;
             css.mMaxSeparationDistance = 0.0f;
-            JPH::AllHitCollisionCollector<JPH::CollideShapeCollector> collector;
             PlayerCollisionBodyFilter bfilter(casings);
-            physics.GetNarrowPhaseQuery().CollideShapeWithInternalEdgeRemoval(
-                &cap,
-                JPH::Vec3::sReplicate(1.0f),
-                JPH::RMat44::sTranslation(JPH::RVec3(center.x, center.y, center.z)),
-                css,
-                JPH::RVec3::sZero(),
-                collector,
-                {},
-                {},
-                bfilter);
-            if (!collector.mHits.empty()) {
-                JPH::Vec3 total_push = JPH::Vec3::sZero();
+            JPH::RVec3 cur_center(center.x, center.y, center.z);
+            bool any_hit = false;
+            for (int iter = 0; iter < 4; ++iter) {
+                JPH::AllHitCollisionCollector<JPH::CollideShapeCollector> collector;
+                physics.GetNarrowPhaseQuery().CollideShapeWithInternalEdgeRemoval(
+                    &cap,
+                    JPH::Vec3::sReplicate(1.0f),
+                    JPH::RMat44::sTranslation(cur_center),
+                    css,
+                    JPH::RVec3::sZero(),
+                    collector,
+                    {},
+                    {},
+                    bfilter);
+                float max_depth = 0.0008f;
+                JPH::Vec3 best_dir = JPH::Vec3::sZero();
                 for (const auto& h : collector.mHits) {
-                    if (h.mPenetrationDepth <= 1e-4f) continue;
+                    if (h.mPenetrationDepth <= max_depth) continue;
                     JPH::Vec3 dir = -h.mPenetrationAxis;
                     const float len = dir.Length();
                     if (len > 1e-5f) {
-                        dir = dir / len;
-                        const float depth = std::min(h.mPenetrationDepth, 0.35f);
-                        total_push += dir * depth;
+                        max_depth = h.mPenetrationDepth;
+                        best_dir = dir / len;
                     }
                 }
+                if (best_dir.LengthSq() < 0.5f) {
+                    break;
+                }
+                const float step = std::min(max_depth + 0.001f, 0.25f);
+                cur_center += JPH::RVec3(best_dir * step);
+                any_hit = true;
+            }
+            if (any_hit) {
+                JPH::Vec3 total_push = JPH::Vec3(cur_center - JPH::RVec3(center.x, center.y, center.z));
                 const float plen = total_push.Length();
                 if (plen > 1e-4f) {
-                    if (plen > 0.40f) {
-                        total_push = total_push * (0.40f / plen);
+                    if (plen > 0.35f) {
+                        total_push = total_push * (0.35f / plen);
                     }
                     out.penetrated = true;
                     out.push = {total_push.GetX(), total_push.GetY(), total_push.GetZ()};
@@ -1244,7 +1283,7 @@ void TacticalRangeSimulation::sync_player_spawn(Float3 eye_pos, float yaw, float
         p->yaw = yaw;
         p->pitch = pitch;
         p->eye_height = stand_eye;
-        p->capsule_height = 1.76f;
+        p->capsule_height = 1.72f;
         p->grounded = true;
         p->touching_wall = false;
         p->crouched = false;

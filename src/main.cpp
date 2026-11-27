@@ -1807,6 +1807,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 }
                 const frame_warp_lab::CameraBasis range_cam = sample_active_camera(range_cut_seg);
                 hud_state.tactical_hud_enabled = true;
+                hud_state.tactical_radar_enabled = !in_dust2_scene;
                 hud_state.tactical_hud = tactical_range.hud_snapshot(range_cam);
                 runtime_state.update_tactical_range(
                     hud_state.tactical_hud,
@@ -1815,6 +1816,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                     renderer.pbr_build_time_ms());
             } else {
                 hud_state.tactical_hud_enabled = false;
+                hud_state.tactical_radar_enabled = false;
             }
             if (stepping_now) {
                 --pending_step_frames;

@@ -246,7 +246,7 @@ void write_hud_constants_simd(HudConstantsData* destination, const HudOverlaySta
     const auto& th = hud.tactical_hud;
     simd::store_float4(
         destination->tactical_flags,
-        hud.tactical_hud_enabled ? 1.0f : 0.0f,
+        hud.tactical_hud_enabled ? (hud.tactical_radar_enabled ? 2.0f : 1.0f) : 0.0f,
         th.ads_alpha,
         th.crosshair_spread,
         th.hit_marker_alpha);

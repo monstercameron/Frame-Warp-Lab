@@ -772,7 +772,7 @@ float3 composite_tactical_hud(float2 pixel_pos, float2 viewport_size, float3 col
     float radar_size = 166.0;
     float2 radar_min = float2(14.0, 14.0);
     float2 radar_max = radar_min + float2(radar_size, radar_size);
-    if (pixel_pos.x >= radar_min.x && pixel_pos.x < radar_max.x && pixel_pos.y >= radar_min.y && pixel_pos.y < radar_max.y) {
+    if (tactical_flags.x > 1.5 && pixel_pos.x >= radar_min.x && pixel_pos.x < radar_max.x && pixel_pos.y >= radar_min.y && pixel_pos.y < radar_max.y) {
         float2 rp = pixel_pos - radar_min;
         float2 rn = rp / radar_size;
         color = lerp(color, float3(0.04, 0.07, 0.09), 0.84);

@@ -8,14 +8,14 @@ local GROUND_ACCEL = 42.0
 local GROUND_FRICTION = 10.5
 local AIR_ACCEL = 12.0
 local JUMP_SPEED = 6.6
-local MAX_STEP_UP = 0.48
-local MAX_STEP_DOWN = 0.42
-local SLOPE_MIN_NY = 0.68
-local SKIN = 0.025
+local MAX_STEP_UP = 0.46
+local MAX_STEP_DOWN = 0.44
+local SLOPE_MIN_NY = 0.65
+local SKIN = 0.012
 local COYOTE_MAX = 0.10
 local JUMP_BUF_MAX = 0.10
-local STAND_CAP_H = 1.76
-local CROUCH_CAP_H = 1.22
+local STAND_CAP_H = 1.72
+local CROUCH_CAP_H = 1.15
 
 local function clamp(v, lo, hi)
     if v < lo then return lo end
@@ -54,13 +54,17 @@ local function accelerate(vx, vz, wish_x, wish_z, wish_speed, accel, dt)
 end
 
 local function try_step_up(fx, fy, fz, dx, dz, radius, cap_h)
+    local dlen = math.sqrt(dx * dx + dz * dz)
+    if dlen < 1e-4 then
+        return false, fx, fy, fz
+    end
     local half_seg = capsule_half_seg(radius, cap_h)
     local up_hit = physics.sweep_capsule(fx, capsule_center_y(fy, cap_h), fz, 0.0, MAX_STEP_UP, 0.0, radius, half_seg)
     local up_dist = MAX_STEP_UP
     if up_hit.hit then
         up_dist = math.max(0.0, up_hit.fraction * MAX_STEP_UP - SKIN)
     end
-    if up_dist < 0.06 then
+    if up_dist < 0.05 then
         return false, fx, fy, fz
     end
 
@@ -68,21 +72,22 @@ local function try_step_up(fx, fy, fz, dx, dz, radius, cap_h)
     local fwd_hit = physics.sweep_capsule(fx, capsule_center_y(high_y, cap_h), fz, dx, 0.0, dz, radius, half_seg)
     local move_frac = 1.0
     if fwd_hit.hit then
-        local dlen = math.sqrt(dx * dx + dz * dz)
-        local back = dlen > 1e-4 and (SKIN / dlen) or 0.0
-        move_frac = math.max(0.0, fwd_hit.fraction - back)
+        move_frac = math.max(0.0, fwd_hit.fraction - (SKIN / dlen))
     end
-    if move_frac < 0.05 then
+    local moved_dist = move_frac * dlen
+    if moved_dist < 0.004 then
         return false, fx, fy, fz
     end
 
     local nx = fx + dx * move_frac
     local nz = fz + dz * move_frac
-    local down_dist = up_dist + 0.08
+    local down_dist = up_dist + 0.06
     local down_hit = physics.sweep_capsule(nx, capsule_center_y(high_y, cap_h), nz, 0.0, -down_dist, 0.0, radius, half_seg)
     if down_hit.hit and down_hit.ny >= SLOPE_MIN_NY then
-        local land_y = high_y - math.max(0.0, down_hit.fraction * down_dist - 0.008)
-        return true, nx, land_y, nz
+        local land_y = high_y - down_hit.fraction * down_dist + 0.003
+        if land_y > fy + 0.008 and land_y <= fy + MAX_STEP_UP + 0.02 then
+            return true, nx, land_y, nz
+        end
     end
     return false, fx, fy, fz
 end
@@ -143,7 +148,7 @@ function M.on_update(entity_id, dt)
 
     local want_crouch = p.crouch_held
     if not want_crouch and crouched then
-        local head_ray = physics.raycast(fx, fy + CROUCH_CAP_H - 0.05, fz, 0.0, 1.0, 0.0, STAND_CAP_H - CROUCH_CAP_H + 0.12)
+        local head_ray = physics.raycast(fx, fy + CROUCH_CAP_H - 0.05, fz, 0.0, 1.0, 0.0, STAND_CAP_H - CROUCH_CAP_H + 0.10)
         if head_ray.hit then
             want_crouch = true
         end
@@ -152,6 +157,14 @@ function M.on_update(entity_id, dt)
     cap_h = crouched and CROUCH_CAP_H or STAND_CAP_H
     local target_eye = crouched and p.crouch_eye_height or p.stand_eye_height
     eye_h = eye_h + (target_eye - eye_h) * (1.0 - math.exp(-dt * 14.0))
+
+    local half_seg = capsule_half_seg(radius, cap_h)
+    local pre_ov = physics.resolve_capsule_overlap(fx, capsule_center_y(fy, cap_h), fz, radius, half_seg)
+    if pre_ov.penetrated then
+        fx = fx + pre_ov.push_x
+        fy = fy + pre_ov.push_y
+        fz = fz + pre_ov.push_z
+    end
 
     if p.jump_pressed then
         jump_buf = JUMP_BUF_MAX
@@ -189,101 +202,160 @@ function M.on_update(entity_id, dt)
         vx, vz = accelerate(vx, vz, wish_x, wish_z, math.min(wish_speed, 3.2), AIR_ACCEL, dt)
     end
 
+    local jumped_this_frame = false
     if jump_buf > 0.0 and coyote > 0.0 then
         vy = JUMP_SPEED
         grounded = false
+        jumped_this_frame = true
         coyote = 0.0
         jump_buf = 0.0
         events.emit("player.jumped", { entity = entity_id, y = fy })
     end
 
-    vy = math.max(vy + GRAVITY * dt, -28.0)
-
     local rem_x = vx * dt
+    local rem_y = 0.0
     local rem_z = vz * dt
-    local half_seg = capsule_half_seg(radius, cap_h)
+    local wall_hits = 0
+    local prev_wnx, prev_wnz = 0.0, 0.0
 
-    for iter = 1, 4 do
-        local dist_h = math.sqrt(rem_x * rem_x + rem_z * rem_z)
-        if dist_h < 1e-5 then
+    for iter = 1, 5 do
+        local dist3 = math.sqrt(rem_x * rem_x + rem_y * rem_y + rem_z * rem_z)
+        if dist3 < 1e-5 then
             break
         end
-        local sweep = physics.sweep_capsule(fx, capsule_center_y(fy, cap_h), fz, rem_x, 0.0, rem_z, radius, half_seg)
+        local sweep = physics.sweep_capsule(fx, capsule_center_y(fy, cap_h), fz, rem_x, rem_y, rem_z, radius, half_seg)
         if not sweep.hit then
             fx = fx + rem_x
+            fy = fy + rem_y
             fz = fz + rem_z
             break
         end
 
-        local safe_frac = math.max(0.0, sweep.fraction - (SKIN / dist_h))
+        local safe_frac = math.max(0.0, sweep.fraction - (SKIN / dist3))
         fx = fx + rem_x * safe_frac
+        fy = fy + rem_y * safe_frac
         fz = fz + rem_z * safe_frac
         rem_x = rem_x * (1.0 - safe_frac)
+        rem_y = rem_y * (1.0 - safe_frac)
         rem_z = rem_z * (1.0 - safe_frac)
 
-        local is_wall = sweep.ny < SLOPE_MIN_NY
-        if grounded and is_wall then
-            local stepped, sx, sy, sz = try_step_up(fx, fy, fz, rem_x, rem_z, radius, cap_h)
-            if stepped then
-                fx, fy, fz = sx, sy, sz
-                collisions = collisions + 1
-                break
+        if sweep.ny >= SLOPE_MIN_NY then
+            local slope_y = -(rem_x * sweep.nx + rem_z * sweep.nz) / math.max(sweep.ny, SLOPE_MIN_NY)
+            if slope_y > rem_y then
+                rem_y = slope_y + 0.002
+            else
+                local dot3 = rem_x * sweep.nx + rem_y * sweep.ny + rem_z * sweep.nz
+                if dot3 < 0.0 then
+                    rem_x = rem_x - sweep.nx * dot3
+                    rem_y = rem_y - sweep.ny * dot3
+                    rem_z = rem_z - sweep.nz * dot3
+                end
             end
-        end
-
-        local nlen = math.sqrt(sweep.nx * sweep.nx + sweep.nz * sweep.nz)
-        if nlen > 1e-4 then
-            local wnx = sweep.nx / nlen
-            local wnz = sweep.nz / nlen
-            local dot_rem = rem_x * wnx + rem_z * wnz
-            if dot_rem < 0.0 then
-                rem_x = rem_x - wnx * dot_rem
-                rem_z = rem_z - wnz * dot_rem
-            end
-            local dot_v = vx * wnx + vz * wnz
-            if dot_v < 0.0 then
-                vx = vx - wnx * dot_v
-                vz = vz - wnz * dot_v
-            end
-            fx = fx + wnx * 0.004
-            fz = fz + wnz * 0.004
+            collisions = collisions + 1
         else
-            rem_x = 0.0
-            rem_z = 0.0
+            local stepped = false
+            if grounded then
+                local sx, sy, sz
+                stepped, sx, sy, sz = try_step_up(fx, fy, fz, rem_x, rem_z, radius, cap_h)
+                if stepped then
+                    fx, fy, fz = sx, sy, sz
+                    collisions = collisions + 1
+                    break
+                end
+            end
+
+            local nlen = math.sqrt(sweep.nx * sweep.nx + sweep.nz * sweep.nz)
+            if nlen > 1e-4 then
+                local wnx = sweep.nx / nlen
+                local wnz = sweep.nz / nlen
+                local dot_rem = rem_x * wnx + rem_z * wnz
+                if dot_rem < 0.0 then
+                    rem_x = rem_x - wnx * dot_rem
+                    rem_z = rem_z - wnz * dot_rem
+                end
+                local dot_v = vx * wnx + vz * wnz
+                if dot_v < 0.0 then
+                    vx = vx - wnx * dot_v
+                    vz = vz - wnz * dot_v
+                end
+                if wall_hits > 0 and (wnx * prev_wnx + wnz * prev_wnz) < 0.85 then
+                    if (rem_x * prev_wnx + rem_z * prev_wnz) < 0.0 then
+                        rem_x = 0.0
+                        rem_z = 0.0
+                        vx = 0.0
+                        vz = 0.0
+                    end
+                end
+                prev_wnx = wnx
+                prev_wnz = wnz
+                wall_hits = wall_hits + 1
+                fx = fx + wnx * 0.002
+                fz = fz + wnz * 0.002
+            else
+                rem_x = 0.0
+                rem_z = 0.0
+            end
+            rem_y = 0.0
+            touching_wall = true
+            collisions = collisions + 1
         end
-        touching_wall = true
-        collisions = collisions + 1
     end
 
     local was_grounded = grounded
     local prev_vy = vy
-    local dy = vy * dt
-    local v_sweep = physics.sweep_capsule(fx, capsule_center_y(fy, cap_h), fz, 0.0, dy, 0.0, radius, half_seg)
-    if v_sweep.hit then
-        local abs_dy = math.abs(dy)
-        local v_safe = abs_dy > 1e-5 and math.max(0.0, v_sweep.fraction - (SKIN / abs_dy)) or 0.0
-        fy = fy + dy * v_safe
-        if dy < 0.0 and v_sweep.ny >= SLOPE_MIN_NY then
+
+    if grounded and not jumped_this_frame then
+        local probe_up = 0.04
+        local total_down = probe_up + MAX_STEP_DOWN
+        local snap = physics.sweep_capsule(fx, capsule_center_y(fy + probe_up, cap_h), fz, 0.0, -total_down, 0.0, radius, half_seg)
+        if snap.hit and snap.ny >= SLOPE_MIN_NY then
+            fy = (fy + probe_up) - snap.fraction * total_down + 0.003
             grounded = true
             vy = 0.0
-            collisions = collisions + 1
-        elseif dy > 0.0 and v_sweep.ny < -0.5 then
-            vy = 0.0
-            collisions = collisions + 1
         else
             grounded = false
+            vy = math.max(vy + GRAVITY * dt, -28.0)
+            local dy = vy * dt
+            local fall_sweep = physics.sweep_capsule(fx, capsule_center_y(fy, cap_h), fz, 0.0, dy, 0.0, radius, half_seg)
+            if fall_sweep.hit then
+                fy = fy + dy * fall_sweep.fraction + 0.003
+                if fall_sweep.ny >= SLOPE_MIN_NY then
+                    grounded = true
+                    vy = 0.0
+                    collisions = collisions + 1
+                else
+                    vx = vx + fall_sweep.nx * 2.4 * dt
+                    vz = vz + fall_sweep.nz * 2.4 * dt
+                end
+            else
+                fy = fy + dy
+            end
         end
     else
-        fy = fy + dy
-        grounded = false
-    end
-
-    if was_grounded and not grounded and vy <= 0.0 then
-        local snap = physics.sweep_capsule(fx, capsule_center_y(fy, cap_h), fz, 0.0, -MAX_STEP_DOWN, 0.0, radius, half_seg)
-        if snap.hit and snap.ny >= SLOPE_MIN_NY then
-            fy = fy - math.max(0.0, snap.fraction * MAX_STEP_DOWN - 0.008)
-            grounded = true
-            vy = 0.0
+        vy = math.max(vy + GRAVITY * dt, -28.0)
+        local dy = vy * dt
+        local v_sweep = physics.sweep_capsule(fx, capsule_center_y(fy, cap_h), fz, 0.0, dy, 0.0, radius, half_seg)
+        if v_sweep.hit then
+            if dy < 0.0 then
+                fy = fy + dy * v_sweep.fraction + 0.003
+                if v_sweep.ny >= SLOPE_MIN_NY then
+                    grounded = true
+                    vy = 0.0
+                    collisions = collisions + 1
+                else
+                    grounded = false
+                    vx = vx + v_sweep.nx * 2.4 * dt
+                    vz = vz + v_sweep.nz * 2.4 * dt
+                end
+            else
+                fy = fy + dy * math.max(0.0, v_sweep.fraction - (SKIN / math.max(math.abs(dy), 1e-4)))
+                vy = 0.0
+                grounded = false
+                collisions = collisions + 1
+            end
+        else
+            fy = fy + dy
+            grounded = false
         end
     end
 
@@ -299,7 +371,7 @@ function M.on_update(entity_id, dt)
     end
 
     if fy < -15.0 then
-        fy = 1.0
+        fy = 2.0
         vy = 0.0
         grounded = false
     end
@@ -318,8 +390,8 @@ function M.on_update(entity_id, dt)
         local freq = crouched and 6.5 or (p.sprint_held and 11.5 or 9.2)
         step_phase = step_phase + dt * freq
         local amp = clamp(horiz_speed / WALK_SPEED, 0.0, 1.35)
-        local target_by = math.sin(step_phase * 2.0) * 0.032 * amp
-        local target_bx = math.cos(step_phase) * 0.018 * amp
+        local target_by = math.sin(step_phase * 2.0) * 0.028 * amp
+        local target_bx = math.cos(step_phase) * 0.015 * amp
         bob_y = bob_y + (target_by - bob_y) * (1.0 - math.exp(-dt * 18.0))
         bob_x = bob_x + (target_bx - bob_x) * (1.0 - math.exp(-dt * 18.0))
     else
