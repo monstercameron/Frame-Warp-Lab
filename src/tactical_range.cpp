@@ -3,6 +3,7 @@
 #include "event_bus.h"
 #include "job_system.h"
 #include "lua_engine.h"
+#include "range_mesh.h"
 
 #include <Jolt/Jolt.h>
 #include <Jolt/RegisterTypes.h>
@@ -12,11 +13,17 @@
 #include <Jolt/Physics/PhysicsSettings.h>
 #include <Jolt/Physics/PhysicsSystem.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
+#include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
 #include <Jolt/Physics/Collision/Shape/CylinderShape.h>
+#include <Jolt/Physics/Collision/Shape/MeshShape.h>
 #include <Jolt/Physics/Collision/RayCast.h>
 #include <Jolt/Physics/Collision/CastResult.h>
+#include <Jolt/Physics/Collision/ShapeCast.h>
+#include <Jolt/Physics/Collision/CollideShape.h>
+#include <Jolt/Physics/Collision/CollisionCollectorImpl.h>
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
 #include <Jolt/Physics/Body/BodyActivationListener.h>
+#include <Jolt/Physics/Body/BodyFilter.h>
 #include <Jolt/Physics/Constraints/HingeConstraint.h>
 
 #include <algorithm>
@@ -97,6 +104,24 @@ struct TargetPhysicsBinding {
 struct CasingPhysicsBinding {
     EntityHandle entity = k_invalid_entity;
     JPH::BodyID body_id{};
+};
+
+class PlayerCollisionBodyFilter final : public JPH::BodyFilter {
+public:
+    explicit PlayerCollisionBodyFilter(const std::array<CasingPhysicsBinding, k_range_casing_count>& casings)
+        : casings_(casings) {}
+
+    bool ShouldCollide(const JPH::BodyID& id) const override {
+        for (const auto& c : casings_) {
+            if (!c.body_id.IsInvalid() && c.body_id == id) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+private:
+    const std::array<CasingPhysicsBinding, k_range_casing_count>& casings_;
 };
 
 Mat4x4 identity_mat4() {
@@ -307,6 +332,11 @@ struct TacticalRangeSimulation::Impl {
 
     std::array<TargetPhysicsBinding, k_range_target_count> targets{};
     std::array<CasingPhysicsBinding, k_range_casing_count> casings{};
+    std::vector<JPH::BodyID> range_static_bodies;
+    JPH::BodyID dust2_mesh_body{};
+    bool dust2_world_active = false;
+    bool range_bodies_in_world = true;
+    bool dust2_body_in_world = false;
 
     bool hero_pistol_gltf_loaded = false;
     Float3 pistol_slide_offset{0.0f, 0.0f, 0.0f};
@@ -364,7 +394,106 @@ struct TacticalRangeSimulation::Impl {
             Layers::NON_MOVING);
         bcs.mFriction = 0.65f;
         bcs.mRestitution = 0.25f;
-        bi.CreateAndAddBody(bcs, JPH::EActivation::DontActivate);
+        const JPH::BodyID id = bi.CreateAndAddBody(bcs, JPH::EActivation::DontActivate);
+        range_static_bodies.push_back(id);
+    }
+
+    void build_dust2_collision_mesh(
+        const std::vector<RangeVertex>& vertices,
+        const std::vector<std::uint32_t>& indices,
+        std::uint32_t lod0_index_count) {
+        if (vertices.empty() || lod0_index_count < 3U || lod0_index_count > indices.size()) {
+            return;
+        }
+        auto& bi = physics.GetBodyInterface();
+        if (!dust2_mesh_body.IsInvalid()) {
+            if (dust2_body_in_world) {
+                bi.RemoveBody(dust2_mesh_body);
+                dust2_body_in_world = false;
+            }
+            bi.DestroyBody(dust2_mesh_body);
+            dust2_mesh_body = JPH::BodyID();
+        }
+        JPH::VertexList jverts;
+        jverts.reserve(vertices.size());
+        for (const auto& v : vertices) {
+            jverts.push_back(JPH::Float3(v.px, v.py, v.pz));
+        }
+        JPH::IndexedTriangleList jtris;
+        jtris.reserve(lod0_index_count / 3U);
+        for (std::uint32_t i = 0; i + 2U < lod0_index_count; i += 3U) {
+            const std::uint32_t i0 = indices[i + 0U];
+            const std::uint32_t i1 = indices[i + 1U];
+            const std::uint32_t i2 = indices[i + 2U];
+            if (i0 < vertices.size() && i1 < vertices.size() && i2 < vertices.size() && i0 != i1 && i1 != i2 && i2 != i0) {
+                jtris.push_back(JPH::IndexedTriangle(i0, i1, i2, 0));
+            }
+        }
+        if (jtris.empty()) {
+            return;
+        }
+        JPH::MeshShapeSettings mesh_settings(jverts, jtris);
+        auto shape_res = mesh_settings.Create();
+        if (shape_res.HasError()) {
+            return;
+        }
+        JPH::BodyCreationSettings bcs(
+            shape_res.Get(),
+            JPH::RVec3::sZero(),
+            JPH::Quat::sIdentity(),
+            JPH::EMotionType::Static,
+            Layers::NON_MOVING);
+        bcs.mFriction = 0.70f;
+        bcs.mRestitution = 0.10f;
+        JPH::Body* b = bi.CreateBody(bcs);
+        if (b != nullptr) {
+            dust2_mesh_body = b->GetID();
+            if (dust2_world_active) {
+                bi.AddBody(dust2_mesh_body, JPH::EActivation::DontActivate);
+                dust2_body_in_world = true;
+                physics.OptimizeBroadPhase();
+            }
+        }
+    }
+
+    void set_active_collision_world(bool is_dust2) {
+        if (dust2_world_active == is_dust2) {
+            return;
+        }
+        dust2_world_active = is_dust2;
+        auto& bi = physics.GetBodyInterface();
+        if (is_dust2) {
+            if (range_bodies_in_world) {
+                for (const auto& id : range_static_bodies) {
+                    if (!id.IsInvalid()) bi.RemoveBody(id);
+                }
+                for (const auto& t : targets) {
+                    if (!t.anchor_id.IsInvalid()) bi.RemoveBody(t.anchor_id);
+                    if (!t.plate_id.IsInvalid()) bi.RemoveBody(t.plate_id);
+                }
+                range_bodies_in_world = false;
+            }
+            if (!dust2_mesh_body.IsInvalid() && !dust2_body_in_world) {
+                bi.AddBody(dust2_mesh_body, JPH::EActivation::DontActivate);
+                dust2_body_in_world = true;
+            }
+        } else {
+            if (!dust2_mesh_body.IsInvalid() && dust2_body_in_world) {
+                bi.RemoveBody(dust2_mesh_body);
+                dust2_body_in_world = false;
+            }
+            if (!range_bodies_in_world) {
+                for (const auto& id : range_static_bodies) {
+                    if (!id.IsInvalid()) bi.AddBody(id, JPH::EActivation::DontActivate);
+                }
+                for (const auto& t : targets) {
+                    if (!t.anchor_id.IsInvalid()) bi.AddBody(t.anchor_id, JPH::EActivation::DontActivate);
+                    if (!t.plate_id.IsInvalid()) bi.AddBody(t.plate_id, JPH::EActivation::Activate);
+                }
+                range_bodies_in_world = true;
+            }
+        }
+        physics.OptimizeBroadPhase();
     }
 
     EntityHandle spawn_render_entity(const char* name, const char* tag, const char* uri, RangeMeshKind mesh, bool visible, bool viewmodel) {
@@ -398,9 +527,11 @@ struct TacticalRangeSimulation::Impl {
         add_static_box({-4.2f, 0.60f, 19.2f}, {0.75f, 0.60f, 0.75f});
         add_static_box({4.0f, 0.60f, 19.4f}, {0.75f, 0.60f, 0.75f});
 
-        player_entity = ecs.create_entity("player", "player", "");
+        player_entity = ecs.create_entity("player", "player", "assets/scripts/player_controller.lua");
         ecs.transforms().emplace(player_entity, TransformComponent{});
         ecs.healths().emplace(player_entity, HealthComponent{});
+        ecs.players().emplace(player_entity, PlayerControllerComponent{});
+        ecs.scripts().emplace(player_entity, ScriptComponent{"player_controller.lua", true, false});
 
         range_world_entity = spawn_render_entity("range_architecture", "environment", "procedural://tactical_range_bay", RangeMeshKind::static_world, true, false);
 
@@ -737,6 +868,112 @@ struct TacticalRangeSimulation::Impl {
             headshots = 0;
             score = 0;
         };
+        cb.raycast_world = [this](Float3 origin, Float3 dir, float max_dist) -> LuaRaycastResult {
+            LuaRaycastResult out{};
+            const float dlen = std::sqrt(dir.x * dir.x + dir.y * dir.y + dir.z * dir.z);
+            if (dlen < 1e-5f || max_dist <= 1e-4f) {
+                return out;
+            }
+            const Float3 nd{dir.x / dlen, dir.y / dlen, dir.z / dlen};
+            const JPH::RRayCast ray{
+                JPH::RVec3(origin.x, origin.y, origin.z),
+                JPH::Vec3(nd.x * max_dist, nd.y * max_dist, nd.z * max_dist)};
+            JPH::RayCastSettings rcs{};
+            rcs.mBackFaceModeTriangles = JPH::EBackFaceMode::CollideWithBackFaces;
+            JPH::ClosestHitCollisionCollector<JPH::CastRayCollector> collector;
+            PlayerCollisionBodyFilter bfilter(casings);
+            physics.GetNarrowPhaseQuery().CastRay(ray, rcs, collector, {}, {}, bfilter);
+            if (collector.HadHit()) {
+                out.hit = true;
+                out.dist = collector.mHit.mFraction * max_dist;
+                const JPH::RVec3 hp = ray.GetPointOnRay(collector.mHit.mFraction);
+                out.point = {static_cast<float>(hp.GetX()), static_cast<float>(hp.GetY()), static_cast<float>(hp.GetZ())};
+                JPH::BodyLockRead lock(physics.GetBodyLockInterface(), collector.mHit.mBodyID);
+                if (lock.Succeeded()) {
+                    JPH::Vec3 wn = lock.GetBody().GetWorldSpaceSurfaceNormal(collector.mHit.mSubShapeID2, hp);
+                    if (wn.Dot(JPH::Vec3(nd.x, nd.y, nd.z)) > 0.0f) {
+                        wn = -wn;
+                    }
+                    out.normal = {wn.GetX(), wn.GetY(), wn.GetZ()};
+                }
+            }
+            return out;
+        };
+        cb.sweep_capsule = [this](Float3 center, Float3 disp, float radius, float half_height) -> LuaCapsuleSweepResult {
+            LuaCapsuleSweepResult out{};
+            const float dlen = std::sqrt(disp.x * disp.x + disp.y * disp.y + disp.z * disp.z);
+            if (dlen < 1e-6f) {
+                return out;
+            }
+            JPH::CapsuleShape cap(std::max(0.05f, half_height), std::max(0.05f, radius));
+            const JPH::RShapeCast shape_cast = JPH::RShapeCast::sFromWorldTransform(
+                &cap,
+                JPH::Vec3::sReplicate(1.0f),
+                JPH::RMat44::sTranslation(JPH::RVec3(center.x, center.y, center.z)),
+                JPH::Vec3(disp.x, disp.y, disp.z));
+            JPH::ShapeCastSettings scs{};
+            scs.mBackFaceModeTriangles = JPH::EBackFaceMode::CollideWithBackFaces;
+            scs.mReturnDeepestPoint = true;
+            JPH::ClosestHitCollisionCollector<JPH::CastShapeCollector> collector;
+            PlayerCollisionBodyFilter bfilter(casings);
+            physics.GetNarrowPhaseQuery().CastShape(shape_cast, scs, JPH::RVec3::sZero(), collector, {}, {}, bfilter);
+            if (collector.HadHit()) {
+                out.hit = true;
+                out.fraction = std::clamp(collector.mHit.mFraction, 0.0f, 1.0f);
+                out.point = {
+                    static_cast<float>(collector.mHit.mContactPointOn2.GetX()),
+                    static_cast<float>(collector.mHit.mContactPointOn2.GetY()),
+                    static_cast<float>(collector.mHit.mContactPointOn2.GetZ())};
+                JPH::Vec3 n = -collector.mHit.mPenetrationAxis;
+                const float nlen = n.Length();
+                if (nlen > 1e-5f) {
+                    n = n / nlen;
+                    out.normal = {n.GetX(), n.GetY(), n.GetZ()};
+                }
+            }
+            return out;
+        };
+        cb.resolve_capsule_overlap = [this](Float3 center, float radius, float half_height) -> LuaOverlapResult {
+            LuaOverlapResult out{};
+            JPH::CapsuleShape cap(std::max(0.05f, half_height), std::max(0.05f, radius));
+            JPH::CollideShapeSettings css{};
+            css.mBackFaceMode = JPH::EBackFaceMode::CollideWithBackFaces;
+            css.mMaxSeparationDistance = 0.0f;
+            JPH::AllHitCollisionCollector<JPH::CollideShapeCollector> collector;
+            PlayerCollisionBodyFilter bfilter(casings);
+            physics.GetNarrowPhaseQuery().CollideShapeWithInternalEdgeRemoval(
+                &cap,
+                JPH::Vec3::sReplicate(1.0f),
+                JPH::RMat44::sTranslation(JPH::RVec3(center.x, center.y, center.z)),
+                css,
+                JPH::RVec3::sZero(),
+                collector,
+                {},
+                {},
+                bfilter);
+            if (!collector.mHits.empty()) {
+                JPH::Vec3 total_push = JPH::Vec3::sZero();
+                for (const auto& h : collector.mHits) {
+                    if (h.mPenetrationDepth <= 1e-4f) continue;
+                    JPH::Vec3 dir = -h.mPenetrationAxis;
+                    const float len = dir.Length();
+                    if (len > 1e-5f) {
+                        dir = dir / len;
+                        const float depth = std::min(h.mPenetrationDepth, 0.35f);
+                        total_push += dir * depth;
+                    }
+                }
+                const float plen = total_push.Length();
+                if (plen > 1e-4f) {
+                    if (plen > 0.40f) {
+                        total_push = total_push * (0.40f / plen);
+                    }
+                    out.penetrated = true;
+                    out.push = {total_push.GetX(), total_push.GetY(), total_push.GetZ()};
+                }
+            }
+            return out;
+        };
         lua.initialize(&ecs, &events, std::move(cb));
     }
 
@@ -761,7 +998,10 @@ struct TacticalRangeSimulation::Impl {
         range_time += dt;
 
         if (auto* w = ecs.weapons().try_get(weapon_entity)) {
-            if (has_prev_camera_pos && dt > 1e-5f) {
+            const PlayerControllerComponent* pl = ecs.players().try_get(player_entity);
+            if (pl != nullptr && pl->manual_active) {
+                w->move_speed += (std::min(pl->horizontal_speed, 8.0f) - w->move_speed) * (1.0f - std::exp(-dt * 16.0f));
+            } else if (has_prev_camera_pos && dt > 1e-5f) {
                 const float dx = camera.position.x - prev_camera_pos.x;
                 const float dz = camera.position.z - prev_camera_pos.z;
                 const float inst_speed = std::sqrt(dx * dx + dz * dz) / dt;
@@ -981,6 +1221,92 @@ void TacticalRangeSimulation::reset() {
     impl_->reset_state();
 }
 
+void TacticalRangeSimulation::set_dust2_collision_mesh(
+    const std::vector<RangeVertex>& vertices,
+    const std::vector<std::uint32_t>& indices,
+    std::uint32_t lod0_index_count) {
+    impl_->build_dust2_collision_mesh(vertices, indices, lod0_index_count);
+}
+
+void TacticalRangeSimulation::set_active_world(bool is_dust2) {
+    impl_->set_active_collision_world(is_dust2);
+}
+
+void TacticalRangeSimulation::sync_player_spawn(Float3 eye_pos, float yaw, float pitch, bool is_dust2) {
+    impl_->set_active_collision_world(is_dust2);
+    if (auto* p = impl_->ecs.players().try_get(impl_->player_entity)) {
+        const float stand_eye = p->stand_eye_height;
+        const float spawn_feet_y = is_dust2
+            ? (eye_pos.y - stand_eye + 0.04f)
+            : std::max(0.02f, eye_pos.y - stand_eye + 0.03f);
+        p->feet_pos = {eye_pos.x, spawn_feet_y, eye_pos.z};
+        p->velocity = {0.0f, 0.0f, 0.0f};
+        p->yaw = yaw;
+        p->pitch = pitch;
+        p->eye_height = stand_eye;
+        p->capsule_height = 1.76f;
+        p->grounded = true;
+        p->touching_wall = false;
+        p->crouched = false;
+        p->is_dust2 = is_dust2;
+        p->coyote_timer = 0.10f;
+        p->jump_buffer_timer = 0.0f;
+        p->step_phase = 0.0f;
+        p->bob_x = 0.0f;
+        p->bob_y = 0.0f;
+        p->landing_dip = 0.0f;
+        p->horizontal_speed = 0.0f;
+        p->collision_count = 0;
+    }
+    EventPayload ev{};
+    if (const auto* p = impl_->ecs.players().try_get(impl_->player_entity)) {
+        ev.set_number("feet_x", p->feet_pos.x);
+        ev.set_number("feet_y", p->feet_pos.y);
+        ev.set_number("feet_z", p->feet_pos.z);
+    }
+    impl_->events.emit("player.teleport", ev);
+}
+
+void TacticalRangeSimulation::set_player_input(
+    const ManualCameraInput& input,
+    float yaw,
+    float pitch,
+    bool manual_active,
+    bool is_dust2) {
+    impl_->set_active_collision_world(is_dust2);
+    if (auto* p = impl_->ecs.players().try_get(impl_->player_entity)) {
+        p->move_forward = input.forward_axis;
+        p->move_right = input.right_axis;
+        if (input.jump_pressed) {
+            p->jump_pressed = true;
+        }
+        p->crouch_held = input.crouch_held;
+        p->sprint_held = input.sprint_held;
+        p->yaw = yaw;
+        p->pitch = pitch;
+        p->manual_active = manual_active;
+        p->is_dust2 = is_dust2;
+    }
+}
+
+Float3 TacticalRangeSimulation::player_camera_position() const {
+    const PlayerControllerComponent* p = impl_->ecs.players().try_get(impl_->player_entity);
+    if (p == nullptr) {
+        return {0.0f, 1.42f, 1.2f};
+    }
+    const WeaponComponent* w = impl_->ecs.weapons().try_get(impl_->weapon_entity);
+    const float ads_atten = 1.0f - 0.78f * (w != nullptr ? w->ads_alpha : 0.0f);
+    const float cos_y = std::cos(p->yaw);
+    const float sin_y = std::sin(p->yaw);
+    const float bx = p->bob_x * ads_atten;
+    const float by = p->bob_y * ads_atten - p->landing_dip;
+    return {
+        p->feet_pos.x + cos_y * bx,
+        p->feet_pos.y + p->eye_height + by,
+        p->feet_pos.z - sin_y * bx,
+    };
+}
+
 void TacticalRangeSimulation::set_ads_requested(bool active) {
     EventPayload ev{};
     ev.set_bool("active", active);
@@ -1072,6 +1398,7 @@ EcsLuaTelemetry TacticalRangeSimulation::ecs_lua_telemetry() const {
     const EcsWorldStats es = impl_->ecs.stats();
     const LuaEngineStats ls = impl_->lua.stats();
     const WeaponComponent* w = impl_->ecs.weapons().try_get(impl_->weapon_entity);
+    const PlayerControllerComponent* p = impl_->ecs.players().try_get(impl_->player_entity);
     return EcsLuaTelemetry{
         es.entity_count,
         es.renderable_count,
@@ -1091,6 +1418,12 @@ EcsLuaTelemetry TacticalRangeSimulation::ecs_lua_telemetry() const {
         impl_->last_ecs_sync_us,
         w != nullptr ? w->current_spread_rad * 1000.0f : 0.0f,
         w != nullptr ? w->last_shot_offset_rad * 1000.0f : 0.0f,
+        p != nullptr ? p->grounded : true,
+        p != nullptr ? p->touching_wall : false,
+        p != nullptr ? p->crouched : false,
+        p != nullptr ? p->horizontal_speed : 0.0f,
+        p != nullptr ? p->collision_count : 0,
+        p != nullptr ? p->feet_pos : Float3{0.0f, 0.0f, 1.2f},
     };
 }
 

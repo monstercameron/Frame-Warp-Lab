@@ -303,6 +303,14 @@ int print_status(const WindowInstance& instance) {
     const std::int64_t mt_pbr_build_ms = std::atomic_ref<std::int64_t>(state->mt_pbr_build_ms).load(std::memory_order_acquire);
     const std::int32_t tactical_spread_mrad_x100 = std::atomic_ref<std::int32_t>(state->tactical_spread_mrad_x100).load(std::memory_order_acquire);
     const std::int32_t tactical_shot_offset_mrad_x100 = std::atomic_ref<std::int32_t>(state->tactical_shot_offset_mrad_x100).load(std::memory_order_acquire);
+    const std::int32_t player_grounded = std::atomic_ref<std::int32_t>(state->player_grounded).load(std::memory_order_acquire);
+    const std::int32_t player_touching_wall = std::atomic_ref<std::int32_t>(state->player_touching_wall).load(std::memory_order_acquire);
+    const std::int32_t player_crouched = std::atomic_ref<std::int32_t>(state->player_crouched).load(std::memory_order_acquire);
+    const std::int32_t player_speed_cm_s = std::atomic_ref<std::int32_t>(state->player_speed_cm_s).load(std::memory_order_acquire);
+    const std::int32_t player_collisions = std::atomic_ref<std::int32_t>(state->player_collisions).load(std::memory_order_acquire);
+    const std::int32_t player_feet_x_mm = std::atomic_ref<std::int32_t>(state->player_feet_x_mm).load(std::memory_order_acquire);
+    const std::int32_t player_feet_y_mm = std::atomic_ref<std::int32_t>(state->player_feet_y_mm).load(std::memory_order_acquire);
+    const std::int32_t player_feet_z_mm = std::atomic_ref<std::int32_t>(state->player_feet_z_mm).load(std::memory_order_acquire);
     const std::int32_t overlay_enabled = std::atomic_ref<std::int32_t>(state->overlay_enabled).load(std::memory_order_acquire);
     const std::int32_t flash_indicator_enabled = std::atomic_ref<std::int32_t>(state->flash_indicator_enabled).load(std::memory_order_acquire);
     const std::int32_t raw_input_enabled = std::atomic_ref<std::int32_t>(state->raw_input_enabled).load(std::memory_order_acquire);
@@ -489,6 +497,14 @@ int print_status(const WindowInstance& instance) {
               << ",\"hero_pbr_textures_loaded\":" << (hero_pbr_textures_loaded ? "true" : "false")
               << ",\"spread_mrad\":" << std::fixed << std::setprecision(2) << (static_cast<double>(tactical_spread_mrad_x100) / 100.0)
               << ",\"last_shot_offset_mrad\":" << (static_cast<double>(tactical_shot_offset_mrad_x100) / 100.0)
+              << "},\"player_physics\":{\"grounded\":" << (player_grounded ? "true" : "false")
+              << ",\"touching_wall\":" << (player_touching_wall ? "true" : "false")
+              << ",\"crouched\":" << (player_crouched ? "true" : "false")
+              << ",\"speed_m_s\":" << std::fixed << std::setprecision(2) << (static_cast<double>(player_speed_cm_s) / 100.0)
+              << ",\"collisions\":" << player_collisions
+              << ",\"feet_m\":[" << std::fixed << std::setprecision(3) << (static_cast<double>(player_feet_x_mm) / 1000.0)
+              << "," << (static_cast<double>(player_feet_y_mm) / 1000.0)
+              << "," << (static_cast<double>(player_feet_z_mm) / 1000.0) << "]"
               << "},\"ecs\":{\"entities\":" << ecs_entity_count
               << ",\"renderables\":" << ecs_renderable_count
               << ",\"physics_bodies\":" << ecs_physics_count
@@ -1112,6 +1128,13 @@ int apply_setting(const WindowInstance& instance, const std::wstring& key, const
         }
         command = frame_warp_lab::ControlCommand::set_fixed_dt_us;
         parameter = static_cast<LPARAM>(parsed);
+    } else if (key == L"player_input") {
+        unsigned long parsed = 0;
+        if (!parse_unsigned_long(value.c_str(), parsed) || parsed > 127UL) {
+            return fail("invalid_value", "Expected player_input bitmask in [0, 127]");
+        }
+        command = frame_warp_lab::ControlCommand::set_player_test_input;
+        parameter = static_cast<LPARAM>(parsed);
     } else {
         return fail("unknown_setting", "Supported settings are: mode, dlssg_mult, pacer, target_fps, async_gpu, vrs, selective_tiles, tile_budget, tile_policy, auto_tile_budget, cache_sharpen, coarse_fallback, subtile_interleave, shader_feature, render_scale, upscale_filter, drs, drs_min, drs_max, fixed_dt_us, adaptive, adaptive_dlssg, instrumentation, divider, vsync, view, path, stress, overlay, flash");
     }
@@ -1474,7 +1497,8 @@ int wmain(int argument_count, wchar_t** arguments) {
         else if (ev_name == L"reload" || ev_name == L"weapon.reload_requested") code = 2;
         else if (ev_name == L"reset_targets" || ev_name == L"target.force_reset") code = 3;
         else if (ev_name == L"reset_range" || ev_name == L"range.reset") code = 4;
-        else return fail("invalid_event", "Expected event in {fire, reload, reset_targets, reset_range}");
+        else if (ev_name == L"player_jump" || ev_name == L"player.jump") code = 5;
+        else return fail("invalid_event", "Expected event in {fire, reload, reset_targets, reset_range, player_jump}");
         if (!PostMessageW(matched_instance->window, frame_warp_lab::control_message, static_cast<WPARAM>(frame_warp_lab::ControlCommand::emit_range_event), code)) {
             return fail("control_failed", "Could not dispatch range event");
         }

@@ -10,6 +10,25 @@
 
 namespace frame_warp_lab {
 
+struct LuaRaycastResult {
+    bool hit = false;
+    float dist = 0.0f;
+    Float3 point{0.0f, 0.0f, 0.0f};
+    Float3 normal{0.0f, 1.0f, 0.0f};
+};
+
+struct LuaCapsuleSweepResult {
+    bool hit = false;
+    float fraction = 1.0f;
+    Float3 point{0.0f, 0.0f, 0.0f};
+    Float3 normal{0.0f, 1.0f, 0.0f};
+};
+
+struct LuaOverlapResult {
+    bool penetrated = false;
+    Float3 push{0.0f, 0.0f, 0.0f};
+};
+
 struct LuaHostCallbacks {
     std::function<void(EntityHandle, Float3, Float3)> apply_target_impulse;
     std::function<void(EntityHandle, bool)> set_target_motor_upright;
@@ -19,6 +38,9 @@ struct LuaHostCallbacks {
     std::function<void(bool)> trigger_hit_marker;
     std::function<void(std::int32_t, bool)> add_score;
     std::function<void()> reset_score;
+    std::function<LuaRaycastResult(Float3, Float3, float)> raycast_world;
+    std::function<LuaCapsuleSweepResult(Float3, Float3, float, float)> sweep_capsule;
+    std::function<LuaOverlapResult(Float3, float, float)> resolve_capsule_overlap;
 };
 
 struct LuaEngineStats {

@@ -41,6 +41,7 @@ bool EcsWorld::destroy_entity(EntityHandle handle) {
     targets_.remove(handle);
     casings_.remove(handle);
     healths_.remove(handle);
+    players_.remove(handle);
     scripts_.remove(handle);
 
     alive_[idx] = false;
@@ -71,6 +72,7 @@ void EcsWorld::clear() {
     targets_.clear();
     casings_.clear();
     healths_.clear();
+    players_.clear();
     scripts_.clear();
     generations_.clear();
     alive_.clear();

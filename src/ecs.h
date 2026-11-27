@@ -119,6 +119,36 @@ struct HealthComponent {
     std::int32_t max_armor = 100;
 };
 
+struct PlayerControllerComponent {
+    Float3 feet_pos{0.0f, 0.0f, 1.2f};
+    Float3 velocity{0.0f, 0.0f, 0.0f};
+    float yaw = 0.0f;
+    float pitch = 0.0f;
+    float eye_height = 1.62f;
+    float stand_eye_height = 1.62f;
+    float crouch_eye_height = 1.08f;
+    float capsule_radius = 0.34f;
+    float capsule_height = 1.76f;
+    float move_forward = 0.0f;
+    float move_right = 0.0f;
+    bool jump_pressed = false;
+    bool crouch_held = false;
+    bool sprint_held = false;
+    bool manual_active = true;
+    bool is_dust2 = false;
+    bool grounded = true;
+    bool touching_wall = false;
+    bool crouched = false;
+    float coyote_timer = 0.0f;
+    float jump_buffer_timer = 0.0f;
+    float step_phase = 0.0f;
+    float bob_x = 0.0f;
+    float bob_y = 0.0f;
+    float landing_dip = 0.0f;
+    float horizontal_speed = 0.0f;
+    std::int32_t collision_count = 0;
+};
+
 struct ScriptComponent {
     std::string script_name;
     bool enabled = true;
@@ -234,6 +264,8 @@ public:
     const SparseComponentPool<CasingComponent>& casings() const { return casings_; }
     SparseComponentPool<HealthComponent>& healths() { return healths_; }
     const SparseComponentPool<HealthComponent>& healths() const { return healths_; }
+    SparseComponentPool<PlayerControllerComponent>& players() { return players_; }
+    const SparseComponentPool<PlayerControllerComponent>& players() const { return players_; }
     SparseComponentPool<ScriptComponent>& scripts() { return scripts_; }
     const SparseComponentPool<ScriptComponent>& scripts() const { return scripts_; }
 
@@ -253,6 +285,7 @@ private:
     SparseComponentPool<TargetComponent> targets_;
     SparseComponentPool<CasingComponent> casings_;
     SparseComponentPool<HealthComponent> healths_;
+    SparseComponentPool<PlayerControllerComponent> players_;
     SparseComponentPool<ScriptComponent> scripts_;
 };
 

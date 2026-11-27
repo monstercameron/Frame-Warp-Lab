@@ -31,6 +31,9 @@ struct ManualCameraInput {
     float pitch_axis;
     float mouse_delta_x_px;
     float mouse_delta_y_px;
+    bool jump_pressed;
+    bool crouch_held;
+    bool sprint_held;
 };
 
 struct SceneSnapshot {
@@ -168,6 +171,18 @@ public:
         clamp_to_range_bay_ = clamp_to_bay;
     }
 
+    void set_external_position_control(bool enabled) {
+        external_position_control_ = enabled;
+    }
+
+    void set_manual_camera_position(Float3 position) {
+        manual_position_ = position;
+    }
+
+    Float3 manual_camera_position() const { return manual_position_; }
+    float manual_yaw_radians() const { return manual_yaw_; }
+    float manual_pitch_radians() const { return manual_pitch_; }
+
     void set_path(CameraPath path) {
         if (path_ != path) {
             if (path == CameraPath::manual) {
@@ -185,7 +200,8 @@ public:
             || input.yaw_axis != 0.0f
             || input.pitch_axis != 0.0f
             || input.mouse_delta_x_px != 0.0f
-            || input.mouse_delta_y_px != 0.0f;
+            || input.mouse_delta_y_px != 0.0f
+            || input.jump_pressed;
         if (!has_input || path_ == CameraPath::manual) {
             return false;
         }
@@ -212,37 +228,39 @@ public:
                 manual_pitch_ + input.pitch_axis * 1.1f * step - input.mouse_delta_y_px * mouse_sensitivity * fov_scale,
                 -1.15f,
                 1.15f);
-            const float active_fov = vertical_fov_override_ > 0.1f ? vertical_fov_override_ : 1.04719755f;
-            const CameraBasis basis = make_camera_basis(manual_position_, manual_yaw_, manual_pitch_, active_fov);
-            const float move_speed = manual_move_speed_ * step;
-            if (clamp_to_range_bay_) {
-                simd::advance_clamped_position(
-                    manual_position_.x,
-                    manual_position_.y,
-                    manual_position_.z,
-                    (basis.forward.x * input.forward_axis + basis.right.x * input.right_axis) * move_speed,
-                    0.0f,
-                    (basis.forward.z * input.forward_axis + basis.right.z * input.right_axis) * move_speed,
-                    -5.6f,
-                    1.42f,
-                    -0.8f,
-                    5.6f,
-                    1.42f,
-                    2.85f);
-            } else {
-                simd::advance_clamped_position(
-                    manual_position_.x,
-                    manual_position_.y,
-                    manual_position_.z,
-                    (basis.forward.x * input.forward_axis + basis.right.x * input.right_axis) * move_speed,
-                    input.vertical_axis * move_speed,
-                    (basis.forward.z * input.forward_axis + basis.right.z * input.right_axis) * move_speed,
-                    manual_min_.x,
-                    manual_min_.y,
-                    manual_min_.z,
-                    manual_max_.x,
-                    manual_max_.y,
-                    manual_max_.z);
+            if (!external_position_control_) {
+                const float active_fov = vertical_fov_override_ > 0.1f ? vertical_fov_override_ : 1.04719755f;
+                const CameraBasis basis = make_camera_basis(manual_position_, manual_yaw_, manual_pitch_, active_fov);
+                const float move_speed = manual_move_speed_ * step;
+                if (clamp_to_range_bay_) {
+                    simd::advance_clamped_position(
+                        manual_position_.x,
+                        manual_position_.y,
+                        manual_position_.z,
+                        (basis.forward.x * input.forward_axis + basis.right.x * input.right_axis) * move_speed,
+                        0.0f,
+                        (basis.forward.z * input.forward_axis + basis.right.z * input.right_axis) * move_speed,
+                        -5.6f,
+                        1.42f,
+                        -0.8f,
+                        5.6f,
+                        1.42f,
+                        2.85f);
+                } else {
+                    simd::advance_clamped_position(
+                        manual_position_.x,
+                        manual_position_.y,
+                        manual_position_.z,
+                        (basis.forward.x * input.forward_axis + basis.right.x * input.right_axis) * move_speed,
+                        input.vertical_axis * move_speed,
+                        (basis.forward.z * input.forward_axis + basis.right.z * input.right_axis) * move_speed,
+                        manual_min_.x,
+                        manual_min_.y,
+                        manual_min_.z,
+                        manual_max_.x,
+                        manual_max_.y,
+                        manual_max_.z);
+                }
             }
         }
     }
@@ -313,6 +331,7 @@ private:
     Float3 manual_max_{3.5f, 3.15f, 24.5f};
     float manual_move_speed_ = 4.2f;
     bool clamp_to_range_bay_ = false;
+    bool external_position_control_ = false;
 };
 
 }

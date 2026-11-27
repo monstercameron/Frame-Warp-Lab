@@ -6,8 +6,11 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace frame_warp_lab {
+
+struct RangeVertex;
 
 inline constexpr std::uint32_t k_range_target_count = 8;
 inline constexpr std::uint32_t k_range_casing_count = 12;
@@ -66,6 +69,12 @@ struct EcsLuaTelemetry {
     std::int64_t mt_ecs_sync_us = 0;
     float current_spread_mrad = 0.0f;
     float last_shot_offset_mrad = 0.0f;
+    bool player_grounded = true;
+    bool player_touching_wall = false;
+    bool player_crouched = false;
+    float player_horizontal_speed = 0.0f;
+    std::int32_t player_collision_count = 0;
+    Float3 player_feet_pos{0.0f, 0.0f, 1.2f};
 };
 
 struct TacticalHudSnapshot {
@@ -116,6 +125,14 @@ public:
         float ads_sight_y);
 
     void reset();
+    void set_dust2_collision_mesh(
+        const std::vector<RangeVertex>& vertices,
+        const std::vector<std::uint32_t>& indices,
+        std::uint32_t lod0_index_count);
+    void set_active_world(bool is_dust2);
+    void sync_player_spawn(Float3 eye_pos, float yaw, float pitch, bool is_dust2);
+    void set_player_input(const ManualCameraInput& input, float yaw, float pitch, bool manual_active, bool is_dust2);
+    Float3 player_camera_position() const;
     void set_ads_requested(bool active);
     void request_fire();
     void request_reload();

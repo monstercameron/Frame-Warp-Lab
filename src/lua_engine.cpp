@@ -381,6 +381,85 @@ struct LuaScriptEngine::Impl {
         return 1;
     }
 
+    static int l_ecs_get_player(lua_State* state) {
+        auto* self = get_impl(state);
+        const auto h = static_cast<EntityHandle>(luaL_checkinteger(state, 1));
+        const PlayerControllerComponent* p = self->world->players().try_get(h);
+        if (p == nullptr) {
+            lua_pushnil(state);
+            return 1;
+        }
+        lua_createtable(state, 0, 29);
+        auto set_f = [&](const char* k, float v) { lua_pushnumber(state, v); lua_setfield(state, -2, k); };
+        auto set_b = [&](const char* k, bool v) { lua_pushboolean(state, v ? 1 : 0); lua_setfield(state, -2, k); };
+        auto set_i = [&](const char* k, std::int32_t v) { lua_pushinteger(state, v); lua_setfield(state, -2, k); };
+        set_f("feet_x", p->feet_pos.x);
+        set_f("feet_y", p->feet_pos.y);
+        set_f("feet_z", p->feet_pos.z);
+        set_f("vx", p->velocity.x);
+        set_f("vy", p->velocity.y);
+        set_f("vz", p->velocity.z);
+        set_f("yaw", p->yaw);
+        set_f("pitch", p->pitch);
+        set_f("eye_height", p->eye_height);
+        set_f("stand_eye_height", p->stand_eye_height);
+        set_f("crouch_eye_height", p->crouch_eye_height);
+        set_f("capsule_radius", p->capsule_radius);
+        set_f("capsule_height", p->capsule_height);
+        set_f("move_forward", p->move_forward);
+        set_f("move_right", p->move_right);
+        set_b("jump_pressed", p->jump_pressed);
+        set_b("crouch_held", p->crouch_held);
+        set_b("sprint_held", p->sprint_held);
+        set_b("manual_active", p->manual_active);
+        set_b("is_dust2", p->is_dust2);
+        set_b("grounded", p->grounded);
+        set_b("touching_wall", p->touching_wall);
+        set_b("crouched", p->crouched);
+        set_f("coyote_timer", p->coyote_timer);
+        set_f("jump_buffer_timer", p->jump_buffer_timer);
+        set_f("step_phase", p->step_phase);
+        set_f("bob_x", p->bob_x);
+        set_f("bob_y", p->bob_y);
+        set_f("landing_dip", p->landing_dip);
+        set_f("horizontal_speed", p->horizontal_speed);
+        set_i("collision_count", p->collision_count);
+        return 1;
+    }
+
+    static int l_ecs_set_player(lua_State* state) {
+        auto* self = get_impl(state);
+        const auto h = static_cast<EntityHandle>(luaL_checkinteger(state, 1));
+        luaL_checktype(state, 2, LUA_TTABLE);
+        PlayerControllerComponent* p = self->world->players().try_get(h);
+        if (p == nullptr) {
+            lua_pushboolean(state, 0);
+            return 1;
+        }
+        read_table_number(state, 2, "feet_x", p->feet_pos.x);
+        read_table_number(state, 2, "feet_y", p->feet_pos.y);
+        read_table_number(state, 2, "feet_z", p->feet_pos.z);
+        read_table_number(state, 2, "vx", p->velocity.x);
+        read_table_number(state, 2, "vy", p->velocity.y);
+        read_table_number(state, 2, "vz", p->velocity.z);
+        read_table_number(state, 2, "eye_height", p->eye_height);
+        read_table_number(state, 2, "capsule_height", p->capsule_height);
+        read_table_bool(state, 2, "jump_pressed", p->jump_pressed);
+        read_table_bool(state, 2, "grounded", p->grounded);
+        read_table_bool(state, 2, "touching_wall", p->touching_wall);
+        read_table_bool(state, 2, "crouched", p->crouched);
+        read_table_number(state, 2, "coyote_timer", p->coyote_timer);
+        read_table_number(state, 2, "jump_buffer_timer", p->jump_buffer_timer);
+        read_table_number(state, 2, "step_phase", p->step_phase);
+        read_table_number(state, 2, "bob_x", p->bob_x);
+        read_table_number(state, 2, "bob_y", p->bob_y);
+        read_table_number(state, 2, "landing_dip", p->landing_dip);
+        read_table_number(state, 2, "horizontal_speed", p->horizontal_speed);
+        read_table_int(state, 2, "collision_count", p->collision_count);
+        lua_pushboolean(state, 1);
+        return 1;
+    }
+
     static int l_ecs_set_visible(lua_State* state) {
         auto* self = get_impl(state);
         const auto h = static_cast<EntityHandle>(luaL_checkinteger(state, 1));
@@ -520,6 +599,81 @@ struct LuaScriptEngine::Impl {
         return 0;
     }
 
+    static int l_physics_raycast(lua_State* state) {
+        auto* self = get_impl(state);
+        const Float3 origin{
+            static_cast<float>(luaL_checknumber(state, 1)),
+            static_cast<float>(luaL_checknumber(state, 2)),
+            static_cast<float>(luaL_checknumber(state, 3))};
+        const Float3 dir{
+            static_cast<float>(luaL_checknumber(state, 4)),
+            static_cast<float>(luaL_checknumber(state, 5)),
+            static_cast<float>(luaL_checknumber(state, 6))};
+        const float max_dist = static_cast<float>(luaL_checknumber(state, 7));
+        LuaRaycastResult r{};
+        if (self->callbacks.raycast_world) {
+            r = self->callbacks.raycast_world(origin, dir, max_dist);
+        }
+        lua_createtable(state, 0, 8);
+        lua_pushboolean(state, r.hit ? 1 : 0); lua_setfield(state, -2, "hit");
+        lua_pushnumber(state, r.dist); lua_setfield(state, -2, "dist");
+        lua_pushnumber(state, r.point.x); lua_setfield(state, -2, "x");
+        lua_pushnumber(state, r.point.y); lua_setfield(state, -2, "y");
+        lua_pushnumber(state, r.point.z); lua_setfield(state, -2, "z");
+        lua_pushnumber(state, r.normal.x); lua_setfield(state, -2, "nx");
+        lua_pushnumber(state, r.normal.y); lua_setfield(state, -2, "ny");
+        lua_pushnumber(state, r.normal.z); lua_setfield(state, -2, "nz");
+        return 1;
+    }
+
+    static int l_physics_sweep_capsule(lua_State* state) {
+        auto* self = get_impl(state);
+        const Float3 center{
+            static_cast<float>(luaL_checknumber(state, 1)),
+            static_cast<float>(luaL_checknumber(state, 2)),
+            static_cast<float>(luaL_checknumber(state, 3))};
+        const Float3 disp{
+            static_cast<float>(luaL_checknumber(state, 4)),
+            static_cast<float>(luaL_checknumber(state, 5)),
+            static_cast<float>(luaL_checknumber(state, 6))};
+        const float radius = static_cast<float>(luaL_checknumber(state, 7));
+        const float half_height = static_cast<float>(luaL_checknumber(state, 8));
+        LuaCapsuleSweepResult r{};
+        if (self->callbacks.sweep_capsule) {
+            r = self->callbacks.sweep_capsule(center, disp, radius, half_height);
+        }
+        lua_createtable(state, 0, 8);
+        lua_pushboolean(state, r.hit ? 1 : 0); lua_setfield(state, -2, "hit");
+        lua_pushnumber(state, r.fraction); lua_setfield(state, -2, "fraction");
+        lua_pushnumber(state, r.point.x); lua_setfield(state, -2, "x");
+        lua_pushnumber(state, r.point.y); lua_setfield(state, -2, "y");
+        lua_pushnumber(state, r.point.z); lua_setfield(state, -2, "z");
+        lua_pushnumber(state, r.normal.x); lua_setfield(state, -2, "nx");
+        lua_pushnumber(state, r.normal.y); lua_setfield(state, -2, "ny");
+        lua_pushnumber(state, r.normal.z); lua_setfield(state, -2, "nz");
+        return 1;
+    }
+
+    static int l_physics_resolve_capsule_overlap(lua_State* state) {
+        auto* self = get_impl(state);
+        const Float3 center{
+            static_cast<float>(luaL_checknumber(state, 1)),
+            static_cast<float>(luaL_checknumber(state, 2)),
+            static_cast<float>(luaL_checknumber(state, 3))};
+        const float radius = static_cast<float>(luaL_checknumber(state, 4));
+        const float half_height = static_cast<float>(luaL_checknumber(state, 5));
+        LuaOverlapResult r{};
+        if (self->callbacks.resolve_capsule_overlap) {
+            r = self->callbacks.resolve_capsule_overlap(center, radius, half_height);
+        }
+        lua_createtable(state, 0, 4);
+        lua_pushboolean(state, r.penetrated ? 1 : 0); lua_setfield(state, -2, "penetrated");
+        lua_pushnumber(state, r.push.x); lua_setfield(state, -2, "push_x");
+        lua_pushnumber(state, r.push.y); lua_setfield(state, -2, "push_y");
+        lua_pushnumber(state, r.push.z); lua_setfield(state, -2, "push_z");
+        return 1;
+    }
+
     static int l_hud_hit_marker(lua_State* state) {
         auto* self = get_impl(state);
         const bool hs = lua_toboolean(state, 1) != 0;
@@ -566,6 +720,8 @@ struct LuaScriptEngine::Impl {
             {"set_casing", l_ecs_set_casing},
             {"get_health", l_ecs_get_health},
             {"set_health", l_ecs_set_health},
+            {"get_player", l_ecs_get_player},
+            {"set_player", l_ecs_set_player},
             {"set_visible", l_ecs_set_visible},
             {"set_emissive", l_ecs_set_emissive},
             {nullptr, nullptr},
@@ -589,6 +745,9 @@ struct LuaScriptEngine::Impl {
             {"reset_target_pose", l_physics_reset_target_pose},
             {"launch_casing", l_physics_launch_casing},
             {"deactivate_casing", l_physics_deactivate_casing},
+            {"raycast", l_physics_raycast},
+            {"sweep_capsule", l_physics_sweep_capsule},
+            {"resolve_capsule_overlap", l_physics_resolve_capsule_overlap},
             {nullptr, nullptr},
         };
         luaL_newlib(L, physics_funcs);
