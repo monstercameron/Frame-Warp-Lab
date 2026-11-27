@@ -4,6 +4,7 @@
 #include "job_system.h"
 #include "lua_engine.h"
 #include "range_mesh.h"
+#include "skinning.h"
 
 #include <Jolt/Jolt.h>
 #include <Jolt/RegisterTypes.h>
@@ -326,6 +327,14 @@ struct TacticalRangeSimulation::Impl {
     EntityHandle pistol_trigger_entity = k_invalid_entity;
     EntityHandle pistol_mag_entity = k_invalid_entity;
     EntityHandle pistol_sights_entity = k_invalid_entity;
+    EntityHandle weapon_smg_entity = k_invalid_entity;
+    EntityHandle weapon_rifle_entity = k_invalid_entity;
+    EntityHandle weapon_scout_entity = k_invalid_entity;
+    EntityHandle weapon_shotgun_entity = k_invalid_entity;
+    EntityHandle weapon_dual_right_entity = k_invalid_entity;
+    EntityHandle weapon_dual_left_entity = k_invalid_entity;
+    EntityHandle cs_match_entity = k_invalid_entity;
+    std::array<EntityHandle, 8> bot_entities{};
     EntityHandle muzzle_flash_entity = k_invalid_entity;
     EntityHandle tracer_entity = k_invalid_entity;
     EntityHandle spark_entity = k_invalid_entity;
@@ -346,6 +355,17 @@ struct TacticalRangeSimulation::Impl {
     Float3 pistol_muzzle_offset{0.0f, 0.042f, 0.145f};
     Float3 pistol_eject_offset{0.028f, 0.050f, 0.025f};
     float pistol_ads_sight_y = 0.068f;
+    std::array<Float3, k_cs_weapon_count> weapon_muzzle_offsets{};
+    std::array<Float3, k_cs_weapon_count> weapon_eject_offsets{};
+    std::array<float, k_cs_weapon_count> weapon_ads_sight_y{};
+    std::array<bool, k_cs_weapon_count> weapon_loaded{};
+    const SkinnedCharacterTemplate* ct_bot_template = nullptr;
+    const SkinnedCharacterTemplate* t_bot_template = nullptr;
+    std::array<std::uint32_t, 8> bot_vb_offsets{};
+    std::array<std::uint32_t, 8> bot_vb_counts{};
+    std::uint32_t total_bot_vertices = 0U;
+    std::vector<Float3> dust2_waypoints;
+    std::int32_t bot_kills = 0;
 
     double phys_accum = 0.0;
     float range_time = 0.0f;
@@ -358,7 +378,9 @@ struct TacticalRangeSimulation::Impl {
     Float3 prev_camera_pos{0.0f, 1.55f, 1.4f};
     bool has_prev_camera_pos = false;
     bool has_prev_pistol_local = false;
+    std::int32_t prev_rendered_weapon_id = -1;
     Mat4x4 prev_gun_local{};
+    Mat4x4 prev_dual_left_local{};
     Mat4x4 prev_slide_local{};
     Mat4x4 prev_hammer_local{};
     Mat4x4 prev_trigger_local{};
@@ -551,9 +573,31 @@ struct TacticalRangeSimulation::Impl {
         pistol_trigger_entity = spawn_render_entity("pistol_trigger", "pistol_part", pistol_uri, RangeMeshKind::pistol_trigger, true, true);
         pistol_mag_entity = spawn_render_entity("pistol_magazine", "pistol_part", pistol_uri, RangeMeshKind::pistol_magazine, true, true);
         pistol_sights_entity = spawn_render_entity("pistol_sights", "pistol_part", "procedural://tritium_sights", RangeMeshKind::pistol_sights, true, true);
+        weapon_smg_entity = spawn_render_entity("weapon_smg", "weapon_vm", "assets/models/weapons/mp5.glb", RangeMeshKind::weapon_smg, false, true);
+        weapon_rifle_entity = spawn_render_entity("weapon_rifle", "weapon_vm", "assets/models/weapons/ak47.glb", RangeMeshKind::weapon_rifle, false, true);
+        weapon_scout_entity = spawn_render_entity("weapon_scout", "weapon_vm", "assets/models/weapons/scout.glb", RangeMeshKind::weapon_scout, false, true);
+        weapon_shotgun_entity = spawn_render_entity("weapon_shotgun", "weapon_vm", "assets/models/weapons/shotgun.glb", RangeMeshKind::weapon_shotgun, false, true);
+        weapon_dual_right_entity = spawn_render_entity("weapon_dual_right", "weapon_vm", "assets/models/weapons/dual_pistol.glb", RangeMeshKind::weapon_dual_pistol, false, true);
+        weapon_dual_left_entity = spawn_render_entity("weapon_dual_left", "weapon_vm", "assets/models/weapons/dual_pistol.glb", RangeMeshKind::weapon_dual_pistol, false, true);
         muzzle_flash_entity = spawn_render_entity("pistol_muzzle_flash", "vfx", "procedural://muzzle_flash", RangeMeshKind::muzzle_flash, false, true);
         tracer_entity = spawn_render_entity("bullet_tracer", "vfx", "procedural://bullet_tracer", RangeMeshKind::bullet_tracer, false, false);
         spark_entity = spawn_render_entity("impact_spark", "vfx", "procedural://impact_spark", RangeMeshKind::impact_spark, false, false);
+
+        cs_match_entity = ecs.create_entity("cs_match_director", "director", "assets/scripts/cs_match.lua");
+        ecs.scripts().emplace(cs_match_entity, ScriptComponent{"cs_match.lua", true, false});
+        for (std::uint32_t bi = 0; bi < 8U; ++bi) {
+            const bool is_ct = (bi < 4U);
+            const std::string bname = (is_ct ? "bot_fbi_" : "bot_terrorist_") + std::to_string(bi % 4U);
+            const char* buri = is_ct ? "assets/models/characters/fbi_ct.glb" : "assets/models/characters/terrorist.glb";
+            const auto bmesh = static_cast<RangeMeshKind>(static_cast<std::uint32_t>(RangeMeshKind::bot_slot_0) + bi);
+            const EntityHandle be = spawn_render_entity(bname.c_str(), "cs_bot", buri, bmesh, false, false);
+            BotComponent bc{};
+            bc.slot_index = static_cast<std::int32_t>(bi);
+            bc.team = is_ct ? 0 : 1;
+            bc.active = false;
+            ecs.bots().emplace(be, bc);
+            bot_entities[bi] = be;
+        }
 
         auto& bi = physics.GetBodyInterface();
         for (std::uint32_t i = 0; i < k_range_target_count; ++i) {
@@ -667,37 +711,61 @@ struct TacticalRangeSimulation::Impl {
         return &casings[static_cast<std::size_t>(cc->slot_index)];
     }
 
-    Mat4x4 compute_pistol_root_local(const WeaponComponent& w) const {
+    Mat4x4 compute_weapon_root_local(const WeaponComponent& w, bool left_dual_hand = false) const {
+        const std::int32_t wid = std::clamp(w.weapon_id, 0, k_cs_weapon_count - 1);
         const float t = w.ads_alpha;
         const float smooth_t = t * t * (3.0f - 2.0f * t);
         const float sway_scale = 1.0f - 0.80f * smooth_t;
         const float sway_x = std::sin(range_time * 1.7f) * 0.0045f * sway_scale;
         const float sway_y = std::cos(range_time * 3.4f) * 0.0032f * sway_scale;
 
-        const float ads_y = -pistol_ads_sight_y;
-        const float hip_x = hero_pistol_gltf_loaded ? 0.165f : 0.175f;
-        const float hip_y = hero_pistol_gltf_loaded ? -0.150f : -0.155f;
-        const float hip_z = hero_pistol_gltf_loaded ? 0.38f : 0.42f;
-        const float ads_z = hero_pistol_gltf_loaded ? 0.30f : 0.34f;
+        float hip_x = hero_pistol_gltf_loaded ? 0.165f : 0.175f;
+        float hip_y = hero_pistol_gltf_loaded ? -0.150f : -0.155f;
+        float hip_z = hero_pistol_gltf_loaded ? 0.38f : 0.42f;
+        float ads_z = hero_pistol_gltf_loaded ? 0.30f : 0.34f;
+        float ads_x = 0.0f;
+        float ads_y = -weapon_ads_sight_y[static_cast<std::size_t>(wid)];
+        float kick = w.recoil_kick;
 
-        float px = hip_x * (1.0f - smooth_t) + sway_x;
+        if (wid == 1) {
+            hip_x = 0.165f; hip_y = -0.150f; hip_z = 0.44f; ads_z = 0.30f;
+        } else if (wid == 2) {
+            hip_x = 0.185f; hip_y = -0.165f; hip_z = 0.42f; ads_z = 0.29f;
+        } else if (wid == 3) {
+            hip_x = 0.185f; hip_y = -0.165f; hip_z = 0.46f; ads_z = 0.26f;
+        } else if (wid == 4) {
+            hip_x = 0.175f; hip_y = -0.155f; hip_z = 0.41f; ads_z = 0.28f;
+        } else if (wid == 5) {
+            const float sign = left_dual_hand ? -1.0f : 1.0f;
+            hip_x = sign * 0.185f;
+            ads_x = sign * 0.095f;
+            hip_y = -0.145f;
+            ads_y = -0.095f;
+            hip_z = 0.38f;
+            ads_z = 0.32f;
+            kick = left_dual_hand ? w.dual_left_kick : w.dual_right_kick;
+        } else {
+            ads_y = -pistol_ads_sight_y;
+        }
+
+        float px = hip_x * (1.0f - smooth_t) + ads_x * smooth_t + sway_x;
         float py = hip_y * (1.0f - smooth_t) + ads_y * smooth_t + sway_y;
         float pz = hip_z * (1.0f - smooth_t) + ads_z * smooth_t;
 
-        pz -= w.recoil_kick * (0.042f - 0.015f * smooth_t);
-        py += w.recoil_kick * 0.010f;
+        pz -= kick * (0.046f - 0.014f * smooth_t);
+        py += kick * 0.011f;
 
-        float pitch = -w.recoil_kick * (0.24f - 0.10f * smooth_t);
-        float roll = w.recoil_roll * 0.12f;
-        float yaw = -0.025f * (1.0f - smooth_t);
+        float pitch = -kick * (0.24f - 0.09f * smooth_t);
+        float roll = w.recoil_roll * (left_dual_hand ? -0.11f : 0.11f);
+        float yaw = (left_dual_hand ? 0.032f : -0.025f) * (1.0f - smooth_t);
 
         if (w.reloading) {
             const float u = std::clamp(1.0f - w.reload_timer / std::max(w.reload_duration, 0.1f), 0.0f, 1.0f);
             const float dip = std::sin(u * 3.14159265f);
-            py -= dip * 0.075f;
-            px -= dip * 0.025f;
-            roll += dip * 0.52f;
-            pitch -= dip * 0.28f;
+            py -= dip * 0.085f;
+            px -= (left_dual_hand ? -dip : dip) * 0.028f;
+            roll += (left_dual_hand ? -dip : dip) * 0.54f;
+            pitch -= dip * 0.30f;
         }
 
         const Mat4x4 tr = make_translation_mat4(px, py, pz);
@@ -705,17 +773,29 @@ struct TacticalRangeSimulation::Impl {
         return mul_mat4(tr, rot);
     }
 
+    Float3 active_muzzle_local(const WeaponComponent& w) const {
+        const std::int32_t wid = std::clamp(w.weapon_id, 0, k_cs_weapon_count - 1);
+        return wid == 0 ? pistol_muzzle_offset : weapon_muzzle_offsets[static_cast<std::size_t>(wid)];
+    }
+
+    Float3 active_eject_local(const WeaponComponent& w) const {
+        const std::int32_t wid = std::clamp(w.weapon_id, 0, k_cs_weapon_count - 1);
+        return wid == 0 ? pistol_eject_offset : weapon_eject_offsets[static_cast<std::size_t>(wid)];
+    }
+
     void register_engine_event_bridges() {
         events.subscribe("shell.eject_requested", [this](const std::string&, const EventPayload& payload) {
             const WeaponComponent* w = ecs.weapons().try_get(weapon_entity);
             if (w == nullptr) return;
+            const bool is_left = (w->weapon_id == 5 && payload.get_int("dual_side", 0) == 1);
             const Mat4x4 cam_world = camera_basis_to_world_mat4(active_camera);
-            const Mat4x4 gun_world = mul_mat4(cam_world, compute_pistol_root_local(*w));
-            const Float3 eject_pos = transform_point(gun_world, pistol_eject_offset);
+            const Mat4x4 gun_world = mul_mat4(cam_world, compute_weapon_root_local(*w, is_left));
+            const Float3 eject_pos = transform_point(gun_world, active_eject_local(*w));
+            const float side_s = is_left ? -1.0f : 1.0f;
             const Float3 eject_vel{
-                active_camera.right.x * 2.4f + active_camera.up.x * 1.8f - active_camera.forward.x * 0.4f,
-                active_camera.right.y * 2.4f + active_camera.up.y * 1.8f - active_camera.forward.y * 0.4f,
-                active_camera.right.z * 2.4f + active_camera.up.z * 1.8f - active_camera.forward.z * 0.4f};
+                active_camera.right.x * (2.4f * side_s) + active_camera.up.x * 1.8f - active_camera.forward.x * 0.4f,
+                active_camera.right.y * (2.4f * side_s) + active_camera.up.y * 1.8f - active_camera.forward.y * 0.4f,
+                active_camera.right.z * (2.4f * side_s) + active_camera.up.z * 1.8f - active_camera.forward.z * 0.4f};
             EventPayload spawn_ev{};
             spawn_ev.set_int("shot", payload.get_int("shot", 1));
             spawn_ev.set_number("px", eject_pos.x);
@@ -730,12 +810,14 @@ struct TacticalRangeSimulation::Impl {
         events.subscribe("ballistics.raycast_requested", [this](const std::string&, const EventPayload& payload) {
             const WeaponComponent* w = ecs.weapons().try_get(weapon_entity);
             if (w == nullptr) return;
+            const bool is_left = (w->weapon_id == 5 && w->dual_hand_toggle == 1);
             const Mat4x4 cam_world = camera_basis_to_world_mat4(active_camera);
-            const Mat4x4 gun_world = mul_mat4(cam_world, compute_pistol_root_local(*w));
-            muzzle_world_pos = transform_point(gun_world, pistol_muzzle_offset);
+            const Mat4x4 gun_world = mul_mat4(cam_world, compute_weapon_root_local(*w, is_left));
+            muzzle_world_pos = transform_point(gun_world, active_muzzle_local(*w));
 
             const auto sx = static_cast<float>(payload.get_number("spread_x", 0.0));
             const auto sy = static_cast<float>(payload.get_number("spread_y", 0.0));
+            const auto base_dmg = static_cast<float>(payload.get_number("damage", w->base_damage));
             Float3 ray_dir{
                 active_camera.forward.x + active_camera.right.x * sx + active_camera.up.x * sy,
                 active_camera.forward.y + active_camera.right.y * sx + active_camera.up.y * sy,
@@ -743,23 +825,85 @@ struct TacticalRangeSimulation::Impl {
             const float rlen = std::sqrt(ray_dir.x * ray_dir.x + ray_dir.y * ray_dir.y + ray_dir.z * ray_dir.z);
             ray_dir = {ray_dir.x / std::max(rlen, 1e-5f), ray_dir.y / std::max(rlen, 1e-5f), ray_dir.z / std::max(rlen, 1e-5f)};
 
-            constexpr float max_ray_dist = 45.0f;
+            constexpr float max_ray_dist = 95.0f;
             const JPH::RRayCast ray{
                 JPH::RVec3(active_camera.position.x, active_camera.position.y, active_camera.position.z),
                 JPH::Vec3(ray_dir.x * max_ray_dist, ray_dir.y * max_ray_dist, ray_dir.z * max_ray_dist)};
-            JPH::RayCastResult hit_result;
-            const bool did_hit = physics.GetNarrowPhaseQuery().CastRay(ray, hit_result);
+            JPH::RayCastSettings rcs{};
+            rcs.mBackFaceModeTriangles = JPH::EBackFaceMode::CollideWithBackFaces;
+            JPH::ClosestHitCollisionCollector<JPH::CastRayCollector> collector;
+            PlayerCollisionBodyFilter bfilter(casings);
+            physics.GetNarrowPhaseQuery().CastRay(ray, rcs, collector, {}, {}, bfilter);
+            const bool did_hit = collector.HadHit();
+            float best_dist = did_hit ? (collector.mHit.mFraction * max_ray_dist) : max_ray_dist;
+
+            EntityHandle hit_bot = k_invalid_entity;
+            bool bot_headshot = false;
+            const Float3 ro = active_camera.position;
+            auto ray_sphere = [&](Float3 c, float rad, float& out_t) -> bool {
+                const Float3 oc{ro.x - c.x, ro.y - c.y, ro.z - c.z};
+                const float b_term = oc.x * ray_dir.x + oc.y * ray_dir.y + oc.z * ray_dir.z;
+                const float c_term = (oc.x * oc.x + oc.y * oc.y + oc.z * oc.z) - rad * rad;
+                const float disc = b_term * b_term - c_term;
+                if (disc < 0.0f) return false;
+                const float t = -b_term - std::sqrt(disc);
+                if (t > 0.15f && t < out_t) {
+                    out_t = t;
+                    return true;
+                }
+                return false;
+            };
+            for (EntityHandle be : bot_entities) {
+                const BotComponent* bc = ecs.bots().try_get(be);
+                if (bc == nullptr || !bc->active || !bc->alive) continue;
+                float ht = best_dist;
+                if (ray_sphere(bc->head_world_pos, 0.22f, ht)) {
+                    best_dist = ht;
+                    hit_bot = be;
+                    bot_headshot = true;
+                } else {
+                    float bt = best_dist;
+                    const Float3 mid_body{bc->chest_world_pos.x, bc->pos.y + 0.92f, bc->chest_world_pos.z};
+                    const Float3 low_body{bc->pos.x, bc->pos.y + 0.50f, bc->pos.z};
+                    if (ray_sphere(mid_body, 0.36f, bt) || ray_sphere(low_body, 0.32f, bt)) {
+                        best_dist = bt;
+                        hit_bot = be;
+                        bot_headshot = false;
+                    }
+                }
+            }
 
             tracer_start = muzzle_world_pos;
             tracer_timer = 0.085f;
-            if (did_hit) {
-                const JPH::RVec3 hp_jolt = ray.GetPointOnRay(hit_result.mFraction);
+            if (hit_bot != k_invalid_entity) {
+                tracer_end = {
+                    ro.x + ray_dir.x * best_dist,
+                    ro.y + ray_dir.y * best_dist,
+                    ro.z + ray_dir.z * best_dist};
+                impact_pos = tracer_end;
+                impact_timer = 0.18f;
+                impact_was_target = true;
+                hit_marker_timer = 0.24f;
+                hit_marker_headshot = bot_headshot;
+                ++hits;
+                if (bot_headshot) ++headshots;
+                score += bot_headshot ? 250 : 100;
+                EventPayload bev{};
+                bev.set_u64("entity", hit_bot);
+                bev.set_number("damage", base_dmg);
+                bev.set_bool("headshot", bot_headshot);
+                bev.set_number("hit_x", tracer_end.x);
+                bev.set_number("hit_y", tracer_end.y);
+                bev.set_number("hit_z", tracer_end.z);
+                events.emit("bot.damaged", bev);
+            } else if (did_hit) {
+                const JPH::RVec3 hp_jolt = ray.GetPointOnRay(collector.mHit.mFraction);
                 tracer_end = {static_cast<float>(hp_jolt.GetX()), static_cast<float>(hp_jolt.GetY()), static_cast<float>(hp_jolt.GetZ())};
                 impact_pos = tracer_end;
                 impact_timer = 0.18f;
                 impact_was_target = false;
 
-                const EntityHandle struck = ecs.find_by_jolt_body(hit_result.mBodyID.GetIndexAndSequenceNumber());
+                const EntityHandle struck = ecs.find_by_jolt_body(collector.mHit.mBodyID.GetIndexAndSequenceNumber());
                 if (struck != k_invalid_entity && ecs.targets().has(struck)) {
                     impact_was_target = true;
                     EventPayload hit_ev{};
@@ -1013,6 +1157,15 @@ struct TacticalRangeSimulation::Impl {
             }
             return out;
         };
+        cb.get_waypoints = [this]() -> std::vector<Float3> {
+            return dust2_waypoints;
+        };
+        cb.is_dust2_active = [this]() -> bool {
+            return dust2_world_active;
+        };
+        cb.record_bot_kill = [this](std::int32_t) {
+            ++bot_kills;
+        };
         lua.initialize(&ecs, &events, std::move(cb));
     }
 
@@ -1152,12 +1305,19 @@ struct TacticalRangeSimulation::Impl {
 
         const WeaponComponent* w = ecs.weapons().try_get(weapon_entity);
         if (w == nullptr) return;
+        const std::int32_t wid = std::clamp(w->weapon_id, 0, k_cs_weapon_count - 1);
+        const bool same_weapon = has_prev_pistol_local && (prev_rendered_weapon_id == wid);
         const Mat4x4 cam_world = camera_basis_to_world_mat4(camera);
         const Mat4x4 prev_cam_world = camera_basis_to_world_mat4(previous_camera);
-        const Mat4x4 gun_local = compute_pistol_root_local(*w);
-        const Mat4x4 p_gun_l = has_prev_pistol_local ? prev_gun_local : gun_local;
+        const Mat4x4 gun_local = compute_weapon_root_local(*w, false);
+        const Mat4x4 p_gun_l = same_weapon ? prev_gun_local : gun_local;
         const Mat4x4 gun_world = mul_mat4(cam_world, gun_local);
         const Mat4x4 prev_gun_world = mul_mat4(prev_cam_world, p_gun_l);
+
+        const Mat4x4 dual_left_local = compute_weapon_root_local(*w, true);
+        const Mat4x4 p_dual_l = same_weapon ? prev_dual_left_local : dual_left_local;
+        const Mat4x4 dual_left_world = mul_mat4(cam_world, dual_left_local);
+        const Mat4x4 prev_dual_left_world = mul_mat4(prev_cam_world, p_dual_l);
 
         const float slide_z_back = -w->slide_blowback * 0.042f;
         const Mat4x4 slide_local = make_translation_mat4(
@@ -1165,19 +1325,19 @@ struct TacticalRangeSimulation::Impl {
             pistol_slide_offset.y,
             pistol_slide_offset.z + slide_z_back);
         const Mat4x4 slide_world = mul_mat4(gun_world, slide_local);
-        const Mat4x4 prev_slide_world = mul_mat4(prev_gun_world, has_prev_pistol_local ? prev_slide_local : slide_local);
+        const Mat4x4 prev_slide_world = mul_mat4(prev_gun_world, same_weapon ? prev_slide_local : slide_local);
 
         const Mat4x4 hammer_local = mul_mat4(
             make_translation_mat4(pistol_hammer_offset.x, pistol_hammer_offset.y, pistol_hammer_offset.z),
             make_rot_x(-w->hammer_cock * 0.82f));
         const Mat4x4 hammer_world = mul_mat4(gun_world, hammer_local);
-        const Mat4x4 prev_hammer_world = mul_mat4(prev_gun_world, has_prev_pistol_local ? prev_hammer_local : hammer_local);
+        const Mat4x4 prev_hammer_world = mul_mat4(prev_gun_world, same_weapon ? prev_hammer_local : hammer_local);
 
         const Mat4x4 trigger_local = mul_mat4(
             make_translation_mat4(pistol_trigger_offset.x, pistol_trigger_offset.y, pistol_trigger_offset.z),
             make_rot_x(w->trigger_pull * 0.34f));
         const Mat4x4 trigger_world = mul_mat4(gun_world, trigger_local);
-        const Mat4x4 prev_trigger_world = mul_mat4(prev_gun_world, has_prev_pistol_local ? prev_trigger_local : trigger_local);
+        const Mat4x4 prev_trigger_world = mul_mat4(prev_gun_world, same_weapon ? prev_trigger_local : trigger_local);
 
         float mag_drop = 0.0f;
         if (w->reloading) {
@@ -1192,14 +1352,36 @@ struct TacticalRangeSimulation::Impl {
             pistol_magazine_offset.y - mag_drop,
             pistol_magazine_offset.z - mag_drop * 0.32f);
         const Mat4x4 mag_world = mul_mat4(gun_world, mag_local);
-        const Mat4x4 prev_mag_world = mul_mat4(prev_gun_world, has_prev_pistol_local ? prev_mag_local : mag_local);
+        const Mat4x4 prev_mag_world = mul_mat4(prev_gun_world, same_weapon ? prev_mag_local : mag_local);
 
         prev_gun_local = gun_local;
+        prev_dual_left_local = dual_left_local;
         prev_slide_local = slide_local;
         prev_hammer_local = hammer_local;
         prev_trigger_local = trigger_local;
         prev_mag_local = mag_local;
         has_prev_pistol_local = true;
+        prev_rendered_weapon_id = wid;
+
+        const bool show_usp = (wid == 0);
+        auto set_vis = [&](EntityHandle e, bool v) {
+            if (auto* r = ecs.renderables().try_get(e)) r->visible = v;
+        };
+        set_vis(pistol_frame_entity, show_usp);
+        set_vis(pistol_slide_entity, show_usp);
+        set_vis(pistol_barrel_entity, show_usp && !hero_pistol_gltf_loaded);
+        set_vis(pistol_hammer_entity, show_usp);
+        set_vis(pistol_trigger_entity, show_usp);
+        set_vis(pistol_mag_entity, show_usp);
+        set_vis(pistol_sights_entity, show_usp);
+
+        const bool hide_scoped = (wid == 3 && w->scope_alpha > 0.72f);
+        set_vis(weapon_smg_entity, wid == 1);
+        set_vis(weapon_rifle_entity, wid == 2);
+        set_vis(weapon_scout_entity, wid == 3 && !hide_scoped);
+        set_vis(weapon_shotgun_entity, wid == 4);
+        set_vis(weapon_dual_right_entity, wid == 5);
+        set_vis(weapon_dual_left_entity, wid == 5);
 
         update_entity_xform(pistol_frame_entity, gun_world, true, prev_gun_world);
         update_entity_xform(pistol_slide_entity, slide_world, true, prev_slide_world);
@@ -1208,27 +1390,51 @@ struct TacticalRangeSimulation::Impl {
         update_entity_xform(pistol_trigger_entity, trigger_world, true, prev_trigger_world);
         update_entity_xform(pistol_mag_entity, mag_world, true, prev_mag_world);
         update_entity_xform(pistol_sights_entity, slide_world, true, prev_slide_world);
+        update_entity_xform(weapon_smg_entity, gun_world, true, prev_gun_world);
+        update_entity_xform(weapon_rifle_entity, gun_world, true, prev_gun_world);
+        update_entity_xform(weapon_scout_entity, gun_world, true, prev_gun_world);
+        update_entity_xform(weapon_shotgun_entity, gun_world, true, prev_gun_world);
+        update_entity_xform(weapon_dual_right_entity, gun_world, true, prev_gun_world);
+        update_entity_xform(weapon_dual_left_entity, dual_left_world, true, prev_dual_left_world);
 
-        if (auto* br = ecs.renderables().try_get(pistol_barrel_entity)) {
-            br->visible = !hero_pistol_gltf_loaded;
-        }
         if (auto* sr = ecs.renderables().try_get(pistol_sights_entity)) {
             sr->tint = {0.22f, 1.0f, 0.42f};
             sr->emissive = 2.6f;
         }
 
         if (auto* mf = ecs.renderables().try_get(muzzle_flash_entity)) {
-            mf->visible = w->muzzle_flash_timer > 0.0f;
+            mf->visible = (w->muzzle_flash_timer > 0.0f) && !hide_scoped;
             if (mf->visible) {
                 const float fa = std::clamp(w->muzzle_flash_timer / 0.048f, 0.0f, 1.0f);
-                const float s = 0.55f + 0.55f * fa;
+                const float s = (wid == 4 ? 0.95f : 0.60f) + 0.55f * fa;
+                const Float3 moz = active_muzzle_local(*w);
+                const bool use_left = (wid == 5 && w->dual_hand_toggle == 0);
+                const Mat4x4& flash_parent = use_left ? dual_left_world : gun_world;
                 const Mat4x4 fl = mul_mat4(
-                    make_translation_mat4(pistol_muzzle_offset.x, pistol_muzzle_offset.y, pistol_muzzle_offset.z),
+                    make_translation_mat4(moz.x, moz.y, moz.z),
                     mul_mat4(make_rot_z(w->muzzle_flash_spin), make_scale_mat4(s, s, s)));
-                const Mat4x4 fw = mul_mat4(gun_world, fl);
+                const Mat4x4 fw = mul_mat4(flash_parent, fl);
                 update_entity_xform(muzzle_flash_entity, fw, true, fw);
                 mf->tint = {1.0f, 0.56f, 0.14f};
                 mf->emissive = 4.2f * fa;
+            }
+        }
+
+        for (std::uint32_t bot_idx = 0; bot_idx < 8U; ++bot_idx) {
+            const EntityHandle be = bot_entities[bot_idx];
+            BotComponent* bc = ecs.bots().try_get(be);
+            if (bc == nullptr) continue;
+            if (auto* br = ecs.renderables().try_get(be)) {
+                br->visible = bc->active && (bot_vb_counts[bot_idx] > 0U);
+                const float hf = bc->hit_flash;
+                br->tint = {1.0f, 1.0f - 0.55f * hf, 1.0f - 0.60f * hf};
+                br->emissive = hf * 1.1f;
+            }
+            if (bc->active) {
+                const Mat4x4 bw = mul_mat4(
+                    make_translation_mat4(bc->pos.x, bc->pos.y, bc->pos.z),
+                    make_rot_y(bc->yaw));
+                update_entity_xform(be, bw, false, bw);
             }
         }
     }
@@ -1254,6 +1460,34 @@ void TacticalRangeSimulation::set_hero_pistol_geometry_meta(
     impl_->pistol_muzzle_offset = muzzle_offset;
     impl_->pistol_eject_offset = eject_offset;
     impl_->pistol_ads_sight_y = ads_sight_y;
+}
+
+void TacticalRangeSimulation::set_arsenal_geometry_meta(
+    const std::array<Float3, k_cs_weapon_count>& muzzle_offsets,
+    const std::array<Float3, k_cs_weapon_count>& eject_offsets,
+    const std::array<float, k_cs_weapon_count>& ads_sight_y,
+    const std::array<bool, k_cs_weapon_count>& loaded_flags) {
+    impl_->weapon_muzzle_offsets = muzzle_offsets;
+    impl_->weapon_eject_offsets = eject_offsets;
+    impl_->weapon_ads_sight_y = ads_sight_y;
+    impl_->weapon_loaded = loaded_flags;
+}
+
+void TacticalRangeSimulation::set_bot_character_templates(
+    const SkinnedCharacterTemplate* ct_template,
+    const SkinnedCharacterTemplate* t_template,
+    const std::array<std::uint32_t, 8>& bot_vb_offsets,
+    const std::array<std::uint32_t, 8>& bot_vb_counts,
+    std::uint32_t total_bot_vertices) {
+    impl_->ct_bot_template = ct_template;
+    impl_->t_bot_template = t_template;
+    impl_->bot_vb_offsets = bot_vb_offsets;
+    impl_->bot_vb_counts = bot_vb_counts;
+    impl_->total_bot_vertices = total_bot_vertices;
+}
+
+void TacticalRangeSimulation::set_dust2_waypoints(const std::vector<Float3>& waypoints) {
+    impl_->dust2_waypoints = waypoints;
 }
 
 void TacticalRangeSimulation::reset() {
@@ -1352,12 +1586,35 @@ void TacticalRangeSimulation::set_ads_requested(bool active) {
     impl_->events.emit("weapon.ads_changed", ev);
 }
 
+void TacticalRangeSimulation::set_firing_held(bool held) {
+    if (auto* w = impl_->ecs.weapons().try_get(impl_->weapon_entity)) {
+        w->firing_held = held;
+    }
+}
+
 void TacticalRangeSimulation::request_fire() {
     impl_->events.enqueue("weapon.fire_requested");
 }
 
 void TacticalRangeSimulation::request_reload() {
     impl_->events.enqueue("weapon.reload_requested");
+}
+
+void TacticalRangeSimulation::cycle_weapon(std::int32_t delta) {
+    EventPayload ev{};
+    ev.set_int("delta", delta);
+    impl_->events.enqueue("weapon.cycle_requested", ev);
+}
+
+void TacticalRangeSimulation::select_weapon(std::int32_t weapon_id) {
+    EventPayload ev{};
+    ev.set_int("weapon_id", std::clamp(weapon_id, 0, k_cs_weapon_count - 1));
+    impl_->events.enqueue("weapon.switch_requested", ev);
+}
+
+std::int32_t TacticalRangeSimulation::active_weapon_id() const {
+    const WeaponComponent* w = impl_->ecs.weapons().try_get(impl_->weapon_entity);
+    return w != nullptr ? w->weapon_id : 0;
 }
 
 bool TacticalRangeSimulation::reload_lua_scripts() {
@@ -1373,14 +1630,25 @@ bool TacticalRangeSimulation::emit_named_event(const std::string& event_name) {
 }
 
 void TacticalRangeSimulation::step(double delta_seconds, bool paused, const CameraBasis& camera) {
+    if (!paused && delta_seconds > 0.0) {
+        const float dt = static_cast<float>(std::min(delta_seconds, 0.05));
+        for (EntityHandle be : impl_->bot_entities) {
+            if (auto* bc = impl_->ecs.bots().try_get(be)) {
+                if (bc->anim_blend < 1.0f) {
+                    bc->anim_blend = std::min(1.0f, bc->anim_blend + dt * 7.5f);
+                }
+            }
+        }
+    }
     impl_->step_sim(delta_seconds, paused, camera);
 }
 
 float TacticalRangeSimulation::current_vertical_fov_radians() const {
     const WeaponComponent* w = impl_->ecs.weapons().try_get(impl_->weapon_entity);
     const float t = w != nullptr ? w->ads_alpha : 0.0f;
+    const float ads_fov = w != nullptr ? std::clamp(w->ads_fov_rad, 0.32f, 1.05f) : 0.84f;
     const float smooth_t = t * t * (3.0f - 2.0f * t);
-    return 1.15f * (1.0f - smooth_t) + 0.84f * smooth_t;
+    return 1.15f * (1.0f - smooth_t) + ads_fov * smooth_t;
 }
 
 float TacticalRangeSimulation::camera_recoil_pitch_radians() const {
@@ -1407,7 +1675,9 @@ TacticalHudSnapshot TacticalRangeSimulation::hud_snapshot(const CameraBasis& cam
     h.score = impl_->score;
     const float ads_alpha = w != nullptr ? w->ads_alpha : 0.0f;
     const float spread_rad = w != nullptr ? w->current_spread_rad : 0.011f;
+    h.active_weapon_id = w != nullptr ? w->weapon_id : 0;
     h.ads_alpha = ads_alpha;
+    h.scope_alpha = w != nullptr ? w->scope_alpha : 0.0f;
     h.crosshair_spread = std::clamp(spread_rad * 28.0f, 0.06f, 1.85f);
     h.hit_marker_alpha = std::clamp(impl_->hit_marker_timer / 0.22f, 0.0f, 1.0f);
     h.hit_marker_headshot = impl_->hit_marker_headshot ? 1.0f : 0.0f;
@@ -1438,6 +1708,16 @@ EcsLuaTelemetry TacticalRangeSimulation::ecs_lua_telemetry() const {
     const LuaEngineStats ls = impl_->lua.stats();
     const WeaponComponent* w = impl_->ecs.weapons().try_get(impl_->weapon_entity);
     const PlayerControllerComponent* p = impl_->ecs.players().try_get(impl_->player_entity);
+    std::int32_t alive_ct = 0;
+    std::int32_t alive_t = 0;
+    for (EntityHandle be : impl_->bot_entities) {
+        if (const auto* bc = impl_->ecs.bots().try_get(be)) {
+            if (bc->active && bc->alive) {
+                if (bc->team == 0) ++alive_ct;
+                else ++alive_t;
+            }
+        }
+    }
     return EcsLuaTelemetry{
         es.entity_count,
         es.renderable_count,
@@ -1463,6 +1743,10 @@ EcsLuaTelemetry TacticalRangeSimulation::ecs_lua_telemetry() const {
         p != nullptr ? p->horizontal_speed : 0.0f,
         p != nullptr ? p->collision_count : 0,
         p != nullptr ? p->feet_pos : Float3{0.0f, 0.0f, 1.2f},
+        w != nullptr ? w->weapon_id : 0,
+        alive_ct,
+        alive_t,
+        impl_->bot_kills,
     };
 }
 
@@ -1471,6 +1755,45 @@ void TacticalRangeSimulation::build_render_frame(
     const CameraBasis& previous_camera,
     TacticalRangeFrame& out_frame) {
     impl_->sync_ecs_render_transforms(camera, previous_camera);
+
+    if (impl_->total_bot_vertices > 0U && (impl_->ct_bot_template != nullptr || impl_->t_bot_template != nullptr)) {
+        out_frame.skinned_bot_vertices.resize(impl_->total_bot_vertices);
+        EngineJobSystem::global().parallel_for(8U, 1U, [&](std::size_t begin, std::size_t end) {
+            for (std::size_t bi = begin; bi < end; ++bi) {
+                const std::uint32_t vcnt = impl_->bot_vb_counts[bi];
+                if (vcnt == 0U) continue;
+                BotComponent* bc = impl_->ecs.bots().try_get(impl_->bot_entities[bi]);
+                if (bc == nullptr || !bc->active) continue;
+                const SkinnedCharacterTemplate* tpl = (bi < 4U) ? impl_->ct_bot_template : impl_->t_bot_template;
+                if (tpl == nullptr || !tpl->loaded) continue;
+                SkinnedPoseParams pose{};
+                pose.clip_index = tpl->find_clip(bc->anim_clip);
+                pose.clip_time = bc->anim_time;
+                pose.loop_clip = bc->anim_loop;
+                pose.prev_clip_index = tpl->find_clip(bc->prev_anim_clip);
+                pose.prev_clip_time = bc->prev_anim_time;
+                pose.blend_alpha = bc->anim_blend;
+                pose.aim_pitch_rad = bc->aim_pitch;
+                Float3 head_l{}, chest_l{}, muz_l{};
+                evaluate_skinned_character(
+                    *tpl,
+                    pose,
+                    out_frame.skinned_bot_vertices.data() + impl_->bot_vb_offsets[bi],
+                    head_l,
+                    chest_l,
+                    muz_l);
+                const Mat4x4 bw = mul_mat4(
+                    make_translation_mat4(bc->pos.x, bc->pos.y, bc->pos.z),
+                    make_rot_y(bc->yaw));
+                bc->head_world_pos = transform_point(bw, head_l);
+                bc->chest_world_pos = transform_point(bw, chest_l);
+                bc->muzzle_world_pos = transform_point(bw, muz_l);
+            }
+        });
+    } else {
+        out_frame.skinned_bot_vertices.clear();
+    }
+
     out_frame.draw_count = 0;
 
     const auto& ents = impl_->ecs.renderables().entities();

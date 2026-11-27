@@ -311,6 +311,10 @@ int print_status(const WindowInstance& instance) {
     const std::int32_t player_feet_x_mm = std::atomic_ref<std::int32_t>(state->player_feet_x_mm).load(std::memory_order_acquire);
     const std::int32_t player_feet_y_mm = std::atomic_ref<std::int32_t>(state->player_feet_y_mm).load(std::memory_order_acquire);
     const std::int32_t player_feet_z_mm = std::atomic_ref<std::int32_t>(state->player_feet_z_mm).load(std::memory_order_acquire);
+    const std::int32_t tactical_weapon_id = std::atomic_ref<std::int32_t>(state->tactical_weapon_id).load(std::memory_order_acquire);
+    const std::int32_t cs_bots_alive_ct = std::atomic_ref<std::int32_t>(state->cs_bots_alive_ct).load(std::memory_order_acquire);
+    const std::int32_t cs_bots_alive_t = std::atomic_ref<std::int32_t>(state->cs_bots_alive_t).load(std::memory_order_acquire);
+    const std::int32_t cs_bot_kills = std::atomic_ref<std::int32_t>(state->cs_bot_kills).load(std::memory_order_acquire);
     const std::int32_t overlay_enabled = std::atomic_ref<std::int32_t>(state->overlay_enabled).load(std::memory_order_acquire);
     const std::int32_t flash_indicator_enabled = std::atomic_ref<std::int32_t>(state->flash_indicator_enabled).load(std::memory_order_acquire);
     const std::int32_t raw_input_enabled = std::atomic_ref<std::int32_t>(state->raw_input_enabled).load(std::memory_order_acquire);
@@ -505,6 +509,11 @@ int print_status(const WindowInstance& instance) {
               << ",\"feet_m\":[" << std::fixed << std::setprecision(3) << (static_cast<double>(player_feet_x_mm) / 1000.0)
               << "," << (static_cast<double>(player_feet_y_mm) / 1000.0)
               << "," << (static_cast<double>(player_feet_z_mm) / 1000.0) << "]"
+              << "},\"cs_arsenal\":{\"weapon_id\":" << tactical_weapon_id
+              << ",\"weapon_name\":\"" << (tactical_weapon_id == 1 ? "mp5" : tactical_weapon_id == 2 ? "ak47" : tactical_weapon_id == 3 ? "scout" : tactical_weapon_id == 4 ? "shotgun" : tactical_weapon_id == 5 ? "dual_pistols" : "usp")
+              << "\",\"bots_alive_ct\":" << cs_bots_alive_ct
+              << ",\"bots_alive_t\":" << cs_bots_alive_t
+              << ",\"bot_kills\":" << cs_bot_kills
               << "},\"ecs\":{\"entities\":" << ecs_entity_count
               << ",\"renderables\":" << ecs_renderable_count
               << ",\"physics_bodies\":" << ecs_physics_count
@@ -1135,6 +1144,15 @@ int apply_setting(const WindowInstance& instance, const std::wstring& key, const
         }
         command = frame_warp_lab::ControlCommand::set_player_test_input;
         parameter = static_cast<LPARAM>(parsed);
+    } else if (key == L"weapon") {
+        command = frame_warp_lab::ControlCommand::set_weapon;
+        if (value == L"usp" || value == L"pistol" || value == L"0") parameter = 0;
+        else if (value == L"smg" || value == L"mp5" || value == L"1") parameter = 1;
+        else if (value == L"rifle" || value == L"ak47" || value == L"2") parameter = 2;
+        else if (value == L"scout" || value == L"sniper" || value == L"3") parameter = 3;
+        else if (value == L"shotgun" || value == L"4") parameter = 4;
+        else if (value == L"dual" || value == L"dual_pistols" || value == L"5") parameter = 5;
+        else return fail("invalid_value", "Expected weapon in {usp, smg, rifle, scout, shotgun, dual, 0..5}");
     } else {
         return fail("unknown_setting", "Supported settings are: mode, dlssg_mult, pacer, target_fps, async_gpu, vrs, selective_tiles, tile_budget, tile_policy, auto_tile_budget, cache_sharpen, coarse_fallback, subtile_interleave, shader_feature, render_scale, upscale_filter, drs, drs_min, drs_max, fixed_dt_us, adaptive, adaptive_dlssg, instrumentation, divider, vsync, view, path, stress, overlay, flash");
     }

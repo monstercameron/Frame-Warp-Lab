@@ -523,6 +523,7 @@ Dust2MapPackage load_and_build_dust2_map() {
     }
 
     const std::filesystem::path base_dir = gltf_path.parent_path();
+    const std::filesystem::path hd_dir = base_dir / "textures_hd";
     const std::size_t mat_count = std::min<std::size_t>(data->materials_count, k_dust2_max_materials);
     pkg.texture_paths.resize(mat_count);
     for (std::size_t mi = 0; mi < mat_count; ++mi) {
@@ -530,7 +531,26 @@ Dust2MapPackage load_and_build_dust2_map() {
         if (mat.has_pbr_metallic_roughness && mat.pbr_metallic_roughness.base_color_texture.texture != nullptr) {
             const cgltf_image* img = mat.pbr_metallic_roughness.base_color_texture.texture->image;
             if (img != nullptr && img->uri != nullptr && img->uri[0] != '\0') {
-                pkg.texture_paths[mi] = (base_dir / img->uri).string();
+                const std::filesystem::path orig_path = base_dir / img->uri;
+                const std::string stem = orig_path.stem().string();
+                std::filesystem::path chosen = orig_path;
+                const std::array<const char*, 4> hd_exts = {".png", ".jpg", ".jpeg", ".bmp"};
+                bool found_hd = false;
+                for (const char* ext : hd_exts) {
+                    const std::filesystem::path cand = hd_dir / (stem + ext);
+                    if (std::filesystem::exists(cand, ec)) {
+                        chosen = cand;
+                        found_hd = true;
+                        break;
+                    }
+                }
+                if (!found_hd && !std::filesystem::exists(chosen, ec)) {
+                    const std::filesystem::path fallback_png = orig_path.parent_path() / (stem + ".png");
+                    if (std::filesystem::exists(fallback_png, ec)) {
+                        chosen = fallback_png;
+                    }
+                }
+                pkg.texture_paths[mi] = chosen.string();
             }
         }
     }

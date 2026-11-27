@@ -489,6 +489,79 @@ RangeGeometryPackage build_tactical_range_geometry() {
         end_sub(RangeMeshKind::transparent_glass, s);
     }
 
+    pkg.weapon_muzzle_offsets[0] = pkg.pistol_muzzle_offset;
+    pkg.weapon_eject_offsets[0] = pkg.pistol_eject_offset;
+    pkg.weapon_ads_sight_y[0] = pkg.pistol_ads_sight_y;
+    pkg.weapon_loaded[0] = true;
+
+    struct WeaponLoadSpec {
+        std::int32_t slot;
+        RangeMeshKind kind;
+        const char* path;
+        float length_m;
+        bool flip_z;
+        bool skip_arms;
+        bool shotgun_fb;
+    };
+    const std::array<WeaponLoadSpec, 5> weapon_specs = {{
+        {1, RangeMeshKind::weapon_smg, "assets/models/weapons/mp5.glb", 0.50f, true, false, false},
+        {2, RangeMeshKind::weapon_rifle, "assets/models/weapons/ak47.glb", 0.78f, true, true, false},
+        {3, RangeMeshKind::weapon_scout, "assets/models/weapons/scout.glb", 0.94f, true, true, false},
+        {4, RangeMeshKind::weapon_shotgun, "assets/models/weapons/shotgun.glb", 0.84f, true, false, true},
+        {5, RangeMeshKind::weapon_dual_pistol, "assets/models/weapons/dual_pistol.glb", 0.25f, true, false, false},
+    }};
+    for (const auto& ws : weapon_specs) {
+        const auto s = begin_sub(ws.kind);
+        const LoadedWeaponMesh wm = load_weapon_glb_merged(ws.path, ws.length_m, ws.flip_z, ws.skip_arms, ws.shotgun_fb);
+        if (wm.loaded) {
+            const auto base_v = static_cast<std::uint32_t>(pkg.vertices.size());
+            pkg.vertices.insert(pkg.vertices.end(), wm.vertices.begin(), wm.vertices.end());
+            for (std::uint32_t idx : wm.indices) {
+                pkg.indices.push_back(base_v + idx);
+            }
+            pkg.weapon_muzzle_offsets[static_cast<std::size_t>(ws.slot)] = wm.muzzle_offset;
+            pkg.weapon_eject_offsets[static_cast<std::size_t>(ws.slot)] = wm.eject_offset;
+            pkg.weapon_ads_sight_y[static_cast<std::size_t>(ws.slot)] = wm.ads_sight_y;
+            pkg.weapon_loaded[static_cast<std::size_t>(ws.slot)] = true;
+        } else {
+            mb.add_box({0.0f, 0.02f, 0.14f}, {0.025f, 0.035f, ws.length_m * 0.45f}, 10U, 1.0f, 1.0f, true);
+            pkg.weapon_muzzle_offsets[static_cast<std::size_t>(ws.slot)] = {0.0f, 0.04f, ws.length_m * 0.5f};
+            pkg.weapon_eject_offsets[static_cast<std::size_t>(ws.slot)] = {0.025f, 0.04f, 0.05f};
+            pkg.weapon_ads_sight_y[static_cast<std::size_t>(ws.slot)] = 0.06f;
+            pkg.weapon_loaded[static_cast<std::size_t>(ws.slot)] = false;
+        }
+        end_sub(ws.kind, s);
+    }
+
+    pkg.ct_bot_template = load_skinned_character_glb("assets/models/characters/fbi_ct.glb", true);
+    pkg.t_bot_template = load_skinned_character_glb("assets/models/characters/terrorist.glb", false);
+    pkg.bots_vb_base_vertex = static_cast<std::uint32_t>(pkg.vertices.size());
+    std::uint32_t rel_v_cursor = 0U;
+    for (std::uint32_t bi = 0; bi < 8U; ++bi) {
+        const auto kind = static_cast<RangeMeshKind>(static_cast<std::uint32_t>(RangeMeshKind::bot_slot_0) + bi);
+        const auto s = begin_sub(kind);
+        const SkinnedCharacterTemplate& tpl = (bi < 4U) ? pkg.ct_bot_template : pkg.t_bot_template;
+        pkg.bot_vb_offsets[bi] = rel_v_cursor;
+        if (tpl.loaded && !tpl.source_vertices.empty() && !tpl.indices.empty()) {
+            const auto vcount = static_cast<std::uint32_t>(tpl.source_vertices.size());
+            const auto base_v = static_cast<std::uint32_t>(pkg.vertices.size());
+            pkg.vertices.resize(base_v + vcount);
+            SkinnedPoseParams init_pose{};
+            init_pose.clip_index = tpl.find_clip("Idle");
+            Float3 hl{}, cl{}, ml{};
+            evaluate_skinned_character(tpl, init_pose, pkg.vertices.data() + base_v, hl, cl, ml);
+            for (std::uint32_t idx : tpl.indices) {
+                pkg.indices.push_back(base_v + idx);
+            }
+            pkg.bot_vb_counts[bi] = vcount;
+            rel_v_cursor += vcount;
+        } else {
+            pkg.bot_vb_counts[bi] = 0U;
+        }
+        end_sub(kind, s);
+    }
+    pkg.bots_total_vertices = rel_v_cursor;
+
     return pkg;
 }
 

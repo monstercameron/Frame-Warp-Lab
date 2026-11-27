@@ -41,6 +41,9 @@ struct LuaHostCallbacks {
     std::function<LuaRaycastResult(Float3, Float3, float)> raycast_world;
     std::function<LuaCapsuleSweepResult(Float3, Float3, float, float)> sweep_capsule;
     std::function<LuaOverlapResult(Float3, float, float)> resolve_capsule_overlap;
+    std::function<std::vector<Float3>()> get_waypoints;
+    std::function<bool()> is_dust2_active;
+    std::function<void(std::int32_t)> record_bot_kill;
 };
 
 struct LuaEngineStats {

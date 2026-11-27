@@ -247,7 +247,7 @@ void write_hud_constants_simd(HudConstantsData* destination, const HudOverlaySta
     simd::store_float4(
         destination->tactical_flags,
         hud.tactical_hud_enabled ? (hud.tactical_radar_enabled ? 2.0f : 1.0f) : 0.0f,
-        th.ads_alpha,
+        th.ads_alpha + th.scope_alpha,
         th.crosshair_spread,
         th.hit_marker_alpha);
     simd::store_float4(
@@ -267,7 +267,8 @@ void write_hud_constants_simd(HudConstantsData* destination, const HudOverlaySta
         static_cast<std::uint32_t>(std::max(0, th.hits)),
         static_cast<std::uint32_t>(std::max(0, th.headshots)),
         static_cast<std::uint32_t>(std::max(0, th.score)),
-        static_cast<std::uint32_t>(std::max(0, th.targets_up)));
+        static_cast<std::uint32_t>(std::max(0, th.targets_up) & 0xFFFF)
+            | (static_cast<std::uint32_t>(std::clamp(th.active_weapon_id, 0, 7)) << 16U));
     simd::store_float4(
         destination->tactical_player_radar,
         th.player_pos.x,
@@ -838,6 +839,20 @@ bool Renderer::submit_scene_async(
                     scene_command_list_->SetGraphicsRoot32BitConstants(1, 4, meta, 0);
                     scene_command_list_->DrawIndexedInstanced(ch.index_count, 1, ch.index_offset, 0, 0);
                 }
+                for (std::uint32_t i = 0; i < count; ++i) {
+                    const auto& dc = range_frame->draws[i];
+                    if (dc.viewmodel
+                        || dc.mesh == RangeMeshKind::static_world
+                        || dc.mesh == RangeMeshKind::target_plate
+                        || dc.mesh == RangeMeshKind::transparent_glass) {
+                        continue;
+                    }
+                    const auto& sm = dust2_viewmodel_submeshes_[static_cast<std::size_t>(dc.mesh)];
+                    if (sm.index_count == 0U) continue;
+                    const std::uint32_t meta[4] = {dc.instance_index, 0U, sm.index_offset / 3U, 0U};
+                    scene_command_list_->SetGraphicsRoot32BitConstants(1, 4, meta, 0);
+                    scene_command_list_->DrawIndexedInstanced(sm.index_count, 1, sm.index_offset, 0, 0);
+                }
             } else {
                 for (std::uint32_t i = 0; i < count; ++i) {
                     const auto& dc = range_frame->draws[i];
@@ -850,6 +865,27 @@ bool Renderer::submit_scene_async(
                 }
             }
         };
+
+        if (bots_total_vertices_ > 0U
+            && mapped_skinned_bots_ != nullptr
+            && skinned_bot_upload_buffer_
+            && range_frame->skinned_bot_vertices.size() == bots_total_vertices_) {
+            const UINT64 bots_bytes = static_cast<UINT64>(bots_total_vertices_) * sizeof(RangeVertex);
+            const UINT64 src_off = static_cast<UINT64>(slot_index) * bots_bytes;
+            const UINT64 dst_off = static_cast<UINT64>(use_dust2 ? dust2_bots_vb_base_vertex_ : range_bots_vb_base_vertex_) * sizeof(RangeVertex);
+            std::memcpy(mapped_skinned_bots_ + src_off, range_frame->skinned_bot_vertices.data(), static_cast<std::size_t>(bots_bytes));
+            const auto to_copy = transition_barrier(
+                active_vb_res,
+                D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                D3D12_RESOURCE_STATE_COPY_DEST);
+            scene_command_list_->ResourceBarrier(1, &to_copy);
+            scene_command_list_->CopyBufferRegion(active_vb_res, dst_off, skinned_bot_upload_buffer_.Get(), src_off, bots_bytes);
+            const auto from_copy = transition_barrier(
+                active_vb_res,
+                D3D12_RESOURCE_STATE_COPY_DEST,
+                D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            scene_command_list_->ResourceBarrier(1, &from_copy);
+        }
 
         const auto draw_viewmodel_geometry = [&]() {
             for (std::uint32_t i = 0; i < count; ++i) {
@@ -2922,6 +2958,18 @@ void Renderer::create_range_resources() {
     range_geometry_meta_.pistol_muzzle_offset = pkg.pistol_muzzle_offset;
     range_geometry_meta_.pistol_eject_offset = pkg.pistol_eject_offset;
     range_geometry_meta_.pistol_ads_sight_y = pkg.pistol_ads_sight_y;
+    range_geometry_meta_.weapon_muzzle_offsets = pkg.weapon_muzzle_offsets;
+    range_geometry_meta_.weapon_eject_offsets = pkg.weapon_eject_offsets;
+    range_geometry_meta_.weapon_ads_sight_y = pkg.weapon_ads_sight_y;
+    range_geometry_meta_.weapon_loaded = pkg.weapon_loaded;
+    range_geometry_meta_.ct_bot_template = std::move(pkg.ct_bot_template);
+    range_geometry_meta_.t_bot_template = std::move(pkg.t_bot_template);
+    range_geometry_meta_.bots_vb_base_vertex = pkg.bots_vb_base_vertex;
+    range_geometry_meta_.bots_total_vertices = pkg.bots_total_vertices;
+    range_geometry_meta_.bot_vb_offsets = pkg.bot_vb_offsets;
+    range_geometry_meta_.bot_vb_counts = pkg.bot_vb_counts;
+    range_bots_vb_base_vertex_ = pkg.bots_vb_base_vertex;
+    bots_total_vertices_ = pkg.bots_total_vertices;
 
     const std::size_t vb_bytes = pkg.vertices.size() * sizeof(RangeVertex);
     const std::size_t ib_bytes = pkg.indices.size() * sizeof(std::uint32_t);
@@ -2965,6 +3013,11 @@ void Renderer::create_range_resources() {
     const std::size_t inst_bytes = static_cast<std::size_t>(source_slot_count) * max_range_instances * sizeof(RangeInstanceGpu);
     range_instance_buffer_ = create_buffer(device_.Get(), D3D12_HEAP_TYPE_UPLOAD, inst_bytes, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ, "Create range instance buffer");
     check(range_instance_buffer_->Map(0, &empty_range, reinterpret_cast<void**>(&mapped_range_instances_)), "Map range instance buffer");
+    if (bots_total_vertices_ > 0U) {
+        const std::size_t skin_bytes = static_cast<std::size_t>(source_slot_count) * static_cast<std::size_t>(bots_total_vertices_) * sizeof(RangeVertex);
+        skinned_bot_upload_buffer_ = create_buffer(device_.Get(), D3D12_HEAP_TYPE_UPLOAD, skin_bytes, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ, "Create skinned bot upload buffer");
+        check(skinned_bot_upload_buffer_->Map(0, &empty_range, reinterpret_cast<void**>(&mapped_skinned_bots_)), "Map skinned bot upload buffer");
+    }
 
     auto upload_default_buffer = [&](const void* src_data, std::size_t bytes, D3D12_RESOURCE_STATES final_state, const char* label) -> ComPtr<ID3D12Resource> {
         const std::size_t safe_bytes = std::max<std::size_t>(bytes, 64U);
@@ -3145,6 +3198,7 @@ void Renderer::create_range_resources() {
         std::vector<RangeVertex> combined_d2_verts = dust2_map_.vertices;
         std::vector<std::uint32_t> combined_d2_indices = dust2_map_.indices;
         const auto pistol_v_base = static_cast<std::uint32_t>(combined_d2_verts.size());
+        dust2_bots_vb_base_vertex_ = pistol_v_base + pkg.bots_vb_base_vertex;
         combined_d2_verts.insert(combined_d2_verts.end(), pkg.vertices.begin(), pkg.vertices.end());
         for (std::size_t mi = 0; mi < static_cast<std::size_t>(RangeMeshKind::count); ++mi) {
             const auto& rsm = range_submeshes_[mi];

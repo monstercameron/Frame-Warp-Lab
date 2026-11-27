@@ -10,7 +10,7 @@
 namespace frame_warp_lab {
 
 inline constexpr wchar_t window_class_name[] = L"FrameWarpLabWindow";
-inline constexpr std::uint32_t runtime_state_version = 37;
+inline constexpr std::uint32_t runtime_state_version = 38;
 inline constexpr std::size_t runtime_event_capacity = 64;
 inline constexpr std::size_t runtime_frame_trace_capacity = 256;
 inline constexpr std::size_t hud_graph_sample_count = 128;
@@ -77,6 +77,7 @@ enum class ControlCommand : WPARAM {
     set_surface_cache_mb = 53,
     set_thin_gbuf = 54,
     set_player_test_input = 55,
+    set_weapon = 56,
 };
 
 enum class SceneKind : std::int32_t {
@@ -402,6 +403,10 @@ struct RuntimeState {
     std::int32_t player_feet_x_mm;
     std::int32_t player_feet_y_mm;
     std::int32_t player_feet_z_mm;
+    std::int32_t tactical_weapon_id;
+    std::int32_t cs_bots_alive_ct;
+    std::int32_t cs_bots_alive_t;
+    std::int32_t cs_bot_kills;
     std::int32_t overlay_enabled;
     std::int32_t flash_indicator_enabled;
     std::int32_t raw_input_enabled;

@@ -136,6 +136,18 @@ struct LuaScriptEngine::Impl {
         return ok;
     }
 
+    static bool read_table_string(lua_State* state, int idx, const char* key, std::string& out_val) {
+        lua_getfield(state, idx, key);
+        const bool ok = lua_isstring(state, -1) != 0;
+        if (ok) {
+            std::size_t len = 0;
+            const char* s = lua_tolstring(state, -1, &len);
+            if (s != nullptr) out_val.assign(s, len);
+        }
+        lua_pop(state, 1);
+        return ok;
+    }
+
     static int l_ecs_create(lua_State* state) {
         auto* self = get_impl(state);
         const char* name = luaL_checkstring(state, 1);
@@ -193,16 +205,26 @@ struct LuaScriptEngine::Impl {
             lua_pushnil(state);
             return 1;
         }
-        lua_createtable(state, 0, 21);
+        lua_createtable(state, 0, 36);
         auto set_i = [&](const char* k, std::int32_t v) { lua_pushinteger(state, v); lua_setfield(state, -2, k); };
         auto set_f = [&](const char* k, float v) { lua_pushnumber(state, v); lua_setfield(state, -2, k); };
         auto set_b = [&](const char* k, bool v) { lua_pushboolean(state, v ? 1 : 0); lua_setfield(state, -2, k); };
+        set_i("weapon_id", w->weapon_id);
         set_i("ammo_in_mag", w->ammo_in_mag);
         set_i("mag_size", w->mag_size);
         set_i("ammo_reserve", w->ammo_reserve);
         set_i("shots_fired", w->shots_fired);
         set_f("fire_cooldown", w->fire_cooldown);
         set_f("fire_interval", w->fire_interval);
+        set_b("firing_held", w->firing_held);
+        set_b("full_auto", w->full_auto);
+        set_i("pellet_count", w->pellet_count);
+        set_f("base_damage", w->base_damage);
+        set_f("ads_fov_rad", w->ads_fov_rad);
+        set_f("scope_alpha", w->scope_alpha);
+        set_f("dual_left_kick", w->dual_left_kick);
+        set_f("dual_right_kick", w->dual_right_kick);
+        set_i("dual_hand_toggle", w->dual_hand_toggle);
         set_b("ads_requested", w->ads_requested);
         set_f("ads_alpha", w->ads_alpha);
         set_b("reloading", w->reloading);
@@ -235,12 +257,22 @@ struct LuaScriptEngine::Impl {
             lua_pushboolean(state, 0);
             return 1;
         }
+        read_table_int(state, 2, "weapon_id", w->weapon_id);
         read_table_int(state, 2, "ammo_in_mag", w->ammo_in_mag);
         read_table_int(state, 2, "mag_size", w->mag_size);
         read_table_int(state, 2, "ammo_reserve", w->ammo_reserve);
         read_table_int(state, 2, "shots_fired", w->shots_fired);
         read_table_number(state, 2, "fire_cooldown", w->fire_cooldown);
         read_table_number(state, 2, "fire_interval", w->fire_interval);
+        read_table_bool(state, 2, "firing_held", w->firing_held);
+        read_table_bool(state, 2, "full_auto", w->full_auto);
+        read_table_int(state, 2, "pellet_count", w->pellet_count);
+        read_table_number(state, 2, "base_damage", w->base_damage);
+        read_table_number(state, 2, "ads_fov_rad", w->ads_fov_rad);
+        read_table_number(state, 2, "scope_alpha", w->scope_alpha);
+        read_table_number(state, 2, "dual_left_kick", w->dual_left_kick);
+        read_table_number(state, 2, "dual_right_kick", w->dual_right_kick);
+        read_table_int(state, 2, "dual_hand_toggle", w->dual_hand_toggle);
         read_table_bool(state, 2, "ads_requested", w->ads_requested);
         read_table_number(state, 2, "ads_alpha", w->ads_alpha);
         read_table_bool(state, 2, "reloading", w->reloading);
@@ -478,6 +510,113 @@ struct LuaScriptEngine::Impl {
         RenderableComponent* r = self->world->renderables().try_get(h);
         if (r != nullptr) {
             r->emissive = em;
+        }
+        return 0;
+    }
+
+    static int l_ecs_get_bot(lua_State* state) {
+        auto* self = get_impl(state);
+        const auto h = static_cast<EntityHandle>(luaL_checkinteger(state, 1));
+        const BotComponent* b = self->world->bots().try_get(h);
+        if (b == nullptr) {
+            lua_pushnil(state);
+            return 1;
+        }
+        lua_createtable(state, 0, 22);
+        auto set_i = [&](const char* k, std::int32_t v) { lua_pushinteger(state, v); lua_setfield(state, -2, k); };
+        auto set_f = [&](const char* k, float v) { lua_pushnumber(state, v); lua_setfield(state, -2, k); };
+        auto set_b = [&](const char* k, bool v) { lua_pushboolean(state, v ? 1 : 0); lua_setfield(state, -2, k); };
+        auto set_s = [&](const char* k, const std::string& v) { lua_pushlstring(state, v.data(), v.size()); lua_setfield(state, -2, k); };
+        set_i("slot_index", b->slot_index);
+        set_i("team", b->team);
+        set_b("active", b->active);
+        set_b("alive", b->alive);
+        set_i("hp", b->hp);
+        set_i("max_hp", b->max_hp);
+        set_f("x", b->pos.x);
+        set_f("y", b->pos.y);
+        set_f("z", b->pos.z);
+        set_f("vx", b->vel.x);
+        set_f("vy", b->vel.y);
+        set_f("vz", b->vel.z);
+        set_f("yaw", b->yaw);
+        set_f("aim_pitch", b->aim_pitch);
+        set_s("anim_clip", b->anim_clip);
+        set_f("anim_time", b->anim_time);
+        set_f("anim_speed", b->anim_speed);
+        set_b("anim_loop", b->anim_loop);
+        set_f("hit_flash", b->hit_flash);
+        set_f("respawn_timer", b->respawn_timer);
+        set_f("shoot_cooldown", b->shoot_cooldown);
+        set_i("waypoint_index", b->waypoint_index);
+        return 1;
+    }
+
+    static int l_ecs_set_bot(lua_State* state) {
+        auto* self = get_impl(state);
+        const auto h = static_cast<EntityHandle>(luaL_checkinteger(state, 1));
+        luaL_checktype(state, 2, LUA_TTABLE);
+        BotComponent* b = self->world->bots().try_get(h);
+        if (b == nullptr) {
+            lua_pushboolean(state, 0);
+            return 1;
+        }
+        std::string next_clip = b->anim_clip;
+        read_table_bool(state, 2, "active", b->active);
+        read_table_bool(state, 2, "alive", b->alive);
+        read_table_int(state, 2, "hp", b->hp);
+        read_table_int(state, 2, "max_hp", b->max_hp);
+        read_table_number(state, 2, "x", b->pos.x);
+        read_table_number(state, 2, "y", b->pos.y);
+        read_table_number(state, 2, "z", b->pos.z);
+        read_table_number(state, 2, "vx", b->vel.x);
+        read_table_number(state, 2, "vy", b->vel.y);
+        read_table_number(state, 2, "vz", b->vel.z);
+        read_table_number(state, 2, "yaw", b->yaw);
+        read_table_number(state, 2, "aim_pitch", b->aim_pitch);
+        if (read_table_string(state, 2, "anim_clip", next_clip) && next_clip != b->anim_clip) {
+            b->prev_anim_clip = b->anim_clip;
+            b->prev_anim_time = b->anim_time;
+            b->anim_clip = next_clip;
+            b->anim_blend = 0.0f;
+        }
+        read_table_number(state, 2, "anim_time", b->anim_time);
+        read_table_number(state, 2, "anim_speed", b->anim_speed);
+        read_table_bool(state, 2, "anim_loop", b->anim_loop);
+        read_table_number(state, 2, "hit_flash", b->hit_flash);
+        read_table_number(state, 2, "respawn_timer", b->respawn_timer);
+        read_table_number(state, 2, "shoot_cooldown", b->shoot_cooldown);
+        read_table_int(state, 2, "waypoint_index", b->waypoint_index);
+        lua_pushboolean(state, 1);
+        return 1;
+    }
+
+    static int l_ecs_get_waypoints(lua_State* state) {
+        auto* self = get_impl(state);
+        const std::vector<Float3> wps = self->callbacks.get_waypoints ? self->callbacks.get_waypoints() : std::vector<Float3>{};
+        lua_createtable(state, static_cast<int>(wps.size()), 0);
+        for (std::size_t i = 0; i < wps.size(); ++i) {
+            lua_createtable(state, 0, 3);
+            lua_pushnumber(state, wps[i].x); lua_setfield(state, -2, "x");
+            lua_pushnumber(state, wps[i].y); lua_setfield(state, -2, "y");
+            lua_pushnumber(state, wps[i].z); lua_setfield(state, -2, "z");
+            lua_rawseti(state, -2, static_cast<lua_Integer>(i + 1U));
+        }
+        return 1;
+    }
+
+    static int l_ecs_is_dust2(lua_State* state) {
+        auto* self = get_impl(state);
+        const bool d2 = self->callbacks.is_dust2_active ? self->callbacks.is_dust2_active() : false;
+        lua_pushboolean(state, d2 ? 1 : 0);
+        return 1;
+    }
+
+    static int l_ecs_record_bot_kill(lua_State* state) {
+        auto* self = get_impl(state);
+        const auto team = static_cast<std::int32_t>(luaL_optinteger(state, 1, 1));
+        if (self->callbacks.record_bot_kill) {
+            self->callbacks.record_bot_kill(team);
         }
         return 0;
     }
@@ -722,6 +861,11 @@ struct LuaScriptEngine::Impl {
             {"set_health", l_ecs_set_health},
             {"get_player", l_ecs_get_player},
             {"set_player", l_ecs_set_player},
+            {"get_bot", l_ecs_get_bot},
+            {"set_bot", l_ecs_set_bot},
+            {"get_waypoints", l_ecs_get_waypoints},
+            {"is_dust2", l_ecs_is_dust2},
+            {"record_bot_kill", l_ecs_record_bot_kill},
             {"set_visible", l_ecs_set_visible},
             {"set_emissive", l_ecs_set_emissive},
             {nullptr, nullptr},

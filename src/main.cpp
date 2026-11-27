@@ -181,6 +181,10 @@ public:
         std::atomic_ref<std::int32_t>(state_->player_feet_x_mm).store(static_cast<std::int32_t>(std::lround(t.player_feet_pos.x * 1000.0f)), std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->player_feet_y_mm).store(static_cast<std::int32_t>(std::lround(t.player_feet_pos.y * 1000.0f)), std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->player_feet_z_mm).store(static_cast<std::int32_t>(std::lround(t.player_feet_pos.z * 1000.0f)), std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->tactical_weapon_id).store(t.active_weapon_id, std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->cs_bots_alive_ct).store(t.bots_alive_ct, std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->cs_bots_alive_t).store(t.bots_alive_t, std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->cs_bot_kills).store(t.bot_kills, std::memory_order_release);
     }
 
     void update_dust2_octree(const frame_warp_lab::Dust2OctreeTelemetry& d) {
@@ -499,9 +503,11 @@ struct WindowInputState {
     float pending_mouse_delta_x = 0.0f;
     float pending_mouse_delta_y = 0.0f;
     bool range_mode = true;
+    bool left_mouse_down = false;
     bool right_mouse_down = false;
     bool fire_trigger_pending = false;
     bool jump_trigger_pending = false;
+    std::int32_t pending_weapon_cycle = 0;
     std::vector<std::pair<WPARAM, LPARAM>> queued_control_messages;
 };
 
@@ -572,8 +578,8 @@ frame_warp_lab::ManualCameraInput consume_manual_camera_input(
     if (key_down('S')) input.forward_axis -= 1.0f;
     if (key_down('D')) input.right_axis += 1.0f;
     if (key_down('A')) input.right_axis -= 1.0f;
-    if (key_down('E')) input.vertical_axis += 1.0f;
-    if (key_down('Q')) input.vertical_axis -= 1.0f;
+    if (key_down('E') && !input_state.range_mode) input.vertical_axis += 1.0f;
+    if (key_down('Q') && !input_state.range_mode) input.vertical_axis -= 1.0f;
     if (key_down(VK_RIGHT)) input.yaw_axis += 1.0f;
     if (key_down(VK_LEFT)) input.yaw_axis -= 1.0f;
     if (key_down(VK_UP)) input.pitch_axis += 1.0f;
@@ -709,6 +715,7 @@ LRESULT CALLBACK window_procedure(HWND window, UINT message, WPARAM message_para
     }
     if (message == WM_LBUTTONDOWN) {
         input->flash_trigger_pending = true;
+        input->left_mouse_down = true;
         stamp_input_arrival(*input);
         if (input->range_mode) {
             input->fire_trigger_pending = true;
@@ -724,9 +731,19 @@ LRESULT CALLBACK window_procedure(HWND window, UINT message, WPARAM message_para
         return 0;
     }
     if (message == WM_LBUTTONUP) {
+        input->left_mouse_down = false;
         if (input->left_drag_active) {
             input->left_drag_active = false;
             if (GetCapture() == window) ReleaseCapture();
+        }
+        return 0;
+    }
+    if (message == WM_MOUSEWHEEL) {
+        if (input->range_mode) {
+            const short delta = GET_WHEEL_DELTA_WPARAM(message_parameter);
+            if (delta > 0) input->pending_weapon_cycle += 1;
+            else if (delta < 0) input->pending_weapon_cycle -= 1;
+            stamp_input_arrival(*input);
         }
         return 0;
     }
@@ -760,6 +777,7 @@ LRESULT CALLBACK window_procedure(HWND window, UINT message, WPARAM message_para
     }
     if (message == WM_KILLFOCUS || (message == WM_CAPTURECHANGED && reinterpret_cast<HWND>(message_data) != window)) {
         input->left_drag_active = false;
+        input->left_mouse_down = false;
         input->right_mouse_down = false;
         set_mouse_look_locked(window, *input, false);
         return 0;
@@ -892,9 +910,21 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 meta.pistol_muzzle_offset,
                 meta.pistol_eject_offset,
                 meta.pistol_ads_sight_y);
+            tactical_range.set_arsenal_geometry_meta(
+                meta.weapon_muzzle_offsets,
+                meta.weapon_eject_offsets,
+                meta.weapon_ads_sight_y,
+                meta.weapon_loaded);
+            tactical_range.set_bot_character_templates(
+                &meta.ct_bot_template,
+                &meta.t_bot_template,
+                meta.bot_vb_offsets,
+                meta.bot_vb_counts,
+                meta.bots_total_vertices);
             const auto& d2 = renderer.dust2_map();
             if (d2.loaded) {
                 tactical_range.set_dust2_collision_mesh(d2.vertices, d2.indices, d2.lod0_total_index_count);
+                tactical_range.set_dust2_waypoints(d2.tour_waypoints);
             }
         }
         frame_warp_lab::TacticalRangeFrame tactical_range_frame{};
@@ -1284,6 +1314,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 else if (event_code == 5) tactical_range.emit_named_event("player.jump");
             } else if (command == frame_warp_lab::ControlCommand::set_player_test_input) {
                 cli_player_input_mask = static_cast<std::uint32_t>(message_lparam) & 0x7FU;
+            } else if (command == frame_warp_lab::ControlCommand::set_weapon) {
+                const auto wid = static_cast<std::int32_t>(message_lparam);
+                if (wid >= 0 && wid < frame_warp_lab::k_cs_weapon_count) {
+                    tactical_range.select_weapon(wid);
+                }
             } else if (command == frame_warp_lab::ControlCommand::set_render_scale) {
                 drs_mode = frame_warp_lab::DrsMode::off;
                 render_scale_pct = std::clamp(static_cast<std::int32_t>(message_lparam), 25, 200);
@@ -1520,6 +1555,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                             runtime_state.record_event(
                                 scene_paused ? frame_warp_lab::RuntimeEventType::scene_paused : frame_warp_lab::RuntimeEventType::scene_resumed,
                                 scene_paused ? 1 : 0);
+                        }
+                    } else if (message.wParam == 'Q') {
+                        if (scene_kind == frame_warp_lab::SceneKind::range || scene_kind == frame_warp_lab::SceneKind::dust2) {
+                            tactical_range.cycle_weapon(1);
                         }
                     } else if (message.wParam == 'R') {
                         if (scene_kind == frame_warp_lab::SceneKind::range || scene_kind == frame_warp_lab::SceneKind::dust2) {
@@ -1766,6 +1805,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
             simulation.set_external_position_control(lua_player_physics_active);
             if (in_range_scene) {
                 tactical_range.set_ads_requested(input_state.right_mouse_down || cli_ads_active);
+                tactical_range.set_firing_held(input_state.left_mouse_down);
+                if (input_state.pending_weapon_cycle != 0) {
+                    tactical_range.cycle_weapon(input_state.pending_weapon_cycle);
+                    input_state.pending_weapon_cycle = 0;
+                }
                 if (input_state.fire_trigger_pending) {
                     input_state.fire_trigger_pending = false;
                     tactical_range.request_fire();

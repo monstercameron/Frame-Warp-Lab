@@ -31,4 +31,20 @@ LoadedGltfAsset load_gltf_meshes(
     bool gltf_x_forward_to_engine_z_forward,
     bool bake_node_translation);
 
+struct LoadedWeaponMesh {
+    bool loaded = false;
+    std::vector<RangeVertex> vertices;
+    std::vector<std::uint32_t> indices;
+    Float3 muzzle_offset{0.0f, 0.05f, 0.35f};
+    Float3 eject_offset{0.025f, 0.05f, 0.06f};
+    float ads_sight_y = 0.08f;
+};
+
+LoadedWeaponMesh load_weapon_glb_merged(
+    const std::filesystem::path& relative_glb_path,
+    float target_length_m,
+    bool flip_z_forward,
+    bool skip_arms,
+    bool shotgun_material_fallback = false);
+
 }

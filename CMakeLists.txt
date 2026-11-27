@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(FrameWarpLab VERSION 0.39.1 LANGUAGES C CXX)
+project(FrameWarpLab VERSION 0.40.0 LANGUAGES C CXX)
 
 if(NOT WIN32)
     message(FATAL_ERROR "Frame Warp Lab currently requires Windows and Direct3D 12.")
@@ -87,6 +87,7 @@ add_executable(frame_warp_lab WIN32
     src/lua_engine.cpp
     src/tactical_range.cpp
     src/range_mesh.cpp
+    src/skinning.cpp
     src/dust2_scene.cpp
     src/latency_monitor.cpp
     src/streamline_backend.cpp

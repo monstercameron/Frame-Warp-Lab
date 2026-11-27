@@ -1,4 +1,5 @@
 #include "gltf_loader.h"
+#include "skinning.h"
 
 #define CGLTF_IMPLEMENTATION
 #include <cgltf.h>
@@ -250,6 +251,202 @@ LoadedGltfAsset load_gltf_meshes(
 
     cgltf_free(data);
     return asset;
+}
+
+LoadedWeaponMesh load_weapon_glb_merged(
+    const std::filesystem::path& relative_glb_path,
+    float target_length_m,
+    bool flip_z_forward,
+    bool skip_arms,
+    bool shotgun_material_fallback) {
+    LoadedWeaponMesh out{};
+    const std::filesystem::path resolved = resolve_asset_path(relative_glb_path);
+    std::error_code ec;
+    if (!std::filesystem::exists(resolved, ec)) {
+        return out;
+    }
+    const std::string path_utf8 = resolved.string();
+    cgltf_options options{};
+    cgltf_data* data = nullptr;
+    if (cgltf_parse_file(&options, path_utf8.c_str(), &data) != cgltf_result_success || data == nullptr) {
+        return out;
+    }
+    if (cgltf_load_buffers(&options, data, path_utf8.c_str()) != cgltf_result_success) {
+        cgltf_free(data);
+        return out;
+    }
+
+    auto xform_pt = [](const cgltf_float m[16], float x, float y, float z) -> Float3 {
+        return {
+            m[0] * x + m[4] * y + m[8] * z + m[12],
+            m[1] * x + m[5] * y + m[9] * z + m[13],
+            m[2] * x + m[6] * y + m[10] * z + m[14]};
+    };
+    auto xform_dir = [](const cgltf_float m[16], float x, float y, float z) -> Float3 {
+        return {
+            m[0] * x + m[4] * y + m[8] * z,
+            m[1] * x + m[5] * y + m[9] * z,
+            m[2] * x + m[6] * y + m[10] * z};
+    };
+
+    Float3 bmin{std::numeric_limits<float>::max(), std::numeric_limits<float>::max(), std::numeric_limits<float>::max()};
+    Float3 bmax{-std::numeric_limits<float>::max(), -std::numeric_limits<float>::max(), -std::numeric_limits<float>::max()};
+
+    for (cgltf_size ni = 0; ni < data->nodes_count; ++ni) {
+        const cgltf_node& node = data->nodes[ni];
+        if (node.mesh == nullptr) continue;
+        const std::string nm = node.name != nullptr ? node.name : "";
+        if (skip_arms && (nm.find("Hand") != std::string::npos || nm.find("Arm") != std::string::npos)) {
+            continue;
+        }
+        cgltf_float wm[16]{};
+        cgltf_node_transform_world(&node, wm);
+        const float det3 =
+            wm[0] * (wm[5] * wm[10] - wm[6] * wm[9]) -
+            wm[4] * (wm[1] * wm[10] - wm[2] * wm[9]) +
+            wm[8] * (wm[1] * wm[6] - wm[2] * wm[5]);
+        const bool flip_wind = (det3 < 0.0f);
+
+        for (cgltf_size pi = 0; pi < node.mesh->primitives_count; ++pi) {
+            const cgltf_primitive& prim = node.mesh->primitives[pi];
+            if (prim.type != cgltf_primitive_type_triangles) continue;
+            const cgltf_accessor* pos_acc = nullptr;
+            const cgltf_accessor* norm_acc = nullptr;
+            const cgltf_accessor* uv_acc = nullptr;
+            for (cgltf_size a = 0; a < prim.attributes_count; ++a) {
+                const cgltf_attribute& attr = prim.attributes[a];
+                if (attr.type == cgltf_attribute_type_position) pos_acc = attr.data;
+                else if (attr.type == cgltf_attribute_type_normal) norm_acc = attr.data;
+                else if (attr.type == cgltf_attribute_type_texcoord && attr.index == 0) uv_acc = attr.data;
+            }
+            if (pos_acc == nullptr || pos_acc->count == 0U) continue;
+
+            float r = 0.08f, g = 0.09f, b = 0.11f, rough = 0.38f, metal = 0.72f;
+            if (shotgun_material_fallback) {
+                const std::uint32_t h = static_cast<std::uint32_t>(ni * 7U + pi * 3U);
+                if (ni >= 9U) {
+                    r = 0.18f; g = 0.08f; b = 0.032f; rough = 0.52f; metal = 0.04f;
+                } else if ((h & 1U) == 0U) {
+                    r = 0.045f; g = 0.050f; b = 0.058f; rough = 0.34f; metal = 0.85f;
+                } else {
+                    r = 0.11f; g = 0.12f; b = 0.13f; rough = 0.42f; metal = 0.78f;
+                }
+            } else if (prim.material != nullptr && prim.material->has_pbr_metallic_roughness) {
+                const auto& mr = prim.material->pbr_metallic_roughness;
+                r = mr.base_color_factor[0];
+                g = mr.base_color_factor[1];
+                b = mr.base_color_factor[2];
+                rough = mr.roughness_factor;
+                metal = mr.metallic_factor;
+                const std::string mname = prim.material->name != nullptr ? prim.material->name : "";
+                if (mname.find("wood") != std::string::npos || mname.find("bakelite") != std::string::npos) {
+                    rough = 0.48f; metal = 0.04f;
+                } else if (mname.find("chrome") != std::string::npos || mname.find("steel") != std::string::npos || mname.find("gunmetal") != std::string::npos) {
+                    rough = 0.28f; metal = 0.88f;
+                } else if (mname.find("scope") != std::string::npos) {
+                    rough = 0.12f; metal = 0.20f;
+                } else if (mname.find("green") != std::string::npos || mname.find("awp") != std::string::npos) {
+                    rough = 0.56f; metal = 0.08f;
+                } else if (mname.find("polymer") != std::string::npos || mname.find("rubber") != std::string::npos || mname.find("black") != std::string::npos) {
+                    rough = 0.52f; metal = 0.22f;
+                }
+            }
+            const std::uint32_t packed_mat = pack_inline_pbr_material(r, g, b, rough, metal);
+
+            const auto base_v = static_cast<std::uint32_t>(out.vertices.size());
+            out.vertices.resize(base_v + static_cast<std::uint32_t>(pos_acc->count));
+            for (cgltf_size vi = 0; vi < pos_acc->count; ++vi) {
+                float p[3] = {0.0f, 0.0f, 0.0f};
+                float n[3] = {0.0f, 1.0f, 0.0f};
+                float uv[2] = {0.0f, 0.0f};
+                cgltf_accessor_read_float(pos_acc, vi, p, 3);
+                if (norm_acc != nullptr) cgltf_accessor_read_float(norm_acc, vi, n, 3);
+                if (uv_acc != nullptr) cgltf_accessor_read_float(uv_acc, vi, uv, 2);
+
+                Float3 wp = xform_pt(wm, p[0], p[1], p[2]);
+                Float3 wn = normalize_or(xform_dir(wm, n[0], n[1], n[2]), {0.0f, 1.0f, 0.0f});
+                if (flip_z_forward) {
+                    wp.x = -wp.x;
+                    wp.z = -wp.z;
+                    wn.x = -wn.x;
+                    wn.z = -wn.z;
+                }
+                RangeVertex rv{};
+                rv.px = wp.x;
+                rv.py = wp.y;
+                rv.pz = wp.z;
+                rv.nx = wn.x;
+                rv.ny = wn.y;
+                rv.nz = wn.z;
+                rv.tx = 1.0f;
+                rv.ty = 0.0f;
+                rv.tz = 0.0f;
+                rv.u = uv[0];
+                rv.v = uv[1];
+                rv.material_id = packed_mat;
+                rv.emissive_weight = 0.0f;
+                out.vertices[base_v + static_cast<std::uint32_t>(vi)] = rv;
+                bmin.x = std::min(bmin.x, wp.x);
+                bmin.y = std::min(bmin.y, wp.y);
+                bmin.z = std::min(bmin.z, wp.z);
+                bmax.x = std::max(bmax.x, wp.x);
+                bmax.y = std::max(bmax.y, wp.y);
+                bmax.z = std::max(bmax.z, wp.z);
+            }
+
+            if (prim.indices != nullptr) {
+                for (cgltf_size ii = 0; ii + 2U < prim.indices->count; ii += 3U) {
+                    const auto i0 = base_v + static_cast<std::uint32_t>(cgltf_accessor_read_index(prim.indices, ii + 0U));
+                    const auto i1 = base_v + static_cast<std::uint32_t>(cgltf_accessor_read_index(prim.indices, ii + 1U));
+                    const auto i2 = base_v + static_cast<std::uint32_t>(cgltf_accessor_read_index(prim.indices, ii + 2U));
+                    if (i0 == i1 || i1 == i2 || i2 == i0) continue;
+                    out.indices.push_back(i0);
+                    out.indices.push_back(flip_wind ? i2 : i1);
+                    out.indices.push_back(flip_wind ? i1 : i2);
+                }
+            } else {
+                for (cgltf_size ii = 0; ii + 2U < pos_acc->count; ii += 3U) {
+                    const auto i0 = base_v + static_cast<std::uint32_t>(ii + 0U);
+                    const auto i1 = base_v + static_cast<std::uint32_t>(ii + 1U);
+                    const auto i2 = base_v + static_cast<std::uint32_t>(ii + 2U);
+                    out.indices.push_back(i0);
+                    out.indices.push_back(flip_wind ? i2 : i1);
+                    out.indices.push_back(flip_wind ? i1 : i2);
+                }
+            }
+        }
+    }
+    cgltf_free(data);
+
+    if (out.vertices.empty() || out.indices.empty()) {
+        return out;
+    }
+
+    const float raw_len = std::max(bmax.z - bmin.z, 0.01f);
+    const float scale = target_length_m / raw_len;
+    const float cx = 0.5f * (bmin.x + bmax.x);
+    const float cy = bmin.y + 0.45f * (bmax.y - bmin.y);
+    const float cz = bmin.z + 0.36f * (bmax.z - bmin.z);
+
+    Float3 nmin{std::numeric_limits<float>::max(), std::numeric_limits<float>::max(), std::numeric_limits<float>::max()};
+    Float3 nmax{-std::numeric_limits<float>::max(), -std::numeric_limits<float>::max(), -std::numeric_limits<float>::max()};
+    for (auto& v : out.vertices) {
+        v.px = (v.px - cx) * scale;
+        v.py = (v.py - cy) * scale;
+        v.pz = (v.pz - cz) * scale;
+        nmin.x = std::min(nmin.x, v.px);
+        nmin.y = std::min(nmin.y, v.py);
+        nmin.z = std::min(nmin.z, v.pz);
+        nmax.x = std::max(nmax.x, v.px);
+        nmax.y = std::max(nmax.y, v.py);
+        nmax.z = std::max(nmax.z, v.pz);
+    }
+    compute_smooth_tangents(out.vertices, out.indices);
+    out.muzzle_offset = {0.0f, nmin.y + 0.66f * (nmax.y - nmin.y), nmax.z + 0.02f};
+    out.eject_offset = {nmax.x + 0.015f, nmin.y + 0.68f * (nmax.y - nmin.y), nmin.z + 0.48f * (nmax.z - nmin.z)};
+    out.ads_sight_y = nmax.y - 0.012f;
+    out.loaded = true;
+    return out;
 }
 
 }

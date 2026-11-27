@@ -63,12 +63,22 @@ struct PhysicsBodyComponent {
 };
 
 struct WeaponComponent {
+    std::int32_t weapon_id = 0;
     std::int32_t ammo_in_mag = 12;
     std::int32_t mag_size = 12;
     std::int32_t ammo_reserve = 48;
     std::int32_t shots_fired = 0;
     float fire_cooldown = 0.0f;
     float fire_interval = 0.135f;
+    bool firing_held = false;
+    bool full_auto = false;
+    std::int32_t pellet_count = 1;
+    float base_damage = 34.0f;
+    float ads_fov_rad = 0.88f;
+    float scope_alpha = 0.0f;
+    float dual_left_kick = 0.0f;
+    float dual_right_kick = 0.0f;
+    std::int32_t dual_hand_toggle = 0;
     bool ads_requested = false;
     float ads_alpha = 0.0f;
     bool reloading = false;
@@ -147,6 +157,33 @@ struct PlayerControllerComponent {
     float landing_dip = 0.0f;
     float horizontal_speed = 0.0f;
     std::int32_t collision_count = 0;
+};
+
+struct BotComponent {
+    std::int32_t slot_index = 0;
+    std::int32_t team = 0;
+    bool active = false;
+    bool alive = true;
+    std::int32_t hp = 100;
+    std::int32_t max_hp = 100;
+    Float3 pos{0.0f, 0.0f, 0.0f};
+    Float3 vel{0.0f, 0.0f, 0.0f};
+    float yaw = 0.0f;
+    float aim_pitch = 0.0f;
+    std::string anim_clip = "Idle";
+    std::string prev_anim_clip = "Idle";
+    float anim_time = 0.0f;
+    float prev_anim_time = 0.0f;
+    float anim_blend = 1.0f;
+    float anim_speed = 1.0f;
+    bool anim_loop = true;
+    float hit_flash = 0.0f;
+    float respawn_timer = 0.0f;
+    float shoot_cooldown = 0.0f;
+    std::int32_t waypoint_index = 0;
+    Float3 head_world_pos{0.0f, 1.56f, 0.0f};
+    Float3 chest_world_pos{0.0f, 1.12f, 0.0f};
+    Float3 muzzle_world_pos{0.0f, 1.24f, 0.4f};
 };
 
 struct ScriptComponent {
@@ -266,6 +303,8 @@ public:
     const SparseComponentPool<HealthComponent>& healths() const { return healths_; }
     SparseComponentPool<PlayerControllerComponent>& players() { return players_; }
     const SparseComponentPool<PlayerControllerComponent>& players() const { return players_; }
+    SparseComponentPool<BotComponent>& bots() { return bots_; }
+    const SparseComponentPool<BotComponent>& bots() const { return bots_; }
     SparseComponentPool<ScriptComponent>& scripts() { return scripts_; }
     const SparseComponentPool<ScriptComponent>& scripts() const { return scripts_; }
 
@@ -286,6 +325,7 @@ private:
     SparseComponentPool<CasingComponent> casings_;
     SparseComponentPool<HealthComponent> healths_;
     SparseComponentPool<PlayerControllerComponent> players_;
+    SparseComponentPool<BotComponent> bots_;
     SparseComponentPool<ScriptComponent> scripts_;
 };
 

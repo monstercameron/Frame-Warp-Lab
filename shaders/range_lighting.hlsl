@@ -715,7 +715,18 @@ void sample_range_pbr_material(
 
     float3 ts_n;
     float4 orm;
-    if (material_id >= 16u) {
+    if ((material_id & 0x80000000u) != 0u) {
+        float3 srgb = float3(
+            (float)(material_id & 255u),
+            (float)((material_id >> 8u) & 255u),
+            (float)((material_id >> 16u) & 255u)) * (1.0 / 255.0);
+        out_albedo = pow(saturate(srgb), 2.2);
+        float rough_n = (float)((material_id >> 24u) & 15u) * (1.0 / 15.0);
+        float metal_n = (float)((material_id >> 28u) & 7u) * (1.0 / 7.0);
+        float micro = sin(world_pos.x * 95.0) * cos(world_pos.y * 95.0) * sin(world_pos.z * 95.0);
+        ts_n = normalize(float3(micro * 0.035, -micro * 0.035, 1.0));
+        orm = float4(1.0, clamp(0.10 + rough_n * 0.85, 0.10, 0.96), metal_n, metal_n > 0.45 ? 0.18 : 0.04);
+    } else if (material_id >= 16u) {
         float d2_slice = clamp((float)(material_id - 16u), 0.0, 99.0);
         float2 d2_uv = aniso_enabled ? eval_dust2_pom_uv(uv, d2_slice, world_pos, cam_pos, geo_t, geo_b, out_geo_n) : uv;
         if (aniso_enabled) {

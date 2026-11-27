@@ -207,7 +207,7 @@ private:
     static constexpr std::size_t scene_constant_buffer_stride = 256;
     static constexpr std::size_t present_constant_buffer_stride = 512;
     static constexpr std::size_t hud_constant_buffer_stride = 3072;
-    static constexpr std::size_t max_range_instances = 64;
+    static constexpr std::size_t max_range_instances = 96;
 
     class OsHandle {
     public:
@@ -330,6 +330,11 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Resource> range_index_buffer_;
     Microsoft::WRL::ComPtr<ID3D12Resource> range_instance_buffer_;
     std::uint8_t* mapped_range_instances_ = nullptr;
+    Microsoft::WRL::ComPtr<ID3D12Resource> skinned_bot_upload_buffer_;
+    std::uint8_t* mapped_skinned_bots_ = nullptr;
+    std::uint32_t range_bots_vb_base_vertex_ = 0U;
+    std::uint32_t dust2_bots_vb_base_vertex_ = 0U;
+    std::uint32_t bots_total_vertices_ = 0U;
     D3D12_VERTEX_BUFFER_VIEW range_vb_view_{};
     D3D12_INDEX_BUFFER_VIEW range_ib_view_{};
     std::array<RangeSubmesh, static_cast<std::size_t>(RangeMeshKind::count)> range_submeshes_{};

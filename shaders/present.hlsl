@@ -728,17 +728,41 @@ bool draw_label_4(float2 pixel_pos, float2 origin, uint c0, uint c1, uint c2, ui
 }
 
 float3 composite_tactical_hud(float2 pixel_pos, float2 viewport_size, float3 color) {
-    float ads_alpha = tactical_flags.y;
+    float ads_alpha = saturate(tactical_flags.y);
+    float scope_alpha = saturate(tactical_flags.y - 1.0);
     float spread = tactical_flags.z;
     float hm_alpha = tactical_flags.w;
     bool hm_headshot = tactical_combat.x > 0.5;
     float reload_prog = tactical_combat.y;
+    uint weapon_id = (tactical_score_meta.w >> 16u) & 7u;
 
     float2 center = viewport_size * 0.5;
     float2 dc = pixel_pos - center;
     float2 adc = abs(dc);
 
-    float ch_vis = saturate(1.0 - ads_alpha * 0.88);
+    if (scope_alpha > 0.05) {
+        float min_dim = min(viewport_size.x, viewport_size.y);
+        float radius = min_dim * 0.43;
+        float dist_c = length(dc);
+        if (dist_c > radius) {
+            color = lerp(color, float3(0.01, 0.012, 0.015), scope_alpha * 0.98);
+        } else {
+            float rim = smoothstep(radius - 10.0, radius, dist_c);
+            color = lerp(color, float3(0.01, 0.012, 0.015), rim * scope_alpha * 0.92);
+            bool h_line = adc.y < 0.9;
+            bool v_line = adc.x < 0.9;
+            bool h_tick = (adc.y < 5.5) && (abs(frac(adc.x / 34.0 + 0.5) - 0.5) * 34.0 < 0.9) && (adc.x > 16.0) && (adc.x < radius * 0.65);
+            bool v_tick = (adc.x < 5.5) && (abs(frac(adc.y / 34.0 + 0.5) - 0.5) * 34.0 < 0.9) && (adc.y > 16.0) && (adc.y < radius * 0.65);
+            if (h_line || v_line || h_tick || v_tick) {
+                color = lerp(color, float3(0.02, 0.02, 0.02), scope_alpha * 0.92);
+            }
+            if (dist_c < 2.2) {
+                color = lerp(color, float3(1.0, 0.16, 0.14), scope_alpha);
+            }
+        }
+    }
+
+    float ch_vis = saturate(1.0 - ads_alpha * 0.88) * (1.0 - scope_alpha);
     if (ch_vis > 0.02) {
         float gap = 5.0 + spread * 18.0;
         float arm_len = 8.5;
@@ -787,7 +811,7 @@ float3 composite_tactical_hud(float2 pixel_pos, float2 viewport_size, float3 col
                 color = float3(0.60, 0.78, 0.86);
             }
             bool unused_o;
-            if (draw_uint_digits(pixel_pos, radar_min + float2(130.0, 4.0), tactical_score_meta.w, 2u, unused_o)) {
+            if (draw_uint_digits(pixel_pos, radar_min + float2(130.0, 4.0), tactical_score_meta.w & 0xFFFFu, 2u, unused_o)) {
                 color = float3(1.0, 0.76, 0.24);
             }
         } else if (!on_border) {
@@ -898,7 +922,13 @@ float3 composite_tactical_hud(float2 pixel_pos, float2 viewport_size, float3 col
             color = float3(0.76, 0.84, 0.90);
         }
         bool is_ads = ads_alpha > 0.5;
-        if (draw_label_4(pixel_pos, am_min + float2(142.0, 14.0), 85u, 83u, 80u, 32u, 2u)) {
+        uint wc0 = 85u, wc1 = 83u, wc2 = 80u, wc3 = 32u;
+        if (weapon_id == 1u) { wc0 = 77u; wc1 = 80u; wc2 = 53u; wc3 = 32u; }
+        else if (weapon_id == 2u) { wc0 = 65u; wc1 = 75u; wc2 = 52u; wc3 = 55u; }
+        else if (weapon_id == 3u) { wc0 = 83u; wc1 = 67u; wc2 = 79u; wc3 = 84u; }
+        else if (weapon_id == 4u) { wc0 = 83u; wc1 = 72u; wc2 = 79u; wc3 = 84u; }
+        else if (weapon_id == 5u) { wc0 = 68u; wc1 = 85u; wc2 = 65u; wc3 = 76u; }
+        if (draw_label_4(pixel_pos, am_min + float2(136.0, 14.0), wc0, wc1, wc2, wc3, 2u)) {
             color = float3(0.88, 0.76, 0.36);
         }
         if (is_ads) {
