@@ -1022,9 +1022,12 @@ void evaluate_skinned_character(
     std::array<RagdollLimbPose, k_ragdoll_limb_count>* out_limb_poses,
     Float3* out_hand_r_local) {
     const std::size_t node_count = tpl.nodes.size();
-    std::vector<Float3> t_cur(node_count);
-    std::vector<Quat4> r_cur(node_count);
-    std::vector<Float3> s_cur(node_count);
+    thread_local std::vector<Float3> t_cur;
+    thread_local std::vector<Quat4> r_cur;
+    thread_local std::vector<Float3> s_cur;
+    t_cur.resize(node_count);
+    r_cur.resize(node_count);
+    s_cur.resize(node_count);
     for (std::size_t i = 0; i < node_count; ++i) {
         t_cur[i] = tpl.nodes[i].rest_t;
         r_cur[i] = tpl.nodes[i].rest_r;
@@ -1039,9 +1042,12 @@ void evaluate_skinned_character(
         && pose.prev_clip_index != pose.clip_index
         && static_cast<std::size_t>(pose.prev_clip_index) < tpl.clips.size()
         && pose.blend_alpha < 0.995f) {
-        std::vector<Float3> t_prev(node_count);
-        std::vector<Quat4> r_prev(node_count);
-        std::vector<Float3> s_prev(node_count);
+        thread_local std::vector<Float3> t_prev;
+        thread_local std::vector<Quat4> r_prev;
+        thread_local std::vector<Float3> s_prev;
+        t_prev.resize(node_count);
+        r_prev.resize(node_count);
+        s_prev.resize(node_count);
         for (std::size_t i = 0; i < node_count; ++i) {
             t_prev[i] = tpl.nodes[i].rest_t;
             r_prev[i] = tpl.nodes[i].rest_r;
@@ -1077,7 +1083,7 @@ void evaluate_skinned_character(
         }
     }
 
-    std::vector<Mat4x4> node_world;
+    thread_local std::vector<Mat4x4> node_world;
     compute_world_matrices(tpl.nodes, t_cur, r_cur, s_cur, node_world);
 
     Mat4x4 root_xform = mat4_mul(mat4_rot_y(tpl.yaw_correction), mat4_rot_x(tpl.pitch_correction));
@@ -1097,37 +1103,63 @@ void evaluate_skinned_character(
     }
 
     const std::size_t jcount = tpl.joint_nodes.size();
-    std::vector<Mat4x4> skin_mats(jcount, mat4_identity());
+    thread_local std::vector<Mat4x4> skin_mats;
+    skin_mats.resize(jcount);
     for (std::size_t ji = 0; ji < jcount; ++ji) {
         const std::int32_t ni = tpl.joint_nodes[ji];
         if (ni >= 0 && static_cast<std::size_t>(ni) < node_world.size()) {
             skin_mats[ji] = mat4_mul(node_world[static_cast<std::size_t>(ni)], tpl.inverse_bind_matrices[ji]);
+        } else {
+            skin_mats[ji] = mat4_identity();
         }
     }
 
     const std::size_t vcount = tpl.source_vertices.size();
+    const SkinnedSourceVertex* src_ptr = tpl.source_vertices.data();
+    const Mat4x4* sm_ptr = skin_mats.data();
     for (std::size_t vi = 0; vi < vcount; ++vi) {
-        const SkinnedSourceVertex& sv = tpl.source_vertices[vi];
-        Float3 p{0.0f, 0.0f, 0.0f};
-        Float3 n{0.0f, 0.0f, 0.0f};
-        Float3 t{0.0f, 0.0f, 0.0f};
+        const SkinnedSourceVertex& sv = src_ptr[vi];
+        Float3 p;
+        Float3 n;
+        Float3 t;
         if (sv.rigid_node_index >= 0 && static_cast<std::size_t>(sv.rigid_node_index) < node_world.size()) {
             const Mat4x4& nm = node_world[static_cast<std::size_t>(sv.rigid_node_index)];
             p = mat4_point(nm, sv.pos);
             n = mat4_dir(nm, sv.normal);
             t = mat4_dir(nm, sv.tangent);
-        } else if (!skin_mats.empty()) {
-            for (int k = 0; k < 4; ++k) {
-                const float w = sv.weights[k];
-                if (w <= 1e-5f) continue;
-                const std::size_t ji = sv.joints[k] < skin_mats.size() ? sv.joints[k] : 0U;
-                const Mat4x4& sm = skin_mats[ji];
-                const Float3 sp = mat4_point(sm, sv.pos);
-                const Float3 sn = mat4_dir(sm, sv.normal);
-                const Float3 st = mat4_dir(sm, sv.tangent);
-                p.x += sp.x * w; p.y += sp.y * w; p.z += sp.z * w;
-                n.x += sn.x * w; n.y += sn.y * w; n.z += sn.z * w;
-                t.x += st.x * w; t.y += st.y * w; t.z += st.z * w;
+        } else if (jcount > 0U) {
+            if (sv.weights[0] > 0.995f) {
+                const std::size_t ji = sv.joints[0] < jcount ? sv.joints[0] : 0U;
+                const Mat4x4& sm = sm_ptr[ji];
+                p = mat4_point(sm, sv.pos);
+                n = mat4_dir(sm, sv.normal);
+                t = mat4_dir(sm, sv.tangent);
+            } else {
+                const float w0 = sv.weights[0];
+                const Mat4x4& s0 = sm_ptr[sv.joints[0] < jcount ? sv.joints[0] : 0U];
+                float m0 = s0.m[0] * w0, m1 = s0.m[1] * w0, m2 = s0.m[2] * w0, m3 = s0.m[3] * w0;
+                float m4 = s0.m[4] * w0, m5 = s0.m[5] * w0, m6 = s0.m[6] * w0, m7 = s0.m[7] * w0;
+                float m8 = s0.m[8] * w0, m9 = s0.m[9] * w0, m10 = s0.m[10] * w0, m11 = s0.m[11] * w0;
+                for (int k = 1; k < 4; ++k) {
+                    const float wk = sv.weights[k];
+                    if (wk <= 1e-5f) continue;
+                    const Mat4x4& sk = sm_ptr[sv.joints[k] < jcount ? sv.joints[k] : 0U];
+                    m0 += sk.m[0] * wk; m1 += sk.m[1] * wk; m2 += sk.m[2] * wk; m3 += sk.m[3] * wk;
+                    m4 += sk.m[4] * wk; m5 += sk.m[5] * wk; m6 += sk.m[6] * wk; m7 += sk.m[7] * wk;
+                    m8 += sk.m[8] * wk; m9 += sk.m[9] * wk; m10 += sk.m[10] * wk; m11 += sk.m[11] * wk;
+                }
+                p = {
+                    m0 * sv.pos.x + m1 * sv.pos.y + m2 * sv.pos.z + m3,
+                    m4 * sv.pos.x + m5 * sv.pos.y + m6 * sv.pos.z + m7,
+                    m8 * sv.pos.x + m9 * sv.pos.y + m10 * sv.pos.z + m11};
+                n = {
+                    m0 * sv.normal.x + m1 * sv.normal.y + m2 * sv.normal.z,
+                    m4 * sv.normal.x + m5 * sv.normal.y + m6 * sv.normal.z,
+                    m8 * sv.normal.x + m9 * sv.normal.y + m10 * sv.normal.z};
+                t = {
+                    m0 * sv.tangent.x + m1 * sv.tangent.y + m2 * sv.tangent.z,
+                    m4 * sv.tangent.x + m5 * sv.tangent.y + m6 * sv.tangent.z,
+                    m8 * sv.tangent.x + m9 * sv.tangent.y + m10 * sv.tangent.z};
             }
         } else {
             p = mat4_point(root_xform, sv.pos);
@@ -1221,44 +1253,70 @@ void evaluate_ragdoll_skinned_character(
         limb_deltas[li] = d;
     }
 
-    std::vector<Mat4x4> node_world(node_count);
+    thread_local std::vector<Mat4x4> node_world;
+    node_world.resize(node_count);
     for (std::size_t i = 0; i < node_count; ++i) {
         const std::uint8_t li = tpl.node_ragdoll_limb[i] < k_ragdoll_limb_count ? tpl.node_ragdoll_limb[i] : 0U;
         node_world[i] = mat4_mul(limb_deltas[li], tpl.rest_node_world[i]);
     }
 
     const std::size_t jcount = tpl.joint_nodes.size();
-    std::vector<Mat4x4> skin_mats(jcount, mat4_identity());
+    thread_local std::vector<Mat4x4> skin_mats;
+    skin_mats.resize(jcount);
     for (std::size_t ji = 0; ji < jcount; ++ji) {
         const std::int32_t ni = tpl.joint_nodes[ji];
         if (ni >= 0 && static_cast<std::size_t>(ni) < node_world.size()) {
             skin_mats[ji] = mat4_mul(node_world[static_cast<std::size_t>(ni)], tpl.inverse_bind_matrices[ji]);
+        } else {
+            skin_mats[ji] = mat4_identity();
         }
     }
 
     const std::size_t vcount = tpl.source_vertices.size();
+    const SkinnedSourceVertex* src_ptr = tpl.source_vertices.data();
+    const Mat4x4* sm_ptr = skin_mats.data();
     for (std::size_t vi = 0; vi < vcount; ++vi) {
-        const SkinnedSourceVertex& sv = tpl.source_vertices[vi];
+        const SkinnedSourceVertex& sv = src_ptr[vi];
         Float3 p{0.0f, 0.0f, 0.0f};
-        Float3 n{0.0f, 0.0f, 0.0f};
-        Float3 t{0.0f, 0.0f, 0.0f};
+        Float3 n{0.0f, 1.0f, 0.0f};
+        Float3 t{1.0f, 0.0f, 0.0f};
         if (sv.rigid_node_index >= 0 && static_cast<std::size_t>(sv.rigid_node_index) < node_world.size()) {
             const Mat4x4& nm = node_world[static_cast<std::size_t>(sv.rigid_node_index)];
             p = mat4_point(nm, sv.pos);
             n = mat4_dir(nm, sv.normal);
             t = mat4_dir(nm, sv.tangent);
-        } else if (!skin_mats.empty()) {
-            for (int k = 0; k < 4; ++k) {
-                const float w = sv.weights[k];
-                if (w <= 1e-5f) continue;
-                const std::size_t ji = sv.joints[k] < skin_mats.size() ? sv.joints[k] : 0U;
-                const Mat4x4& sm = skin_mats[ji];
-                const Float3 sp = mat4_point(sm, sv.pos);
-                const Float3 sn = mat4_dir(sm, sv.normal);
-                const Float3 st = mat4_dir(sm, sv.tangent);
-                p.x += sp.x * w; p.y += sp.y * w; p.z += sp.z * w;
-                n.x += sn.x * w; n.y += sn.y * w; n.z += sn.z * w;
-                t.x += st.x * w; t.y += st.y * w; t.z += st.z * w;
+        } else if (jcount > 0U) {
+            if (sv.weights[0] > 0.995f) {
+                const Mat4x4& sm = sm_ptr[sv.joints[0] < jcount ? sv.joints[0] : 0U];
+                p = mat4_point(sm, sv.pos);
+                n = mat4_dir(sm, sv.normal);
+                t = mat4_dir(sm, sv.tangent);
+            } else {
+                const float w0 = sv.weights[0];
+                const Mat4x4& s0 = sm_ptr[sv.joints[0] < jcount ? sv.joints[0] : 0U];
+                float m0 = s0.m[0] * w0, m1 = s0.m[1] * w0, m2 = s0.m[2] * w0, m3 = s0.m[3] * w0;
+                float m4 = s0.m[4] * w0, m5 = s0.m[5] * w0, m6 = s0.m[6] * w0, m7 = s0.m[7] * w0;
+                float m8 = s0.m[8] * w0, m9 = s0.m[9] * w0, m10 = s0.m[10] * w0, m11 = s0.m[11] * w0;
+                for (int k = 1; k < 4; ++k) {
+                    const float wk = sv.weights[k];
+                    if (wk <= 1e-5f) continue;
+                    const Mat4x4& sk = sm_ptr[sv.joints[k] < jcount ? sv.joints[k] : 0U];
+                    m0 += sk.m[0] * wk; m1 += sk.m[1] * wk; m2 += sk.m[2] * wk; m3 += sk.m[3] * wk;
+                    m4 += sk.m[4] * wk; m5 += sk.m[5] * wk; m6 += sk.m[6] * wk; m7 += sk.m[7] * wk;
+                    m8 += sk.m[8] * wk; m9 += sk.m[9] * wk; m10 += sk.m[10] * wk; m11 += sk.m[11] * wk;
+                }
+                p = {
+                    m0 * sv.pos.x + m1 * sv.pos.y + m2 * sv.pos.z + m3,
+                    m4 * sv.pos.x + m5 * sv.pos.y + m6 * sv.pos.z + m7,
+                    m8 * sv.pos.x + m9 * sv.pos.y + m10 * sv.pos.z + m11};
+                n = {
+                    m0 * sv.normal.x + m1 * sv.normal.y + m2 * sv.normal.z,
+                    m4 * sv.normal.x + m5 * sv.normal.y + m6 * sv.normal.z,
+                    m8 * sv.normal.x + m9 * sv.normal.y + m10 * sv.normal.z};
+                t = {
+                    m0 * sv.tangent.x + m1 * sv.tangent.y + m2 * sv.tangent.z,
+                    m4 * sv.tangent.x + m5 * sv.tangent.y + m6 * sv.tangent.z,
+                    m8 * sv.tangent.x + m9 * sv.tangent.y + m10 * sv.tangent.z};
             }
         }
         const Float3 nn = vec3_norm(n);

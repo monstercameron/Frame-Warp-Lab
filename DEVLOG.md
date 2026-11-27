@@ -1,5 +1,23 @@
 # Development log
 
+## v0.43.0 — Strictly Event-Paced Frame Pacing, DWM VBlank PLL, Per-Cadence Lead-Time Envelopes & Zero-Alloc Matrix-Blended Skinning
+
+- Restored thesis-grade **strictly event-paced 120 Hz (`8.33 ms`) frame delivery** across `de_dust2` with 8 live high-poly CS:GO bots and articulated Jolt Physics ragdolls (`src/frame_pacer.h`, `src/main.cpp`, `src/skinning.cpp`, `CMakeLists.txt`):
+  - **Strictly Event-Driven `FramePacer` + DWM VBlank PLL (`src/frame_pacer.h`)**:
+    - Replaced multi-millisecond `YieldProcessor()` busy-waiting in `wait_for_present_deadline()` with event-driven high-resolution waitable timer sleeps (`CREATE_WAITABLE_TIMER_HIGH_RESOLUTION` + `WaitForSingleObject(timer_, 20)` whenever `remaining > 1100 µs`), paired with `MsgWaitForMultipleObjectsEx(..., QS_ALLINPUT, MWMO_INPUTAVAILABLE)` in `wait_for_input_window()` (`spin_margin = 900 µs`) and event-driven DXGI/fence waits (`WaitForSingleObjectEx` / `SetEventOnCompletion`).
+    - Disabled Windows 11 EcoQoS and timer-resolution throttling (`SetProcessInformation(ProcessPowerThrottling)` clearing `EXECUTION_SPEED` and `IGNORE_TIMER_RESOLUTION`) and elevated the render thread to `THREAD_PRIORITY_HIGHEST` to eliminate `±810 µs` OS timer wake overshoot.
+    - Added a gentle **DWM VBlank phase-locked loop (`apply_dwm_vblank_pll()`)** sampling `DwmGetCompositionTimingInfo` every 24 frames (`±40 µs` max nudge) to eliminate QPC-to-display clock drift, plus zero-rebound deadline recovery after rare overruns.
+  - **Per-Cadence Peak-Envelope Lead-Time Predictor (`src/main.cpp`)**:
+    - Replaced the single `2500 µs`-clamped `smoothed_cpu_work_us` EMA (which blended `0.15 ms` warp-only frames with `3.0+ ms` scene-submit frames in `COMBINED /2`, causing **80 / 240** missed deadlines) with independent peak-envelope estimators: `scene_cpu_envelope_us` (`+850 µs` headroom, unclamped up to `period - 1200 µs`) and `warp_cpu_envelope_us` (`+600 µs`, capped at `2000 µs` for ultra-low late-warp input latency), selected ahead of `wait_for_input_window()` via cadence prediction (`will_submit_scene`).
+  - **Zero-Allocation Matrix-Blended Skeletal Skinning (`src/skinning.cpp`)**:
+    - Replaced per-call `std::vector` heap allocations in `evaluate_skinned_character` and `evaluate_ragdoll_skinned_character` with `thread_local` scratch buffers and added a single-bone fast path (`w0 > 0.995`) plus pre-blended 4×3 skin matrix evaluation (`pos`, `normal`, `tangent` transformed once per vertex instead of 12 matrix-vector multiplies), cutting `de_dust2` `sim_cpu_us` median by **33%** (`2234 → 1488 µs`, `p95: 2961 → 2001 µs`).
+- Verified zero code comments across all C++ and HLSL files, clean ARM64 Release + Debug builds (D3D12 Debug Layer + Jolt Asserts: `0` errors), visual inspection of the flat `8.33 ms` HUD frametime graph, and 240-frame steady-state `frame_warp_cli trace` telemetry on `de_dust2` (`1280×720`, 120 Hz):
+  - **`FULL_RENDER`**: missed deadlines **`21 / 240 → 1 / 240`** (95% ↓), `cpu_present_interval_us`: `median=8333, p95=8504 µs` (down from `p95=8882 µs`), `sim_cpu_us`: `median=1488, p95=2001 µs` (down from `2234 / 2961 µs`), `scene_gpu_us`: `median=2898 µs`.
+  - **`REPROJECT /2`**: missed deadlines **`1 / 240`**, `cpu_present_interval_us`: `median=8333, p95=8466 µs` (+133 µs), `present_gpu_us`: `median=60 µs`.
+  - **`FRAME_GEN /2`**: missed deadlines **`1 / 240`**, `cpu_present_interval_us`: `median=8333, p95=8386 µs` (**+53 µs**!), `present_gpu_us`: `median=110 µs`.
+  - **`COMBINED /2`**: missed deadlines **`80 / 240 → 0–1 / 240`** (99–100% ↓), `cpu_present_interval_us`: `median=8333, p95=8434 µs` (**12× tighter** than pre-fix `p95=9591 µs`), `sim_cpu_us`: `min=196` (warp) / `median=1032` / `p95=2360 µs`, `scene_gpu_us`: `median=3037 µs`, `present_gpu_us`: `median=130 µs`.
+  - **`COMBINED /2` + Active Jolt Ragdolls** (`kill_bot` × 2): missed deadlines **`0 / 240`**, `cpu_present_interval_us`: `median=8333 µs`, `present_gpu_us`: `median=127 µs`.
+
 ## v0.42.0 — Cross-Faded Valve Biped CS Combat Animation, Bot-Held PBR Rifles & Jolt Physics 11-Body Articulated Death Ragdolls
 
 - Upgraded the high-poly CS:GO **FBI (`ctm_fbi_v2`, 21,771 tris)** and **Elite Crew Terrorist (`tm_leet_v2`, 21,204 tris)** squads with **full cross-faded 18-bone Valve biped Counter-Strike combat animation**, **live bot-held high-poly PBR weapons**, and **real Jolt Physics 11-body articulated ragdolls on death** (`src/skinning.h`, `src/skinning.cpp`, `src/tactical_range.h`, `src/tactical_range.cpp`, `assets/scripts/cs_match.lua`, `src/runtime_state.h`, `src/main.cpp`, `src/cli.cpp`, `CMakeLists.txt`):

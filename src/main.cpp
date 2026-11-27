@@ -951,7 +951,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         auto previous_present_tick = previous_tick;
         bool has_previous_present = false;
         double smoothed_present_interval_us = 0.0;
-        double smoothed_cpu_work_us = 700.0;
+        double scene_cpu_envelope_us = 2000.0;
+        double warp_cpu_envelope_us = 500.0;
         std::int64_t last_scene_gpu_us = -1;
         std::int64_t last_present_gpu_us = -1;
         std::int64_t last_input_to_present_us = -1;
@@ -1733,7 +1734,15 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 || presentation_mode == frame_warp_lab::PresentationMode::dlss_g_warp;
             const bool dlssg_can_run = is_dlssg_mode && renderer.streamline_capabilities().dlssg_supported;
             if (!dlssg_can_run) {
-                const std::int64_t lead_us = std::clamp(static_cast<std::int64_t>(smoothed_cpu_work_us) + 450LL, 600LL, 2500LL);
+                const std::int32_t preview_divider = (presentation_mode == frame_warp_lab::PresentationMode::full_render
+                    || presentation_mode == frame_warp_lab::PresentationMode::dlss_g) ? 1 : source_divider;
+                const bool preview_frozen = scene_paused && pending_step_frames == 0 && fixed_dt_us > 0;
+                const bool will_submit_scene = !renderer.has_completed_source()
+                    || (!preview_frozen && (cadence_counter % preview_divider == 0));
+                const std::int64_t max_lead_us = std::max<std::int64_t>(2500LL, pacer.target_period_us() - 1200LL);
+                const std::int64_t lead_us = will_submit_scene
+                    ? std::clamp(static_cast<std::int64_t>(scene_cpu_envelope_us) + 850LL, 1100LL, max_lead_us)
+                    : std::clamp(static_cast<std::int64_t>(warp_cpu_envelope_us) + 600LL, 750LL, std::min<std::int64_t>(2000LL, max_lead_us));
                 pacer.wait_for_input_window(lead_us, pump_messages, running);
             }
             pump_messages();
@@ -2118,7 +2127,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 ++missed_deadlines;
             }
             const double frame_cpu_work_us = static_cast<double>(sim_cpu_us + gpu_metrics.render_submit_cpu_us);
-            smoothed_cpu_work_us = smoothed_cpu_work_us * 0.90 + frame_cpu_work_us * 0.10;
+            if (scene_submitted_this_frame) {
+                const double decayed = scene_cpu_envelope_us * 0.992 + frame_cpu_work_us * 0.008;
+                scene_cpu_envelope_us = std::min(12000.0, std::max(frame_cpu_work_us, decayed));
+            } else {
+                const double decayed = warp_cpu_envelope_us * 0.985 + frame_cpu_work_us * 0.015;
+                warp_cpu_envelope_us = std::min(4000.0, std::max(frame_cpu_work_us, decayed));
+            }
 
             if (present_interval_us > 0) {
                 if (smoothed_present_interval_us <= 1.0) {
