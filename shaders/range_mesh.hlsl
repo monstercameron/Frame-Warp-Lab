@@ -19,6 +19,7 @@ struct InstanceData {
     float4x4 model;
     float4x4 prev_model;
     float4 tint_emissive;
+    uint4 entity_meta;
 };
 
 StructuredBuffer<InstanceData> instance_buffer : register(t0);

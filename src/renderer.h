@@ -45,6 +45,11 @@ struct TileCacheStats {
     std::uint32_t deferred_tiles = 0;
     std::uint32_t critical_total_tiles = 0;
     std::uint32_t critical_deferred_tiles = 0;
+    std::uint32_t sc_hits = 0;
+    std::uint32_t sc_misses = 0;
+    std::uint32_t sc_writes = 0;
+    std::uint32_t sc_collisions = 0;
+    std::uint32_t clustered_light_sum = 0;
     bool active = false;
 };
 
@@ -145,6 +150,8 @@ public:
         bool forward_transparency_enabled,
         bool split_diff_spec_enabled,
         bool surface_cache_enabled,
+        bool clustered_lighting_enabled,
+        std::int32_t surface_cache_mb,
         std::uint64_t frame_id,
         LatencyMonitor& latency_monitor,
         bool wait_for_completion,
@@ -183,10 +190,10 @@ private:
     static constexpr UINT targets_per_source_slot = 3;
     static constexpr UINT compute_descriptors_per_source_slot = 9;
     static constexpr UINT pbr_srv_descriptor_count = 8;
-    static constexpr UINT surface_cache_cell_count = 262144;
+    static constexpr UINT surface_cache_max_cells = 4194304;
     static constexpr UINT max_dirty_tile_capacity = 131072;
-    static constexpr UINT tile_indirect_u32_count = 24;
-    static constexpr UINT tile_stats_readback_u32_count = 16;
+    static constexpr UINT tile_indirect_u32_count = 32;
+    static constexpr UINT tile_stats_readback_u32_count = 32;
     static constexpr UINT timestamps_per_pass = 2;
     static constexpr std::size_t scene_constant_buffer_stride = 256;
     static constexpr std::size_t present_constant_buffer_stride = 512;
@@ -370,6 +377,8 @@ private:
     std::int32_t render_scale_pct_ = 100;
     std::int64_t drs_scale_changes_ = 0;
     std::int64_t drs_reallocations_ = 0;
+    std::uint32_t surface_cache_epoch_ = 1;
+    std::int32_t last_surface_cache_mb_ = 4;
 };
 
 }

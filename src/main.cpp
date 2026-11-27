@@ -233,6 +233,8 @@ public:
         bool forward_transparency_enabled,
         bool split_diff_spec_enabled,
         bool surface_cache_enabled,
+        bool clustered_lighting_enabled,
+        std::int32_t surface_cache_mb,
         bool par_bypass_active,
         std::int32_t smoothed_damage_pct,
         std::int32_t render_scale_pct,
@@ -262,6 +264,13 @@ public:
         std::atomic_ref<std::int32_t>(state_->forward_transparency_enabled).store(forward_transparency_enabled ? 1 : 0, std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->split_diff_spec_enabled).store(split_diff_spec_enabled ? 1 : 0, std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->surface_cache_enabled).store(surface_cache_enabled ? 1 : 0, std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->clustered_lighting_enabled).store(clustered_lighting_enabled ? 1 : 0, std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->surface_cache_mb).store(surface_cache_mb, std::memory_order_release);
+        std::atomic_ref<std::uint32_t>(state_->last_sc_hits).store(stats.sc_hits, std::memory_order_release);
+        std::atomic_ref<std::uint32_t>(state_->last_sc_misses).store(stats.sc_misses, std::memory_order_release);
+        std::atomic_ref<std::uint32_t>(state_->last_sc_writes).store(stats.sc_writes, std::memory_order_release);
+        std::atomic_ref<std::uint32_t>(state_->last_sc_collisions).store(stats.sc_collisions, std::memory_order_release);
+        std::atomic_ref<std::uint32_t>(state_->last_clustered_light_sum).store(stats.clustered_light_sum, std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->par_bypass_active).store(par_bypass_active ? 1 : 0, std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->smoothed_damage_pct).store(smoothed_damage_pct, std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->render_scale_pct).store(render_scale_pct, std::memory_order_release);
@@ -800,6 +809,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         bool forward_transparency_enabled = true;
         bool split_diff_spec_enabled = true;
         bool surface_cache_enabled = true;
+        bool clustered_lighting_enabled = false;
+        std::int32_t surface_cache_mb = 4;
         std::int32_t render_scale_pct = 100;
         UINT render_override_width = 0;
         UINT render_override_height = 0;
@@ -905,6 +916,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 forward_transparency_enabled,
                 split_diff_spec_enabled,
                 surface_cache_enabled,
+                clustered_lighting_enabled,
+                surface_cache_mb,
                 auto_tile_budget_enabled && auto_tile_budget.par_bypass_active(),
                 auto_tile_budget.smoothed_damage_pct(),
                 render_scale_pct,
@@ -1110,6 +1123,15 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                     source_divider = p0.divider;
                 }
                 runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, en ? 1 : 0, frame_warp_lab::ConfigKey::unified_controller);
+            } else if (command == frame_warp_lab::ControlCommand::set_clustered_lighting) {
+                clustered_lighting_enabled = message_lparam != 0;
+                runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, clustered_lighting_enabled ? 1 : 0, frame_warp_lab::ConfigKey::clustered_lighting);
+            } else if (command == frame_warp_lab::ControlCommand::set_surface_cache_mb) {
+                const auto mb = static_cast<std::int32_t>(message_lparam);
+                if (mb == 4 || mb == 16 || mb == 64) {
+                    surface_cache_mb = mb;
+                    runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, surface_cache_mb, frame_warp_lab::ConfigKey::surface_cache_mb);
+                }
             } else if (command == frame_warp_lab::ControlCommand::set_shader_flags) {
                 shader_flags = static_cast<std::uint32_t>(message_lparam) & 0xFFU;
                 renderer.invalidate_source_history();
@@ -1629,6 +1651,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                     forward_transparency_enabled,
                     split_diff_spec_enabled,
                     surface_cache_enabled,
+                    clustered_lighting_enabled,
+                    surface_cache_mb,
                     frame_id_u64,
                     latency_monitor,
                     must_wait,
@@ -1831,12 +1855,19 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
             const bool window_focused = GetForegroundWindow() == window;
             if (unified_controller.enabled() && active_source.valid && !frozen_deterministic_pause) {
                 frame_warp_lab::UnifiedQualityProfile uprof{};
+                const std::uint32_t sc_total = active_source.tile_stats.sc_hits + active_source.tile_stats.sc_misses;
+                const std::int32_t sc_hit_permille = sc_total >= 64U
+                    ? static_cast<std::int32_t>((static_cast<std::uint64_t>(active_source.tile_stats.sc_hits) * 1000ULL) / sc_total)
+                    : -1;
                 if (unified_controller.update(
                         pacer.target_period_us(),
                         active_source.snapshot.source_frame_id,
                         active_source.scene_gpu_us,
                         last_present_gpu_us,
                         gpu_metrics.missed_deadline,
+                        active_source.tile_stats.total_tiles,
+                        active_source.tile_stats.critical_deferred_tiles,
+                        sc_hit_permille,
                         uprof)) {
                     const bool split_changed = (split_diff_spec_enabled != uprof.split_diff_spec);
                     selective_tiles_enabled = uprof.selective_tiles;
@@ -2002,6 +2033,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 forward_transparency_enabled,
                 split_diff_spec_enabled,
                 surface_cache_enabled,
+                clustered_lighting_enabled,
+                surface_cache_mb,
                 auto_tile_budget_enabled && auto_tile_budget.par_bypass_active(),
                 auto_tile_budget.smoothed_damage_pct(),
                 render_scale_pct,

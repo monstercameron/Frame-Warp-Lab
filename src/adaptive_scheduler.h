@@ -584,6 +584,9 @@ public:
         std::int64_t scene_gpu_us,
         std::int64_t present_gpu_us,
         bool missed_deadline,
+        std::uint32_t total_tiles,
+        std::uint32_t critical_deferred_tiles,
+        std::int32_t sc_hit_rate_permille,
         UnifiedQualityProfile& out_profile) {
         if (!enabled_) return false;
 
@@ -618,6 +621,9 @@ public:
 
         const double util = smoothed_scene_us_ / std::max(budget_us, 1.0);
         utilization_permille_ = std::clamp(static_cast<std::int32_t>(std::lround(util * 1000.0)), 0, 9999);
+        const double crit_def_ratio = total_tiles > 0U
+            ? static_cast<double>(critical_deferred_tiles) / static_cast<double>(total_tiles)
+            : 0.0;
 
         if (cooldown_frames_ > 0) {
             --cooldown_frames_;
@@ -649,9 +655,11 @@ public:
             return false;
         }
 
-        if (util < 0.56 && tier_ > 0) {
+        const bool damage_pressure = (crit_def_ratio > 0.03 || (sc_hit_rate_permille >= 0 && sc_hit_rate_permille < 350)) && util < 0.72;
+        if ((util < 0.56 || damage_pressure) && tier_ > 0) {
             ++low_streak_;
-            if (low_streak_ >= 24) {
+            const std::int32_t needed = damage_pressure ? 10 : 24;
+            if (low_streak_ >= needed) {
                 record_transition(-1);
                 tier_ = std::max(0, tier_ - 1);
                 low_streak_ = 0;

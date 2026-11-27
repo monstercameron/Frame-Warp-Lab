@@ -506,6 +506,11 @@ bool Renderer::poll_completed_scenes() {
             slot.tile_stats.deferred_tiles = mapped_tile_stats_[stats_base + 6];
             slot.tile_stats.critical_total_tiles = mapped_tile_stats_[stats_base + 8] + mapped_tile_stats_[stats_base + 9];
             slot.tile_stats.critical_deferred_tiles = mapped_tile_stats_[stats_base + 7];
+            slot.tile_stats.sc_hits = mapped_tile_stats_[stats_base + 24];
+            slot.tile_stats.sc_misses = mapped_tile_stats_[stats_base + 25];
+            slot.tile_stats.sc_writes = mapped_tile_stats_[stats_base + 26];
+            slot.tile_stats.sc_collisions = mapped_tile_stats_[stats_base + 27];
+            slot.tile_stats.clustered_light_sum = mapped_tile_stats_[stats_base + 28];
             slot.tile_stats.active = true;
         } else {
             slot.tile_stats = TileCacheStats{};
@@ -552,6 +557,7 @@ void Renderer::invalidate_source_history() {
     latest_completed_slot_ = -1;
     previous_completed_slot_ = -1;
     has_previous_presented_camera_ = false;
+    ++surface_cache_epoch_;
 }
 
 std::int32_t Renderer::find_available_source_slot() const {
@@ -622,6 +628,8 @@ bool Renderer::submit_scene_async(
     bool forward_transparency_enabled,
     bool split_diff_spec_enabled,
     bool surface_cache_enabled,
+    bool clustered_lighting_enabled,
+    std::int32_t surface_cache_mb,
     std::uint64_t frame_id,
     LatencyMonitor& latency_monitor,
     bool wait_for_completion,
@@ -695,10 +703,13 @@ bool Renderer::submit_scene_async(
         tiles_y,
         std::min<UINT>(tile_budget, max_dirty_tile_capacity),
         static_cast<std::uint32_t>(snapshot.source_frame_id));
+    const std::uint32_t sc_mask = (surface_cache_mb >= 64)
+        ? 4194303U
+        : ((surface_cache_mb >= 16) ? 1048575U : 262143U);
     simd::store_uint4(
         scene_constants->cache_params,
         can_use_prev_cache ? 1U : 0U,
-        16U,
+        range_frame != nullptr ? sc_mask : 16U,
         render_width_,
         render_height_);
     const UINT prev_active_w = can_use_prev_cache && source_slots_[static_cast<std::size_t>(prev_slot_index)].active_width > 0U
@@ -707,13 +718,19 @@ bool Renderer::submit_scene_async(
     const UINT prev_active_h = can_use_prev_cache && source_slots_[static_cast<std::size_t>(prev_slot_index)].active_height > 0U
         ? source_slots_[static_cast<std::size_t>(prev_slot_index)].active_height
         : render_height_;
+    if (snapshot.discontinuity || surface_cache_mb != last_surface_cache_mb_) {
+        ++surface_cache_epoch_;
+        last_surface_cache_mb_ = surface_cache_mb;
+    }
     const std::uint32_t policy_flags = (tile_policy == TilePolicy::priority_stbn ? 1U : 0U)
         | (subtile_interleave_enabled ? 2U : 0U)
         | (reactive_invalidation_enabled ? 4U : 0U)
         | (shadow_delta_invalidation_enabled ? 8U : 0U)
         | (forward_transparency_enabled ? 16U : 0U)
         | (split_diff_spec_enabled ? 32U : 0U)
-        | (surface_cache_enabled ? 64U : 0U);
+        | (surface_cache_enabled ? 64U : 0U)
+        | (clustered_lighting_enabled ? 128U : 0U)
+        | ((surface_cache_epoch_ & 0xFFFFU) << 16U);
     simd::store_uint4(
         scene_constants->policy_params,
         policy_flags,
@@ -837,13 +854,14 @@ bool Renderer::submit_scene_async(
                 scene_command_list_->DrawIndexedInstanced(sm.index_count, 1, sm.index_offset, 0, 0);
             }
 
-            const std::array<D3D12_RESOURCE_BARRIER, 6> vis_to_uav = {
+            const std::array<D3D12_RESOURCE_BARRIER, 7> vis_to_uav = {
                 transition_barrier(slot.opaque_cache_target.Get(), source_slot_readable_state, D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
                 transition_barrier(slot.vis_target.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
                 transition_barrier(slot.depth_target.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
                 transition_barrier(slot.motion_target.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
                 transition_barrier(slot.tile_map_target.Get(), source_slot_readable_state, D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
                 transition_barrier(tile_indirect_args_uav_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST),
+                transition_barrier(tile_candidate_meta_uav_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST),
             };
             scene_command_list_->ResourceBarrier(static_cast<UINT>(vis_to_uav.size()), vis_to_uav.data());
 
@@ -853,8 +871,17 @@ bool Renderer::submit_scene_async(
                 tile_indirect_args_init_upload_.Get(),
                 0,
                 static_cast<UINT64>(tile_indirect_u32_count) * sizeof(std::uint32_t));
-            const auto args_to_uav = transition_barrier(tile_indirect_args_uav_.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-            scene_command_list_->ResourceBarrier(1, &args_to_uav);
+            scene_command_list_->CopyBufferRegion(
+                tile_candidate_meta_uav_.Get(),
+                static_cast<UINT64>(131060U) * sizeof(std::uint32_t),
+                tile_indirect_args_init_upload_.Get(),
+                12U,
+                5U * sizeof(std::uint32_t));
+            const std::array<D3D12_RESOURCE_BARRIER, 2> args_to_uav = {
+                transition_barrier(tile_indirect_args_uav_.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
+                transition_barrier(tile_candidate_meta_uav_.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
+            };
+            scene_command_list_->ResourceBarrier(static_cast<UINT>(args_to_uav.size()), args_to_uav.data());
 
             const std::int32_t safe_prev_slot = (prev_slot_index >= 0 && prev_slot_index != slot_index)
                 ? prev_slot_index
@@ -910,9 +937,10 @@ bool Renderer::submit_scene_async(
             scene_command_list_->ExecuteIndirect(dispatch_command_signature_.Get(), 1, tile_indirect_args_uav_.Get(), 0, nullptr, 0);
 
             if (run_split_composite) {
-                const std::array<D3D12_RESOURCE_BARRIER, 3> prep_comp = {
+                const std::array<D3D12_RESOURCE_BARRIER, 4> prep_comp = {
                     uav_barrier(slot.opaque_cache_target.Get()),
                     uav_barrier(surface_cache_uav_.Get()),
+                    uav_barrier(tile_candidate_meta_uav_.Get()),
                     transition_barrier(slot.color_target.Get(), source_slot_readable_state, D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
                 };
                 scene_command_list_->ResourceBarrier(static_cast<UINT>(prep_comp.size()), prep_comp.data());
@@ -920,7 +948,7 @@ bool Renderer::submit_scene_async(
                 scene_command_list_->SetPipelineState(range_vis_composite_pipeline_.Get());
                 scene_command_list_->Dispatch(tiles_x, tiles_y, 1);
 
-                const std::array<D3D12_RESOURCE_BARRIER, 7> after_comp = {
+                const std::array<D3D12_RESOURCE_BARRIER, 8> after_comp = {
                     transition_barrier(slot.opaque_cache_target.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, source_slot_readable_state),
                     transition_barrier(slot.color_target.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_RENDER_TARGET),
                     transition_barrier(slot.depth_target.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, source_slot_readable_state),
@@ -928,6 +956,7 @@ bool Renderer::submit_scene_async(
                     transition_barrier(slot.vis_target.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, source_slot_readable_state),
                     transition_barrier(slot.tile_map_target.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, source_slot_readable_state),
                     transition_barrier(tile_indirect_args_uav_.Get(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, D3D12_RESOURCE_STATE_COPY_SOURCE),
+                    transition_barrier(tile_candidate_meta_uav_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE),
                 };
                 scene_command_list_->ResourceBarrier(static_cast<UINT>(after_comp.size()), after_comp.data());
 
@@ -936,9 +965,18 @@ bool Renderer::submit_scene_async(
                     static_cast<UINT64>(slot_index) * tile_stats_readback_u32_count * sizeof(std::uint32_t),
                     tile_indirect_args_uav_.Get(),
                     0,
-                    static_cast<UINT64>(tile_stats_readback_u32_count) * sizeof(std::uint32_t));
-                const auto args_back = transition_barrier(tile_indirect_args_uav_.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-                scene_command_list_->ResourceBarrier(1, &args_back);
+                    24U * sizeof(std::uint32_t));
+                scene_command_list_->CopyBufferRegion(
+                    tile_stats_readback_.Get(),
+                    (static_cast<UINT64>(slot_index) * tile_stats_readback_u32_count + 24U) * sizeof(std::uint32_t),
+                    tile_candidate_meta_uav_.Get(),
+                    static_cast<UINT64>(131060U) * sizeof(std::uint32_t),
+                    5U * sizeof(std::uint32_t));
+                const std::array<D3D12_RESOURCE_BARRIER, 2> args_back = {
+                    transition_barrier(tile_indirect_args_uav_.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
+                    transition_barrier(tile_candidate_meta_uav_.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
+                };
+                scene_command_list_->ResourceBarrier(static_cast<UINT>(args_back.size()), args_back.data());
 
                 const auto& glass_sm = range_submeshes_[static_cast<std::size_t>(RangeMeshKind::transparent_glass)];
                 if ((shader_flags & 128U) != 0U && range_transparent_pipeline_ && range_transparent_root_signature_ && glass_sm.index_count > 0U) {
@@ -965,7 +1003,7 @@ bool Renderer::submit_scene_async(
                 const auto color_done = transition_barrier(slot.color_target.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, source_slot_readable_state);
                 scene_command_list_->ResourceBarrier(1, &color_done);
             } else {
-                const std::array<D3D12_RESOURCE_BARRIER, 7> after_vis_par = {
+                const std::array<D3D12_RESOURCE_BARRIER, 8> after_vis_par = {
                     transition_barrier(slot.opaque_cache_target.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE),
                     transition_barrier(slot.color_target.Get(), source_slot_readable_state, D3D12_RESOURCE_STATE_COPY_DEST),
                     transition_barrier(slot.depth_target.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, source_slot_readable_state),
@@ -973,6 +1011,7 @@ bool Renderer::submit_scene_async(
                     transition_barrier(slot.vis_target.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, source_slot_readable_state),
                     transition_barrier(slot.tile_map_target.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, source_slot_readable_state),
                     transition_barrier(tile_indirect_args_uav_.Get(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, D3D12_RESOURCE_STATE_COPY_SOURCE),
+                    transition_barrier(tile_candidate_meta_uav_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE),
                 };
                 scene_command_list_->ResourceBarrier(static_cast<UINT>(after_vis_par.size()), after_vis_par.data());
 
@@ -982,14 +1021,21 @@ bool Renderer::submit_scene_async(
                     static_cast<UINT64>(slot_index) * tile_stats_readback_u32_count * sizeof(std::uint32_t),
                     tile_indirect_args_uav_.Get(),
                     0,
-                    static_cast<UINT64>(tile_stats_readback_u32_count) * sizeof(std::uint32_t));
+                    24U * sizeof(std::uint32_t));
+                scene_command_list_->CopyBufferRegion(
+                    tile_stats_readback_.Get(),
+                    (static_cast<UINT64>(slot_index) * tile_stats_readback_u32_count + 24U) * sizeof(std::uint32_t),
+                    tile_candidate_meta_uav_.Get(),
+                    static_cast<UINT64>(131060U) * sizeof(std::uint32_t),
+                    5U * sizeof(std::uint32_t));
 
                 const auto& glass_sm = range_submeshes_[static_cast<std::size_t>(RangeMeshKind::transparent_glass)];
                 if ((shader_flags & 128U) != 0U && range_transparent_pipeline_ && range_transparent_root_signature_ && glass_sm.index_count > 0U) {
-                    const std::array<D3D12_RESOURCE_BARRIER, 3> prep_trans = {
+                    const std::array<D3D12_RESOURCE_BARRIER, 4> prep_trans = {
                         transition_barrier(slot.color_target.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_RENDER_TARGET),
                         transition_barrier(slot.opaque_cache_target.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, source_slot_readable_state),
                         transition_barrier(tile_indirect_args_uav_.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
+                        transition_barrier(tile_candidate_meta_uav_.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
                     };
                     scene_command_list_->ResourceBarrier(static_cast<UINT>(prep_trans.size()), prep_trans.data());
 
@@ -1030,10 +1076,11 @@ bool Renderer::submit_scene_async(
                         scene_command_list_->ResourceBarrier(1, &color_to_srv);
                     }
                 } else {
-                    const std::array<D3D12_RESOURCE_BARRIER, 3> finish_vis = {
+                    const std::array<D3D12_RESOURCE_BARRIER, 4> finish_vis = {
                         transition_barrier(slot.color_target.Get(), D3D12_RESOURCE_STATE_COPY_DEST, source_slot_readable_state),
                         transition_barrier(slot.opaque_cache_target.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, source_slot_readable_state),
                         transition_barrier(tile_indirect_args_uav_.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
+                        transition_barrier(tile_candidate_meta_uav_.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
                     };
                     scene_command_list_->ResourceBarrier(static_cast<UINT>(finish_vis.size()), finish_vis.data());
                 }
@@ -2627,7 +2674,7 @@ void Renderer::create_selective_tile_resources() {
     surface_cache_uav_ = create_buffer(
         device_.Get(),
         D3D12_HEAP_TYPE_DEFAULT,
-        static_cast<std::size_t>(surface_cache_cell_count) * 16U,
+        static_cast<std::size_t>(surface_cache_max_cells) * 16U,
         D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
         D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
         "Create persistent surface-space cache UAV");

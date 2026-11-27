@@ -532,6 +532,58 @@ float3 eval_spot_specular_only(
     return spec;
 }
 
+bool test_range_light_against_aabb(uint light_idx, float3 aabb_min, float3 aabb_max) {
+    static const float4 light_spheres[14] = {
+        float4( 0.00, 4.55,  5.40, 34.00),
+        float4( 0.00, 4.55, 10.60, 34.00),
+        float4( 0.00, 4.55, 15.80, 34.00),
+        float4( 0.00, 4.55, 21.00, 34.00),
+        float4( 0.00, 4.55, 26.20, 34.00),
+        float4( 0.00, 4.24,  8.20, 34.00),
+        float4(-0.35, 4.24, 14.40, 34.00),
+        float4( 0.25, 4.24, 21.00, 34.00),
+        float4(-5.95, 3.15,  4.25, 34.00),
+        float4( 5.95, 3.15,  4.25, 34.00),
+        float4(-5.60, 3.38, 28.50, 34.00),
+        float4( 5.60, 3.38, 28.50, 34.00),
+        float4(-2.15, 0.92,  4.35, 18.00),
+        float4( 2.15, 0.92,  4.35, 18.00),
+    };
+    float4 sp = light_spheres[light_idx];
+    float3 clamped = clamp(sp.xyz, aabb_min, aabb_max);
+    float3 d = clamped - sp.xyz;
+    if (dot(d, d) > sp.w * sp.w) {
+        return false;
+    }
+    if (light_idx >= 5u && light_idx <= 11u) {
+        static const float4 spot_cone[7] = {
+            float4( 0.000000, -0.882032, 0.471190, 0.575),
+            float4( 0.000000, -0.892412, 0.451221, 0.535),
+            float4( 0.000000, -0.882032, 0.471190, 0.535),
+            float4( 0.761142, -0.520782, 0.390586, 0.245),
+            float4(-0.761142, -0.520782, 0.390586, 0.245),
+            float4( 0.680136, -0.540108, 0.490098, 0.295),
+            float4(-0.680136, -0.540108, 0.490098, 0.295),
+        };
+        float3 dir = spot_cone[light_idx - 5u].xyz;
+        float cos_o = spot_cone[light_idx - 5u].w;
+        float sin_o = sqrt(max(1.0 - cos_o * cos_o, 1e-4));
+        float3 center = 0.5 * (aabb_min + aabb_max);
+        float radius = length(aabb_max - center) + 0.05;
+        float3 v = center - sp.xyz;
+        float d_axis = dot(v, dir);
+        if (d_axis < -radius) {
+            return false;
+        }
+        float v_len_sq = dot(v, v);
+        float d_perp = sqrt(max(v_len_sq - d_axis * d_axis, 0.0));
+        if (d_axis * sin_o + radius < d_perp * cos_o) {
+            return false;
+        }
+    }
+    return true;
+}
+
 float3 eval_range_specular_and_composite(
     float3 world_pos,
     float3 cached_diffuse_irr,
@@ -549,6 +601,8 @@ float3 eval_range_specular_and_composite(
     bool is_viewmodel,
     float scene_time,
     uint shader_flags,
+    uint tile_light_mask,
+    bool roughness_cull_enabled,
     float3 cam_pos,
     float3 cam_forward,
     float4 muzzle_light_pos_intensity,
@@ -575,6 +629,8 @@ float3 eval_range_specular_and_composite(
         color = color * (1.0 - fc_ibl) + env_cc * (0.04 * dfg_cc.x + dfg_cc.y) * clearcoat * spec_ao * 0.55;
     }
 
+    bool skip_minor_spec = roughness_cull_enabled && !is_viewmodel && (perceptual_roughness >= 0.94) && (metallic < 0.01) && (clearcoat < 0.01);
+
     static const float area_z[5] = { 5.4, 10.6, 15.8, 21.0, 26.2 };
     static const float3 area_rad[5] = {
         float3(10.5, 11.8, 13.8),
@@ -584,7 +640,8 @@ float3 eval_range_specular_and_composite(
         float3(10.8, 9.6, 7.8),
     };
     [unroll]
-    for (int ai = 0; ai < 5; ++ai) {
+    for (uint ai = 0u; ai < 5u; ++ai) {
+        if ((tile_light_mask & (1u << ai)) == 0u) continue;
         float3 closest_diff = float3(
             clamp(world_pos.x, -1.40, 1.40),
             4.55,
@@ -630,35 +687,45 @@ float3 eval_range_specular_and_composite(
         }
     }
 
-    color += eval_spot_specular_only(world_pos, n, view_dir, nov, float3(0.0, 4.24, 8.2), normalize(float3(0.0, -0.88, 0.47)), 0.84, 0.58, float3(24.0, 22.8, 20.5), 0.075, f0, alpha, energy_comp, clearcoat, cc_alpha);
-    color += eval_spot_specular_only(world_pos, n, view_dir, nov, float3(-0.35, 4.24, 14.4), normalize(float3(0.0, -0.89, 0.45)), 0.82, 0.54, float3(25.0, 23.0, 19.5), 0.065, f0, alpha, energy_comp, clearcoat, cc_alpha);
-    color += eval_spot_specular_only(world_pos, n, view_dir, nov, float3(0.25, 4.24, 21.0), normalize(float3(0.0, -0.88, 0.47)), 0.82, 0.54, float3(26.0, 23.2, 19.0), 0.060, f0, alpha, energy_comp, clearcoat, cc_alpha);
-    color += eval_spot_specular_only(world_pos, n, view_dir, nov, float3(-5.95, 3.15, 4.25), normalize(float3(0.76, -0.52, 0.39)), 0.72, 0.25, float3(22.0, 1.4, 0.9), 0.11, f0, alpha, energy_comp, clearcoat, cc_alpha);
-    color += eval_spot_specular_only(world_pos, n, view_dir, nov, float3(5.95, 3.15, 4.25), normalize(float3(-0.76, -0.52, 0.39)), 0.72, 0.25, float3(22.0, 1.4, 0.9), 0.11, f0, alpha, energy_comp, clearcoat, cc_alpha);
-    color += eval_spot_specular_only(world_pos, n, view_dir, nov, float3(-5.60, 3.38, 28.5), normalize(float3(0.68, -0.54, 0.49)), 0.74, 0.30, float3(22.0, 10.5, 1.6), 0.075, f0, alpha, energy_comp, clearcoat, cc_alpha);
-    color += eval_spot_specular_only(world_pos, n, view_dir, nov, float3(5.60, 3.38, 28.5), normalize(float3(-0.68, -0.54, 0.49)), 0.74, 0.30, float3(22.0, 10.5, 1.6), 0.075, f0, alpha, energy_comp, clearcoat, cc_alpha);
+    if (!skip_minor_spec) {
+        if ((tile_light_mask & (1u << 5u)) != 0u)
+            color += eval_spot_specular_only(world_pos, n, view_dir, nov, float3(0.0, 4.24, 8.2), normalize(float3(0.0, -0.88, 0.47)), 0.84, 0.58, float3(24.0, 22.8, 20.5), 0.075, f0, alpha, energy_comp, clearcoat, cc_alpha);
+        if ((tile_light_mask & (1u << 6u)) != 0u)
+            color += eval_spot_specular_only(world_pos, n, view_dir, nov, float3(-0.35, 4.24, 14.4), normalize(float3(0.0, -0.89, 0.45)), 0.82, 0.54, float3(25.0, 23.0, 19.5), 0.065, f0, alpha, energy_comp, clearcoat, cc_alpha);
+        if ((tile_light_mask & (1u << 7u)) != 0u)
+            color += eval_spot_specular_only(world_pos, n, view_dir, nov, float3(0.25, 4.24, 21.0), normalize(float3(0.0, -0.88, 0.47)), 0.82, 0.54, float3(26.0, 23.2, 19.0), 0.060, f0, alpha, energy_comp, clearcoat, cc_alpha);
+        if ((tile_light_mask & (1u << 8u)) != 0u)
+            color += eval_spot_specular_only(world_pos, n, view_dir, nov, float3(-5.95, 3.15, 4.25), normalize(float3(0.76, -0.52, 0.39)), 0.72, 0.25, float3(22.0, 1.4, 0.9), 0.11, f0, alpha, energy_comp, clearcoat, cc_alpha);
+        if ((tile_light_mask & (1u << 9u)) != 0u)
+            color += eval_spot_specular_only(world_pos, n, view_dir, nov, float3(5.95, 3.15, 4.25), normalize(float3(-0.76, -0.52, 0.39)), 0.72, 0.25, float3(22.0, 1.4, 0.9), 0.11, f0, alpha, energy_comp, clearcoat, cc_alpha);
+        if ((tile_light_mask & (1u << 10u)) != 0u)
+            color += eval_spot_specular_only(world_pos, n, view_dir, nov, float3(-5.60, 3.38, 28.5), normalize(float3(0.68, -0.54, 0.49)), 0.74, 0.30, float3(22.0, 10.5, 1.6), 0.075, f0, alpha, energy_comp, clearcoat, cc_alpha);
+        if ((tile_light_mask & (1u << 11u)) != 0u)
+            color += eval_spot_specular_only(world_pos, n, view_dir, nov, float3(5.60, 3.38, 28.5), normalize(float3(-0.68, -0.54, 0.49)), 0.74, 0.30, float3(22.0, 10.5, 1.6), 0.075, f0, alpha, energy_comp, clearcoat, cc_alpha);
 
-    static const float3 cyan_pos[2] = { float3(-2.15, 0.92, 4.35), float3(2.15, 0.92, 4.35) };
-    [unroll]
-    for (int ci = 0; ci < 2; ++ci) {
-        float3 to_c = cyan_pos[ci] - world_pos;
-        float cd2 = max(dot(to_c, to_c), 0.25);
-        float3 lc = to_c * rsqrt(cd2);
-        float nol_c = saturate(dot(n, lc));
-        if (nol_c > 1e-4) {
-            float3 hc = normalize(view_dir + lc);
-            float d_c = pbr_d_ggx(saturate(dot(n, hc)), alpha);
-            float v_c = pbr_v_smith_ggx_correlated(nov, nol_c, alpha);
-            float3 f_c = pbr_f_schlick(saturate(dot(lc, hc)), f0, 1.0);
-            float3 rad_c = float3(1.1, 7.4, 12.2) * (nol_c / (1.0 + 0.38 * cd2));
-            float3 sp_c = (d_c * v_c) * f_c * energy_comp * rad_c;
-            if (clearcoat > 0.005) {
-                float d_cc = pbr_d_ggx(saturate(dot(n, hc)), cc_alpha);
-                float v_cc = pbr_v_kelemen(saturate(dot(lc, hc)));
-                float fc = (0.04 + 0.96 * pow(saturate(1.0 - saturate(dot(lc, hc))), 5.0)) * clearcoat;
-                sp_c = sp_c * (1.0 - fc) + (d_cc * v_cc * fc) * rad_c;
+        static const float3 cyan_pos[2] = { float3(-2.15, 0.92, 4.35), float3(2.15, 0.92, 4.35) };
+        [unroll]
+        for (uint ci = 0u; ci < 2u; ++ci) {
+            if ((tile_light_mask & (1u << (12u + ci))) == 0u) continue;
+            float3 to_c = cyan_pos[ci] - world_pos;
+            float cd2 = max(dot(to_c, to_c), 0.25);
+            float3 lc = to_c * rsqrt(cd2);
+            float nol_c = saturate(dot(n, lc));
+            if (nol_c > 1e-4) {
+                float3 hc = normalize(view_dir + lc);
+                float d_c = pbr_d_ggx(saturate(dot(n, hc)), alpha);
+                float v_c = pbr_v_smith_ggx_correlated(nov, nol_c, alpha);
+                float3 f_c = pbr_f_schlick(saturate(dot(lc, hc)), f0, 1.0);
+                float3 rad_c = float3(1.1, 7.4, 12.2) * (nol_c / (1.0 + 0.38 * cd2));
+                float3 sp_c = (d_c * v_c) * f_c * energy_comp * rad_c;
+                if (clearcoat > 0.005) {
+                    float d_cc = pbr_d_ggx(saturate(dot(n, hc)), cc_alpha);
+                    float v_cc = pbr_v_kelemen(saturate(dot(lc, hc)));
+                    float fc = (0.04 + 0.96 * pow(saturate(1.0 - saturate(dot(lc, hc))), 5.0)) * clearcoat;
+                    sp_c = sp_c * (1.0 - fc) + (d_cc * v_cc * fc) * rad_c;
+                }
+                color += sp_c;
             }
-            color += sp_c;
         }
     }
 

@@ -343,6 +343,13 @@ int print_status(const WindowInstance& instance) {
     const std::int32_t forward_transparency_enabled = std::atomic_ref<std::int32_t>(state->forward_transparency_enabled).load(std::memory_order_acquire);
     const std::int32_t split_diff_spec_enabled = std::atomic_ref<std::int32_t>(state->split_diff_spec_enabled).load(std::memory_order_acquire);
     const std::int32_t surface_cache_enabled = std::atomic_ref<std::int32_t>(state->surface_cache_enabled).load(std::memory_order_acquire);
+    const std::int32_t clustered_lighting_enabled = std::atomic_ref<std::int32_t>(state->clustered_lighting_enabled).load(std::memory_order_acquire);
+    const std::int32_t surface_cache_mb = std::atomic_ref<std::int32_t>(state->surface_cache_mb).load(std::memory_order_acquire);
+    const std::uint32_t sc_hits = std::atomic_ref<std::uint32_t>(state->last_sc_hits).load(std::memory_order_acquire);
+    const std::uint32_t sc_misses = std::atomic_ref<std::uint32_t>(state->last_sc_misses).load(std::memory_order_acquire);
+    const std::uint32_t sc_writes = std::atomic_ref<std::uint32_t>(state->last_sc_writes).load(std::memory_order_acquire);
+    const std::uint32_t sc_collisions = std::atomic_ref<std::uint32_t>(state->last_sc_collisions).load(std::memory_order_acquire);
+    const std::uint32_t clustered_light_sum = std::atomic_ref<std::uint32_t>(state->last_clustered_light_sum).load(std::memory_order_acquire);
     const std::int32_t unified_controller_enabled = std::atomic_ref<std::int32_t>(state->unified_controller_enabled).load(std::memory_order_acquire);
     const std::int32_t unified_controller_tier = std::atomic_ref<std::int32_t>(state->unified_controller_tier).load(std::memory_order_acquire);
     const std::int32_t unified_controller_util_permille = std::atomic_ref<std::int32_t>(state->unified_controller_util_permille).load(std::memory_order_acquire);
@@ -533,6 +540,16 @@ int print_status(const WindowInstance& instance) {
               << ",\"forward_transparency_enabled\":" << (forward_transparency_enabled ? "true" : "false")
               << ",\"split_diff_spec_enabled\":" << (split_diff_spec_enabled ? "true" : "false")
               << ",\"surface_cache_enabled\":" << (surface_cache_enabled ? "true" : "false")
+              << ",\"clustered_lighting_enabled\":" << (clustered_lighting_enabled ? "true" : "false")
+              << ",\"surface_cache\":{\"capacity_mb\":" << surface_cache_mb
+              << ",\"hits\":" << sc_hits
+              << ",\"misses\":" << sc_misses
+              << ",\"hit_rate\":" << std::fixed << std::setprecision(4) << ((sc_hits + sc_misses) > 0U ? static_cast<double>(sc_hits) / static_cast<double>(sc_hits + sc_misses) : 0.0)
+              << ",\"writes\":" << sc_writes
+              << ",\"collisions\":" << sc_collisions
+              << ",\"collision_rate\":" << std::fixed << std::setprecision(4) << (sc_writes > 0U ? static_cast<double>(sc_collisions) / static_cast<double>(sc_writes) : 0.0)
+              << ",\"avg_active_lights_per_tile\":" << std::fixed << std::setprecision(2) << (tile_total > 0U ? static_cast<double>(clustered_light_sum) / static_cast<double>(tile_total) : 14.0)
+              << "}"
               << ",\"par_bypass_active\":" << (par_bypass_active ? "true" : "false")
               << ",\"smoothed_damage_pct\":" << smoothed_damage_pct
               << ",\"target_scene_budget_us\":" << target_scene_budget_us
@@ -968,6 +985,17 @@ int apply_setting(const WindowInstance& instance, const std::wstring& key, const
         if (value == L"on" || value == L"1" || value == L"true") parameter = 1;
         else if (value == L"off" || value == L"0" || value == L"false") parameter = 0;
         else return fail("invalid_value", "Expected unified_controller in {on, off}");
+    } else if (key == L"clustered_lighting") {
+        command = frame_warp_lab::ControlCommand::set_clustered_lighting;
+        if (value == L"on" || value == L"1" || value == L"true") parameter = 1;
+        else if (value == L"off" || value == L"0" || value == L"false") parameter = 0;
+        else return fail("invalid_value", "Expected clustered_lighting in {on, off}");
+    } else if (key == L"surface_cache_mb") {
+        command = frame_warp_lab::ControlCommand::set_surface_cache_mb;
+        if (value == L"4") parameter = 4;
+        else if (value == L"16") parameter = 16;
+        else if (value == L"64") parameter = 64;
+        else return fail("invalid_value", "Expected surface_cache_mb in {4, 16, 64}");
     } else if (key == L"shader_feature") {
         command = frame_warp_lab::ControlCommand::set_shader_flags;
         unsigned long parsed = 0;

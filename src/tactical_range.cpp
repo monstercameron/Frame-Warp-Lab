@@ -1101,6 +1101,11 @@ void TacticalRangeSimulation::build_render_frame(
         out_frame.instances[idx].tint_emissive[1] = r.tint.y;
         out_frame.instances[idx].tint_emissive[2] = r.tint.z;
         out_frame.instances[idx].tint_emissive[3] = r.emissive;
+        const std::uint32_t uid = ((entity_generation(ents[i]) & 0xFFFFU) << 16U) | (entity_index(ents[i]) & 0xFFFFU);
+        out_frame.instances[idx].entity_meta[0] = uid;
+        out_frame.instances[idx].entity_meta[1] = static_cast<std::uint32_t>(r.mesh);
+        out_frame.instances[idx].entity_meta[2] = r.viewmodel ? 1U : 0U;
+        out_frame.instances[idx].entity_meta[3] = 0U;
         out_frame.draws[idx] = RangeDrawCall{r.mesh, idx, r.viewmodel};
     }
 

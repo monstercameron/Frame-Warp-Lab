@@ -28,6 +28,7 @@ struct InstanceData {
     float4x4 model;
     float4x4 prev_model;
     float4 tint_emissive;
+    uint4 entity_meta;
 };
 
 Texture2D<float4> prev_color_texture : register(t0);
@@ -76,6 +77,23 @@ groupshared uint g_disoccluded_count;
 groupshared uint g_moving_count;
 groupshared uint g_non_sky_count;
 groupshared uint g_max_age_in_tile;
+groupshared uint g_tile_min_x;
+groupshared uint g_tile_min_y;
+groupshared uint g_tile_min_z;
+groupshared uint g_tile_max_x;
+groupshared uint g_tile_max_y;
+groupshared uint g_tile_max_z;
+groupshared uint g_tile_light_mask;
+
+uint float_to_sortable_uint(float f) {
+    uint u = asuint(f);
+    return ((u & 0x80000000u) != 0u) ? ~u : (u | 0x80000000u);
+}
+
+float sortable_uint_to_float(uint u) {
+    uint r = ((u & 0x80000000u) != 0u) ? (u & 0x7FFFFFFFu) : ~u;
+    return asfloat(r);
+}
 
 uint lookup_stbn_phase(uint tx, uint ty) {
     uint row = ty & 15u;
@@ -144,30 +162,69 @@ float3 intersect_ray_triangle_bary(float3 ray_origin, float3 ray_dir, float3 wp0
     return float3(1.0 - u - v, u, v);
 }
 
-uint compute_surface_cache_key(uint inst_idx, float3 local_pos, float3 local_n, bool is_viewmodel, uint shader_flags, out uint out_slot0) {
-    float cell_size = is_viewmodel ? 0.014 : 0.060;
+uint compute_surface_cache_key(
+    uint entity_uid,
+    float3 local_pos,
+    float3 local_n,
+    float view_dist,
+    bool is_viewmodel,
+    uint mode_and_light_rev,
+    uint sc_mask,
+    out uint out_slot0) {
+    uint lod = is_viewmodel ? 0u : (uint)clamp(floor(log2(max(view_dist * (1.0 / 5.0), 1.0))), 0.0, 2.0);
+    float cell_size = is_viewmodel ? 0.012 : (0.025 * (float)(1u << lod));
     int3 q = (int3)floor(local_pos / cell_size);
     uint oct = (local_n.x >= 0.0 ? 1u : 0u) | (local_n.y >= 0.0 ? 2u : 0u) | (local_n.z >= 0.0 ? 4u : 0u);
-    uint h1 = ((uint)q.x * 73856093u) ^ ((uint)q.y * 19349663u) ^ ((uint)q.z * 83492791u) ^ (inst_idx * 2654435761u) ^ (oct * 2246822519u) ^ (shader_flags * 3266489917u);
-    uint h2 = ((uint)q.x * 374761393u) ^ ((uint)q.y * 668265263u) ^ ((uint)q.z * 1274126177u) ^ (inst_idx * 97531u) ^ (oct * 17u) ^ (shader_flags * 65537u);
-    out_slot0 = h1 & 262143u;
-    uint key = h2 | 1u;
-    return key;
+    uint meta = (oct << 2u) | lod;
+    uint h1 = ((uint)q.x * 73856093u) ^ ((uint)q.y * 19349663u) ^ ((uint)q.z * 83492791u)
+        ^ (entity_uid * 2654435761u) ^ (meta * 2246822519u) ^ (mode_and_light_rev * 3266489917u);
+    uint h2 = ((uint)q.x * 374761393u) ^ ((uint)q.y * 668265263u) ^ ((uint)q.z * 1274126177u)
+        ^ (entity_uid * 97531u) ^ (meta * 17u) ^ (mode_and_light_rev * 65537u);
+    out_slot0 = h1 & sc_mask;
+    return h2 | 1u;
 }
 
-void write_surface_cache(uint key, uint slot0, float3 rgb, uint frame_id) {
+void write_surface_cache(uint key, uint slot0, float3 rgb, uint frame_id, uint sc_mask, out bool out_collided) {
     uint rg = f32tof16(rgb.r) | (f32tof16(rgb.g) << 16u);
     uint ba = f32tof16(rgb.b) | (1u << 16u);
-    uint4 packed = uint4(key, rg, ba, frame_id);
-    uint prev_k0 = surface_cache_uav.Load(slot0 * 16u);
-    uint target_slot = (prev_k0 == 0u || prev_k0 == key) ? slot0 : ((slot0 + 1u) & 262143u);
-    surface_cache_uav.Store4(target_slot * 16u, packed);
+    out_collided = false;
+    uint target_slot = 0xFFFFFFFFu;
+    [unroll]
+    for (uint probe = 0u; probe < 4u; ++probe) {
+        uint slot = (slot0 + probe) & sc_mask;
+        uint addr = slot * 16u;
+        uint prev_key = 0u;
+        surface_cache_uav.InterlockedCompareExchange(addr, 0u, key, prev_key);
+        if (prev_key == 0u || prev_key == key) {
+            target_slot = slot;
+            break;
+        }
+        uint prev_frame = surface_cache_uav.Load(addr + 12u);
+        if (frame_id < prev_frame || (frame_id - prev_frame) > 24u) {
+            uint actual = 0u;
+            surface_cache_uav.InterlockedCompareExchange(addr, prev_key, key, actual);
+            if (actual == prev_key) {
+                target_slot = slot;
+                break;
+            }
+        }
+        out_collided = true;
+    }
+    if (target_slot == 0xFFFFFFFFu) {
+        uint slot = slot0 & sc_mask;
+        surface_cache_uav.Store(slot * 16u, key);
+        target_slot = slot;
+        out_collided = true;
+    }
+    uint t_addr = target_slot * 16u;
+    surface_cache_uav.Store2(t_addr + 4u, uint2(rg, ba));
+    surface_cache_uav.Store(t_addr + 12u, frame_id);
 }
 
-bool read_surface_cache(uint key, uint slot0, uint frame_id, uint max_age_frames, out float3 out_rgb, out uint out_age) {
+bool read_surface_cache(uint key, uint slot0, uint frame_id, uint max_age_frames, uint sc_mask, out float3 out_rgb, out uint out_age) {
     [unroll]
-    for (uint probe = 0u; probe < 2u; ++probe) {
-        uint slot = (slot0 + probe) & 262143u;
+    for (uint probe = 0u; probe < 4u; ++probe) {
+        uint slot = (slot0 + probe) & sc_mask;
         uint4 c = surface_cache_uav.Load4(slot * 16u);
         if (c.x == key && frame_id >= c.w && (frame_id - c.w) <= max_age_frames) {
             out_rgb = float3(f16tof32(c.y & 0xFFFFu), f16tof32(c.y >> 16u), f16tof32(c.z & 0xFFFFu));
@@ -254,6 +311,15 @@ void shade_vis_pixel(uint2 pixel_coord, uint width, uint height) {
     float2 duv_dy = uv_y - uv;
     float em_w = v0.emissive_weight * b.x + v1.emissive_weight * b.y + v2.emissive_weight * b.z;
 
+    uint sc_mask = max(cache_params.y, 262143u);
+    uint muzzle_bit = (muzzle_light_pos_intensity.w > 0.01) ? 1u : 0u;
+    uint shadow_sig_cur = ((shader_flags & (8u | 32u)) != 0u && !is_viewmodel)
+        ? eval_range_shadow_signature(world_pos, scene_time, shader_flags)
+        : 0u;
+    uint sc_epoch = (policy_params.x >> 16u) & 0xFFFFu;
+    uint light_rev = (shader_flags & 255u) | ((use_split_diff_spec ? 1u : 0u) << 8u) | (muzzle_bit << 9u) | ((shadow_sig_cur & 63u) << 10u) | (sc_epoch << 16u);
+    float view_dist = length(world_pos - cam_pos);
+
     if (use_split_diff_spec) {
         float3 mat_albedo, mat_n, mat_geo_n;
         float mat_ao, mat_rough, mat_metal, mat_cc;
@@ -269,8 +335,16 @@ void shade_vis_pixel(uint2 pixel_coord, uint width, uint height) {
         out_color_uav[pixel_coord] = float4(diff_irr, 0.0);
         if (use_surface_cache) {
             uint slot0 = 0u;
-            uint sc_key = compute_surface_cache_key(inst_idx, local_pos, local_n, is_viewmodel, shader_flags, slot0);
-            write_surface_cache(sc_key, slot0, diff_irr, frame_id);
+            uint sc_key = compute_surface_cache_key(inst.entity_meta.x, local_pos, local_n, view_dist, is_viewmodel, light_rev, sc_mask, slot0);
+            bool collided = false;
+            write_surface_cache(sc_key, slot0, diff_irr, frame_id, sc_mask, collided);
+            uint w_writes = WaveActiveCountBits(true);
+            uint w_colls = WaveActiveCountBits(collided);
+            if (WaveIsFirstLane()) {
+                uint old_w = 0u;
+                if (w_writes > 0u) InterlockedAdd(tile_candidate_meta_uav[131062u], w_writes, old_w);
+                if (w_colls > 0u) InterlockedAdd(tile_candidate_meta_uav[131063u], w_colls, old_w);
+            }
         }
         return;
     }
@@ -302,8 +376,16 @@ void shade_vis_pixel(uint2 pixel_coord, uint width, uint height) {
     out_color_uav[pixel_coord] = float4(shaded, 0.0);
     if (use_surface_cache) {
         uint slot0 = 0u;
-        uint sc_key = compute_surface_cache_key(inst_idx, local_pos, local_n, is_viewmodel, shader_flags, slot0);
-        write_surface_cache(sc_key, slot0, shaded, frame_id);
+        uint sc_key = compute_surface_cache_key(inst.entity_meta.x, local_pos, local_n, view_dist, is_viewmodel, light_rev, sc_mask, slot0);
+        bool collided = false;
+        write_surface_cache(sc_key, slot0, shaded, frame_id, sc_mask, collided);
+        uint w_writes = WaveActiveCountBits(true);
+        uint w_colls = WaveActiveCountBits(collided);
+        if (WaveIsFirstLane()) {
+            uint old_w = 0u;
+            if (w_writes > 0u) InterlockedAdd(tile_candidate_meta_uav[131062u], w_writes, old_w);
+            if (w_colls > 0u) InterlockedAdd(tile_candidate_meta_uav[131063u], w_colls, old_w);
+        }
     }
 }
 
@@ -444,16 +526,31 @@ void range_vis_classify_main(
                     + camera_up_rcp_width.xyz * (sc_ndc.y * camera_position_tan_y.w)
                     + camera_forward_rcp_height.xyz;
                 float3 sb = intersect_ray_triangle_bary(camera_position_tan_y.xyz, sc_rd, swp0, swp1 - swp0, swp2 - swp0, camera_position_tan_y.xyz - swp0);
+                float3 sc_world_p = swp0 * sb.x + swp1 * sb.y + swp2 * sb.z;
                 float3 sc_local_p = sv0.position * sb.x + sv1.position * sb.y + sv2.position * sb.z;
                 float3 sc_local_n = normalize(sv0.normal * sb.x + sv1.normal * sb.y + sv2.normal * sb.z);
+                uint sc_mask = max(cache_params.y, 262143u);
+                uint sc_split_bit = ((policy_params.x & 32u) != 0u) ? 1u : 0u;
+                uint sc_muz_bit = (muzzle_light_pos_intensity.w > 0.01) ? 1u : 0u;
+                uint sc_sh_sig = ((shader_flags & (8u | 32u)) != 0u && !is_vm) ? eval_range_shadow_signature(sc_world_p, curr_scene_time, shader_flags) : 0u;
+                uint sc_epoch = (policy_params.x >> 16u) & 0xFFFFu;
+                uint sc_rev = (shader_flags & 255u) | (sc_split_bit << 8u) | (sc_muz_bit << 9u) | ((sc_sh_sig & 63u) << 10u) | (sc_epoch << 16u);
                 uint sc_slot0 = 0u;
-                uint sc_key = compute_surface_cache_key(inst_enc - 1u, sc_local_p, sc_local_n, is_vm, shader_flags, sc_slot0);
+                uint sc_key = compute_surface_cache_key(sc_inst.entity_meta.x, sc_local_p, sc_local_n, length(sc_world_p - camera_position_tan_y.xyz), is_vm, sc_rev, sc_mask, sc_slot0);
                 float3 sc_rgb;
                 uint sc_age;
-                if (read_surface_cache(sc_key, sc_slot0, frame_id, 24u, sc_rgb, sc_age)) {
+                bool sc_hit = read_surface_cache(sc_key, sc_slot0, frame_id, 24u, sc_mask, sc_rgb, sc_age);
+                if (sc_hit) {
                     cached_rgb = sc_rgb;
                     next_age = min(sc_age + 1u, 250u);
                     cache_valid = true;
+                }
+                uint w_hits = WaveActiveCountBits(sc_hit);
+                uint w_misses = WaveActiveCountBits(!sc_hit);
+                if (WaveIsFirstLane()) {
+                    uint old_v = 0u;
+                    if (w_hits > 0u) InterlockedAdd(tile_candidate_meta_uav[131060u], w_hits, old_v);
+                    if (w_misses > 0u) InterlockedAdd(tile_candidate_meta_uav[131061u], w_misses, old_v);
                 }
             }
 
@@ -692,15 +789,77 @@ void range_vis_shade_main(
 }
 
 [numthreads(16, 16, 1)]
-void range_vis_composite_main(uint3 dispatch_id : SV_DispatchThreadID) {
+void range_vis_composite_main(
+    uint3 group_id : SV_GroupID,
+    uint3 local_id : SV_GroupThreadID,
+    uint3 dispatch_id : SV_DispatchThreadID) {
     uint width = cache_params.z;
     uint height = cache_params.w;
     uint2 pixel_coord = dispatch_id.xy;
-    if (pixel_coord.x >= width || pixel_coord.y >= height) {
-        return;
+    bool in_bounds = (pixel_coord.x < width) && (pixel_coord.y < height);
+    bool use_clustered = (policy_params.x & 128u) != 0u;
+
+    if (local_id.x == 0u && local_id.y == 0u) {
+        g_tile_min_x = 0xFFFFFFFFu;
+        g_tile_min_y = 0xFFFFFFFFu;
+        g_tile_min_z = 0xFFFFFFFFu;
+        g_tile_max_x = 0u;
+        g_tile_max_y = 0u;
+        g_tile_max_z = 0u;
+        g_tile_light_mask = use_clustered ? 0u : 0x3FFFu;
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    uint vis_word = in_bounds ? out_vis_uav[pixel_coord] : 0u;
+    float3 cam_pos = camera_position_tan_y.xyz;
+    float3 cam_r = camera_right_tan_x.xyz * camera_right_tan_x.w;
+    float3 cam_u = camera_up_rcp_width.xyz * camera_position_tan_y.w;
+    float3 cam_f = camera_forward_rcp_height.xyz;
+    float2 curr_uv = (float2(pixel_coord) + 0.5) * float2(camera_up_rcp_width.w, camera_forward_rcp_height.w);
+    float2 p_ndc = float2(curr_uv.x * 2.0 - 1.0, 1.0 - curr_uv.y * 2.0);
+    float3 rd = cam_r * p_ndc.x + cam_u * p_ndc.y + cam_f;
+
+    if (use_clustered && in_bounds && vis_word != 0u) {
+        float px_depth = out_depth_uav[pixel_coord];
+        float3 approx_wp = cam_pos + rd * px_depth;
+        uint ux = float_to_sortable_uint(approx_wp.x);
+        uint uy = float_to_sortable_uint(approx_wp.y);
+        uint uz = float_to_sortable_uint(approx_wp.z);
+        uint w_min_x = WaveActiveMin(ux);
+        uint w_min_y = WaveActiveMin(uy);
+        uint w_min_z = WaveActiveMin(uz);
+        uint w_max_x = WaveActiveMax(ux);
+        uint w_max_y = WaveActiveMax(uy);
+        uint w_max_z = WaveActiveMax(uz);
+        if (WaveIsFirstLane()) {
+            InterlockedMin(g_tile_min_x, w_min_x);
+            InterlockedMin(g_tile_min_y, w_min_y);
+            InterlockedMin(g_tile_min_z, w_min_z);
+            InterlockedMax(g_tile_max_x, w_max_x);
+            InterlockedMax(g_tile_max_y, w_max_y);
+            InterlockedMax(g_tile_max_z, w_max_z);
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    uint tid = local_id.y * 16u + local_id.x;
+    if (use_clustered && tid < 14u && g_tile_min_x <= g_tile_max_x) {
+        float3 aabb_min = float3(sortable_uint_to_float(g_tile_min_x), sortable_uint_to_float(g_tile_min_y), sortable_uint_to_float(g_tile_min_z));
+        float3 aabb_max = float3(sortable_uint_to_float(g_tile_max_x), sortable_uint_to_float(g_tile_max_y), sortable_uint_to_float(g_tile_max_z));
+        if (test_range_light_against_aabb(tid, aabb_min, aabb_max)) {
+            InterlockedOr(g_tile_light_mask, 1u << tid);
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    if (tid == 0u && group_id.x < tile_params.x && group_id.y < tile_params.y) {
+        uint old_sum = 0u;
+        InterlockedAdd(tile_candidate_meta_uav[131064u], countbits(g_tile_light_mask), old_sum);
     }
 
-    uint vis_word = out_vis_uav[pixel_coord];
+    if (!in_bounds) {
+        return;
+    }
     if (vis_word == 0u) {
         out_final_color_uav[pixel_coord] = float4(0.035, 0.050, 0.068, 1.0);
         return;
@@ -710,6 +869,7 @@ void range_vis_composite_main(uint3 dispatch_id : SV_DispatchThreadID) {
     float scene_time = previous_camera_forward_time.w;
     uint frame_id = tile_params.w;
     bool use_surface_cache = (policy_params.x & 64u) != 0u;
+    uint sc_mask = max(cache_params.y, 262143u);
 
     uint inst_idx = (vis_word >> 25u) - 1u;
     bool is_viewmodel = ((vis_word >> 24u) & 1u) != 0u;
@@ -725,17 +885,8 @@ void range_vis_composite_main(uint3 dispatch_id : SV_DispatchThreadID) {
     float3 wp1 = mul(inst.model, float4(v1.position, 1.0)).xyz;
     float3 wp2 = mul(inst.model, float4(v2.position, 1.0)).xyz;
 
-    float2 curr_uv = (float2(pixel_coord) + 0.5) * float2(camera_up_rcp_width.w, camera_forward_rcp_height.w);
-    float2 p_ndc = float2(curr_uv.x * 2.0 - 1.0, 1.0 - curr_uv.y * 2.0);
     float dx_ndc = 2.0 * camera_up_rcp_width.w;
     float dy_ndc = -2.0 * camera_forward_rcp_height.w;
-
-    float3 cam_pos = camera_position_tan_y.xyz;
-    float3 cam_r = camera_right_tan_x.xyz * camera_right_tan_x.w;
-    float3 cam_u = camera_up_rcp_width.xyz * camera_position_tan_y.w;
-    float3 cam_f = camera_forward_rcp_height.xyz;
-
-    float3 rd = cam_r * p_ndc.x + cam_u * p_ndc.y + cam_f;
     float3 rd_x = rd + cam_r * dx_ndc;
     float3 rd_y = rd + cam_u * dy_ndc;
 
@@ -775,15 +926,27 @@ void range_vis_composite_main(uint3 dispatch_id : SV_DispatchThreadID) {
 
     float4 irr_age = out_color_uav[pixel_coord];
     float3 cached_irr = irr_age.rgb;
-    if (use_surface_cache && irr_age.a >= 8.0) {
+    if (use_surface_cache && irr_age.a >= 24.0) {
         float3 local_pos = v0.position * b.x + v1.position * b.y + v2.position * b.z;
         float3 local_n = normalize(v0.normal * b.x + v1.normal * b.y + v2.normal * b.z);
+        uint sc_muz_bit = (muzzle_light_pos_intensity.w > 0.01) ? 1u : 0u;
+        uint sc_sh_sig = ((shader_flags & (8u | 32u)) != 0u && !is_viewmodel) ? eval_range_shadow_signature(world_pos, scene_time, shader_flags) : 0u;
+        uint sc_epoch = (policy_params.x >> 16u) & 0xFFFFu;
+        uint sc_rev = (shader_flags & 255u) | (1u << 8u) | (sc_muz_bit << 9u) | ((sc_sh_sig & 63u) << 10u) | (sc_epoch << 16u);
         uint sc_slot0 = 0u;
-        uint sc_key = compute_surface_cache_key(inst_idx, local_pos, local_n, is_viewmodel, shader_flags, sc_slot0);
+        uint sc_key = compute_surface_cache_key(inst.entity_meta.x, local_pos, local_n, length(world_pos - cam_pos), is_viewmodel, sc_rev, sc_mask, sc_slot0);
         float3 sc_irr;
         uint sc_age;
-        if (read_surface_cache(sc_key, sc_slot0, frame_id, 24u, sc_irr, sc_age) && (float)sc_age < irr_age.a) {
+        bool sc_hit = read_surface_cache(sc_key, sc_slot0, frame_id, 24u, sc_mask, sc_irr, sc_age);
+        if (sc_hit && (float)sc_age < irr_age.a) {
             cached_irr = lerp(cached_irr, sc_irr, 0.35);
+        }
+        uint w_hits = WaveActiveCountBits(sc_hit);
+        uint w_misses = WaveActiveCountBits(!sc_hit);
+        if (WaveIsFirstLane()) {
+            uint old_v = 0u;
+            if (w_hits > 0u) InterlockedAdd(tile_candidate_meta_uav[131060u], w_hits, old_v);
+            if (w_misses > 0u) InterlockedAdd(tile_candidate_meta_uav[131061u], w_misses, old_v);
         }
     }
 
@@ -804,6 +967,8 @@ void range_vis_composite_main(uint3 dispatch_id : SV_DispatchThreadID) {
         is_viewmodel,
         scene_time,
         shader_flags,
+        g_tile_light_mask,
+        use_clustered,
         cam_pos,
         cam_f,
         muzzle_light_pos_intensity,

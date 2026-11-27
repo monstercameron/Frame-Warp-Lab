@@ -20,6 +20,7 @@ struct alignas(16) RangeInstanceGpu {
     float model[16];
     float prev_model[16];
     float tint_emissive[4];
+    std::uint32_t entity_meta[4];
 };
 
 enum class RangeMeshKind : std::uint32_t {
