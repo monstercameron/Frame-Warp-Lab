@@ -49,6 +49,9 @@ public:
         std::int32_t vrs_tier,
         std::int32_t vrs_tile_size_px,
         bool vrs_additional_rates_supported,
+        std::int32_t dxr_tier,
+        bool dust2_loaded,
+        std::int64_t dust2_pbr_build_ms,
         const frame_warp_lab::StreamlineCapabilities& streamline_caps)
         : mapping_(CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0,
                                       sizeof(frame_warp_lab::RuntimeState),
@@ -67,6 +70,9 @@ public:
         std::atomic_ref<std::int32_t>(state_->vrs_tier).store(vrs_tier, std::memory_order_relaxed);
         std::atomic_ref<std::int32_t>(state_->vrs_tile_size_px).store(vrs_tile_size_px, std::memory_order_relaxed);
         std::atomic_ref<std::int32_t>(state_->vrs_additional_rates_supported).store(vrs_additional_rates_supported ? 1 : 0, std::memory_order_relaxed);
+        std::atomic_ref<std::int32_t>(state_->dxr_tier).store(dxr_tier, std::memory_order_relaxed);
+        std::atomic_ref<std::int32_t>(state_->dust2_loaded).store(dust2_loaded ? 1 : 0, std::memory_order_relaxed);
+        std::atomic_ref<std::int64_t>(state_->dust2_pbr_build_ms).store(dust2_pbr_build_ms, std::memory_order_relaxed);
         std::atomic_ref<std::int32_t>(state_->raw_input_enabled).store(raw_input_enabled ? 1 : 0, std::memory_order_relaxed);
         std::atomic_ref<std::int32_t>(state_->gpu_timing_available).store(gpu_timing_available ? 1 : 0, std::memory_order_relaxed);
         std::atomic_ref<std::int32_t>(state_->streamline_initialized).store(streamline_caps.initialized ? 1 : 0, std::memory_order_relaxed);
@@ -167,6 +173,20 @@ public:
         std::atomic_ref<std::int64_t>(state_->mt_pbr_build_ms).store(pbr_build_ms, std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->tactical_spread_mrad_x100).store(static_cast<std::int32_t>(t.current_spread_mrad * 100.0f), std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->tactical_shot_offset_mrad_x100).store(static_cast<std::int32_t>(t.last_shot_offset_mrad * 100.0f), std::memory_order_release);
+    }
+
+    void update_dust2_octree(const frame_warp_lab::Dust2OctreeTelemetry& d) {
+        std::atomic_ref<std::uint32_t>(state_->dust2_octree_total_nodes).store(d.total_nodes, std::memory_order_release);
+        std::atomic_ref<std::uint32_t>(state_->dust2_octree_visited_nodes).store(d.visited_nodes, std::memory_order_release);
+        std::atomic_ref<std::uint32_t>(state_->dust2_octree_culled_nodes).store(d.culled_nodes, std::memory_order_release);
+        std::atomic_ref<std::uint32_t>(state_->dust2_octree_probe_occluded).store(d.probe_occluded_nodes, std::memory_order_release);
+        std::atomic_ref<std::uint32_t>(state_->dust2_lod0_chunks).store(d.lod0_chunks, std::memory_order_release);
+        std::atomic_ref<std::uint32_t>(state_->dust2_lod1_chunks).store(d.lod1_chunks, std::memory_order_release);
+        std::atomic_ref<std::uint32_t>(state_->dust2_lod2_chunks).store(d.lod2_chunks, std::memory_order_release);
+        std::atomic_ref<std::uint32_t>(state_->dust2_submitted_tris).store(d.submitted_triangles, std::memory_order_release);
+        std::atomic_ref<std::uint32_t>(state_->dust2_total_lod0_tris).store(d.total_lod0_triangles, std::memory_order_release);
+        std::atomic_ref<std::uint32_t>(state_->dust2_active_probes).store(d.active_probes, std::memory_order_release);
+        std::atomic_ref<std::uint32_t>(state_->dust2_active_lights).store(d.active_lights, std::memory_order_release);
     }
 
     void update_dlssg(
@@ -780,6 +800,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
             renderer.vrs_tier(),
             renderer.vrs_tile_size_px(),
             renderer.vrs_additional_rates_supported(),
+            renderer.dxr_tier(),
+            renderer.dust2_map().loaded,
+            renderer.dust2_pbr_build_time_ms(),
             renderer.streamline_capabilities());
         frame_warp_lab::SceneSimulation simulation;
 
@@ -840,6 +863,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         bool aniso_mip_enabled = true;
         frame_warp_lab::SceneKind scene_kind = frame_warp_lab::SceneKind::range;
         bool cli_ads_active = false;
+        bool has_prev_dust2_cam = false;
+        frame_warp_lab::CameraBasis prev_dust2_cam{};
+        std::int64_t prev_dust2_cut = 0;
         frame_warp_lab::TacticalRangeSimulation tactical_range;
         {
             const auto& meta = renderer.range_geometry_meta();
@@ -954,9 +980,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 if (scene_kind == frame_warp_lab::SceneKind::range) {
                     simulation.reset_for_tactical_range();
                     tactical_range.reset();
+                } else if (scene_kind == frame_warp_lab::SceneKind::dust2) {
+                    const auto& d2 = renderer.dust2_map();
+                    simulation.reset_for_dust2(d2.spawn_pos, d2.spawn_yaw, d2.world_min, d2.world_max);
+                    tactical_range.reset();
                 } else {
                     simulation.reset();
                 }
+                has_prev_dust2_cam = false;
                 renderer.invalidate_source_history();
                 cadence_counter = 0;
                 pacer.reset();
@@ -971,6 +1002,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 const auto raw = static_cast<std::int32_t>(message_lparam);
                 if (raw >= 0 && raw <= 5) {
                     simulation.set_path(static_cast<frame_warp_lab::CameraPath>(raw));
+                    has_prev_dust2_cam = false;
                     renderer.invalidate_source_history();
                     runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, raw, frame_warp_lab::ConfigKey::camera_path);
                 }
@@ -1153,17 +1185,22 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, aniso_mip_enabled ? 1 : 0, frame_warp_lab::ConfigKey::aniso_mip_enabled);
             } else if (command == frame_warp_lab::ControlCommand::set_scene_kind) {
                 const auto raw = static_cast<std::int32_t>(message_lparam);
-                if (raw >= 0 && raw <= 1) {
+                if (raw >= 0 && raw <= 2) {
                     scene_kind = static_cast<frame_warp_lab::SceneKind>(raw);
-                    input_state.range_mode = (scene_kind == frame_warp_lab::SceneKind::range);
+                    input_state.range_mode = (scene_kind == frame_warp_lab::SceneKind::range || scene_kind == frame_warp_lab::SceneKind::dust2);
                     if (scene_kind == frame_warp_lab::SceneKind::range) {
                         simulation.reset_for_tactical_range();
+                        tactical_range.reset();
+                    } else if (scene_kind == frame_warp_lab::SceneKind::dust2) {
+                        const auto& d2 = renderer.dust2_map();
+                        simulation.reset_for_dust2(d2.spawn_pos, d2.spawn_yaw, d2.world_min, d2.world_max);
                         tactical_range.reset();
                     } else {
                         simulation.set_range_camera_modifiers(0.0f, 0.0f, 0.0f, false);
                         simulation.set_path(frame_warp_lab::CameraPath::corridor_sway);
                         simulation.reset();
                     }
+                    has_prev_dust2_cam = false;
                     renderer.invalidate_source_history();
                     cadence_counter = 0;
                     runtime_state.record_event(frame_warp_lab::RuntimeEventType::config_updated, raw, frame_warp_lab::ConfigKey::scene_kind);
@@ -1409,7 +1446,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                             scene_paused ? frame_warp_lab::RuntimeEventType::scene_paused : frame_warp_lab::RuntimeEventType::scene_resumed,
                             scene_paused ? 1 : 0);
                     } else if (message.wParam == 'R') {
-                        if (scene_kind == frame_warp_lab::SceneKind::range) {
+                        if (scene_kind == frame_warp_lab::SceneKind::range || scene_kind == frame_warp_lab::SceneKind::dust2) {
                             tactical_range.request_reload();
                         } else {
                             simulation.reset();
@@ -1422,9 +1459,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                         if (scene_kind == frame_warp_lab::SceneKind::range) {
                             simulation.reset_for_tactical_range();
                             tactical_range.reset();
+                        } else if (scene_kind == frame_warp_lab::SceneKind::dust2) {
+                            const auto& d2 = renderer.dust2_map();
+                            simulation.reset_for_dust2(d2.spawn_pos, d2.spawn_yaw, d2.world_min, d2.world_max);
+                            tactical_range.reset();
                         } else {
                             simulation.reset();
                         }
+                        has_prev_dust2_cam = false;
                         renderer.invalidate_source_history();
                         cadence_counter = 0;
                         pacer.reset();
@@ -1432,24 +1474,34 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                     } else if (message.wParam == VK_F6) {
                         tactical_range.reload_lua_scripts();
                     } else if (message.wParam == VK_TAB) {
-                        scene_kind = (scene_kind == frame_warp_lab::SceneKind::range)
-                            ? frame_warp_lab::SceneKind::corridor
-                            : frame_warp_lab::SceneKind::range;
-                        input_state.range_mode = (scene_kind == frame_warp_lab::SceneKind::range);
+                        if (scene_kind == frame_warp_lab::SceneKind::range) {
+                            scene_kind = renderer.dust2_map().loaded ? frame_warp_lab::SceneKind::dust2 : frame_warp_lab::SceneKind::corridor;
+                        } else if (scene_kind == frame_warp_lab::SceneKind::dust2) {
+                            scene_kind = frame_warp_lab::SceneKind::corridor;
+                        } else {
+                            scene_kind = frame_warp_lab::SceneKind::range;
+                        }
+                        input_state.range_mode = (scene_kind == frame_warp_lab::SceneKind::range || scene_kind == frame_warp_lab::SceneKind::dust2);
                         if (scene_kind == frame_warp_lab::SceneKind::range) {
                             simulation.reset_for_tactical_range();
+                            tactical_range.reset();
+                        } else if (scene_kind == frame_warp_lab::SceneKind::dust2) {
+                            const auto& d2 = renderer.dust2_map();
+                            simulation.reset_for_dust2(d2.spawn_pos, d2.spawn_yaw, d2.world_min, d2.world_max);
                             tactical_range.reset();
                         } else {
                             simulation.set_range_camera_modifiers(0.0f, 0.0f, 0.0f, false);
                             simulation.set_path(frame_warp_lab::CameraPath::corridor_sway);
                             simulation.reset();
                         }
+                        has_prev_dust2_cam = false;
                         renderer.invalidate_source_history();
                         cadence_counter = 0;
                         config_changed = true;
                     } else if (message.wParam == 'C') {
                         const auto next_path = static_cast<frame_warp_lab::CameraPath>((static_cast<std::int32_t>(simulation.path()) + 1) % 6);
                         simulation.set_path(next_path);
+                        has_prev_dust2_cam = false;
                         renderer.invalidate_source_history();
                         config_changed = true;
                     } else if (message.wParam == VK_OEM_4) {
@@ -1566,6 +1618,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
             }
 
             if (simulation.take_manual_control_if_needed(manual_input)) {
+                has_prev_dust2_cam = false;
                 renderer.invalidate_source_history();
                 runtime_state.record_event(
                     frame_warp_lab::RuntimeEventType::config_updated,
@@ -1579,7 +1632,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
             const double delta_seconds = fixed_dt_us > 0
                 ? (static_cast<double>(fixed_dt_us) / 1000000.0)
                 : std::chrono::duration<double>(current_tick - previous_tick).count();
-            const bool in_range_scene = (scene_kind == frame_warp_lab::SceneKind::range);
+            const bool in_dust2_scene = (scene_kind == frame_warp_lab::SceneKind::dust2);
+            const bool in_range_scene = (scene_kind == frame_warp_lab::SceneKind::range || in_dust2_scene);
             if (in_range_scene) {
                 tactical_range.set_ads_requested(input_state.right_mouse_down || cli_ads_active);
                 if (input_state.fire_trigger_pending) {
@@ -1590,14 +1644,27 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                     tactical_range.current_vertical_fov_radians(),
                     tactical_range.camera_recoil_pitch_radians(),
                     tactical_range.camera_recoil_yaw_radians(),
-                    true);
+                    scene_kind == frame_warp_lab::SceneKind::range);
             } else {
                 simulation.set_range_camera_modifiers(0.0f, 0.0f, 0.0f, false);
             }
             simulation.advance(delta_seconds, scene_paused && !stepping_now, manual_input);
+            auto sample_active_camera = [&](std::int64_t& out_cut_seg) -> frame_warp_lab::CameraBasis {
+                if (in_dust2_scene && simulation.path() != frame_warp_lab::CameraPath::manual) {
+                    out_cut_seg = (simulation.path() == frame_warp_lab::CameraPath::camera_cut)
+                        ? static_cast<std::int64_t>(std::floor(simulation.time_seconds() / 1.63))
+                        : 0;
+                    return frame_warp_lab::sample_dust2_camera_path(
+                        renderer.dust2_map(),
+                        simulation.path(),
+                        simulation.time_seconds(),
+                        tactical_range.current_vertical_fov_radians());
+                }
+                return simulation.sample_latest_camera(out_cut_seg);
+            };
             if (in_range_scene) {
                 std::int64_t range_cut_seg = 0;
-                const frame_warp_lab::CameraBasis range_cam = simulation.sample_latest_camera(range_cut_seg);
+                const frame_warp_lab::CameraBasis range_cam = sample_active_camera(range_cut_seg);
                 tactical_range.step(delta_seconds, scene_paused && !stepping_now, range_cam);
                 hud_state.tactical_hud_enabled = true;
                 hud_state.tactical_hud = tactical_range.hud_snapshot(range_cam);
@@ -1632,7 +1699,19 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
             if (cadence_requests_scene && (!renderer.has_scene_in_flight() || !async_gpu_enabled || need_initial_source)) {
                 ++source_frame_id;
                 const auto capture_time = std::chrono::steady_clock::now();
-                const frame_warp_lab::SceneSnapshot new_snapshot = simulation.capture_source_snapshot(source_frame_id);
+                frame_warp_lab::SceneSnapshot new_snapshot = simulation.capture_source_snapshot(source_frame_id);
+                if (in_dust2_scene && simulation.path() != frame_warp_lab::CameraPath::manual) {
+                    std::int64_t d2_cut = 0;
+                    const frame_warp_lab::CameraBasis d2_cam = sample_active_camera(d2_cut);
+                    const bool d2_disc = !has_prev_dust2_cam || (d2_cut != prev_dust2_cut);
+                    new_snapshot.camera = d2_cam;
+                    new_snapshot.previous_camera = d2_disc ? d2_cam : prev_dust2_cam;
+                    new_snapshot.cut_segment = d2_cut;
+                    new_snapshot.discontinuity = d2_disc;
+                    prev_dust2_cam = d2_cam;
+                    prev_dust2_cut = d2_cut;
+                    has_prev_dust2_cam = true;
+                }
                 const bool must_wait = need_initial_source || !async_gpu_enabled;
                 const frame_warp_lab::TacticalRangeFrame* range_payload = nullptr;
                 if (in_range_scene) {
@@ -1664,7 +1743,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                     frame_id_u64,
                     latency_monitor,
                     must_wait,
-                    range_payload);
+                    range_payload,
+                    in_dust2_scene);
+                if (in_dust2_scene) {
+                    runtime_state.update_dust2_octree(renderer.dust2_octree_telemetry());
+                }
             }
 
             renderer.poll_completed_scenes();
@@ -1700,7 +1783,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 target_camera = active_source.snapshot.camera;
             } else if (mode_uses_synthesis) {
                 std::int64_t current_cut_segment = 0;
-                target_camera = simulation.sample_latest_camera(current_cut_segment);
+                target_camera = sample_active_camera(current_cut_segment);
                 const auto now_for_age = std::chrono::steady_clock::now();
                 const std::int64_t pending_source_age_us = std::chrono::duration_cast<std::chrono::microseconds>(
                     now_for_age - active_source.capture_time).count();

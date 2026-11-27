@@ -1222,4 +1222,650 @@ PbrAssetBundle create_and_upload_pbr_assets(
     return bundle;
 }
 
+Dust2PbrBundle create_and_upload_dust2_pbr_assets(
+    ID3D12Device* device,
+    ID3D12CommandQueue* upload_queue,
+    ID3D12CommandAllocator* command_allocator,
+    ID3D12GraphicsCommandList* command_list,
+    ID3D12Fence* fence,
+    HANDLE fence_event,
+    std::uint64_t& next_fence_value,
+    const std::vector<std::string>& texture_paths,
+    D3D12_CPU_DESCRIPTOR_HANDLE srv_heap_start,
+    UINT srv_descriptor_stride) {
+    const auto t0 = std::chrono::steady_clock::now();
+    Dust2PbrBundle bundle{};
+    constexpr UINT k_d2_size = 512;
+    constexpr UINT k_d2_mips = 10;
+    const UINT slice_count = std::max<UINT>(1U, static_cast<UINT>(std::min<std::size_t>(texture_paths.size(), 100U)));
+    bundle.material_count = slice_count;
+
+    std::vector<std::vector<MipLevelRgba8>> albedo_data(slice_count);
+    std::vector<std::vector<MipLevelRgba8>> normal_data(slice_count);
+    std::vector<std::vector<MipLevelRgba8>> orm_data(slice_count);
+
+    auto catmull_w = [](float t, float out_w[4]) {
+        const float t2 = t * t;
+        const float t3 = t2 * t;
+        out_w[0] = -0.5f * t3 + t2 - 0.5f * t;
+        out_w[1] = 1.5f * t3 - 2.5f * t2 + 1.0f;
+        out_w[2] = -1.5f * t3 + 2.0f * t2 + 0.5f * t;
+        out_w[3] = 0.5f * t3 - 0.5f * t2;
+    };
+
+    EngineJobSystem::global().parallel_for(slice_count, 2U, [&](std::size_t begin, std::size_t end) {
+        for (std::size_t s = begin; s < end; ++s) {
+            const std::size_t total_px = static_cast<std::size_t>(k_d2_size) * k_d2_size;
+            std::vector<Vec3> lin_albedo(total_px, Vec3{0.58f, 0.50f, 0.39f});
+            std::vector<float> alpha_map(total_px, 1.0f);
+            std::vector<float> base_luma(total_px, 0.5f);
+            bool has_chroma_cutout = false;
+
+            int img_w = 0;
+            int img_h = 0;
+            int img_c = 0;
+            stbi_uc* pixels = (s < texture_paths.size() && !texture_paths[s].empty())
+                ? stbi_load(texture_paths[s].c_str(), &img_w, &img_h, &img_c, 4)
+                : nullptr;
+            if (pixels != nullptr && img_w > 0 && img_h > 0) {
+                const std::size_t src_n = static_cast<std::size_t>(img_w) * static_cast<std::size_t>(img_h);
+                std::vector<Vec3> src_rgb(src_n);
+                std::vector<float> src_a(src_n, 1.0f);
+                std::size_t exact_black = 0;
+                std::size_t border_black = 0;
+                std::size_t border_total = 0;
+                for (int py = 0; py < img_h; ++py) {
+                    for (int px = 0; px < img_w; ++px) {
+                        const std::size_t idx = static_cast<std::size_t>(py) * static_cast<std::size_t>(img_w) + static_cast<std::size_t>(px);
+                        const std::uint8_t r8 = pixels[idx * 4U + 0];
+                        const std::uint8_t g8 = pixels[idx * 4U + 1];
+                        const std::uint8_t b8 = pixels[idx * 4U + 2];
+                        const std::uint8_t a8 = pixels[idx * 4U + 3];
+                        src_rgb[idx] = {
+                            srgb_to_linear(static_cast<float>(r8) / 255.0f),
+                            srgb_to_linear(static_cast<float>(g8) / 255.0f),
+                            srgb_to_linear(static_cast<float>(b8) / 255.0f)};
+                        src_a[idx] = static_cast<float>(a8) / 255.0f;
+                        const bool is_blk = (r8 <= 2U && g8 <= 2U && b8 <= 2U);
+                        if (is_blk) ++exact_black;
+                        if (py == 0 || py == img_h - 1 || px == 0 || px == img_w - 1) {
+                            ++border_total;
+                            if (is_blk) ++border_black;
+                        }
+                    }
+                }
+                const float blk_frac = static_cast<float>(exact_black) / static_cast<float>(std::max<std::size_t>(src_n, 1U));
+                const float bdr_frac = static_cast<float>(border_black) / static_cast<float>(std::max<std::size_t>(border_total, 1U));
+                if (blk_frac >= 0.12f && bdr_frac >= 0.25f) {
+                    has_chroma_cutout = true;
+                    for (std::size_t idx = 0; idx < src_n; ++idx) {
+                        const std::uint8_t r8 = pixels[idx * 4U + 0];
+                        const std::uint8_t g8 = pixels[idx * 4U + 1];
+                        const std::uint8_t b8 = pixels[idx * 4U + 2];
+                        if (r8 <= 3U && g8 <= 3U && b8 <= 3U) {
+                            src_a[idx] = 0.0f;
+                        }
+                    }
+                    std::vector<Vec3> bleed_rgb = src_rgb;
+                    std::vector<std::uint8_t> valid(src_n, 0U);
+                    for (std::size_t idx = 0; idx < src_n; ++idx) {
+                        valid[idx] = src_a[idx] > 0.5f ? 1U : 0U;
+                    }
+                    for (int pass = 0; pass < 4; ++pass) {
+                        std::vector<Vec3> next_rgb = bleed_rgb;
+                        std::vector<std::uint8_t> next_v = valid;
+                        for (int py = 0; py < img_h; ++py) {
+                            for (int px = 0; px < img_w; ++px) {
+                                const std::size_t idx = static_cast<std::size_t>(py) * static_cast<std::size_t>(img_w) + static_cast<std::size_t>(px);
+                                if (valid[idx]) continue;
+                                Vec3 sum{0.0f, 0.0f, 0.0f};
+                                float cnt = 0.0f;
+                                const int ox[4] = {-1, 1, 0, 0};
+                                const int oy[4] = {0, 0, -1, 1};
+                                for (int k = 0; k < 4; ++k) {
+                                    const int nx = std::clamp(px + ox[k], 0, img_w - 1);
+                                    const int ny = std::clamp(py + oy[k], 0, img_h - 1);
+                                    const std::size_t ni = static_cast<std::size_t>(ny) * static_cast<std::size_t>(img_w) + static_cast<std::size_t>(nx);
+                                    if (valid[ni]) {
+                                        sum = sum + bleed_rgb[ni];
+                                        cnt += 1.0f;
+                                    }
+                                }
+                                if (cnt > 0.0f) {
+                                    next_rgb[idx] = sum * (1.0f / cnt);
+                                    next_v[idx] = 1U;
+                                }
+                            }
+                        }
+                        bleed_rgb = std::move(next_rgb);
+                        valid = std::move(next_v);
+                    }
+                    src_rgb = std::move(bleed_rgb);
+                }
+
+                auto wrap_idx = [](int c, int dim, bool clamp_edge) -> int {
+                    if (clamp_edge) return std::clamp(c, 0, dim - 1);
+                    const int m = c % dim;
+                    return m < 0 ? m + dim : m;
+                };
+
+                for (UINT y = 0; y < k_d2_size; ++y) {
+                    const float fy = (static_cast<float>(y) + 0.5f) * static_cast<float>(img_h) / static_cast<float>(k_d2_size) - 0.5f;
+                    const int yi = static_cast<int>(std::floor(fy));
+                    const float ty = fy - static_cast<float>(yi);
+                    float wy[4];
+                    catmull_w(ty, wy);
+                    const int ys[4] = {
+                        wrap_idx(yi - 1, img_h, has_chroma_cutout),
+                        wrap_idx(yi, img_h, has_chroma_cutout),
+                        wrap_idx(yi + 1, img_h, has_chroma_cutout),
+                        wrap_idx(yi + 2, img_h, has_chroma_cutout)};
+                    for (UINT x = 0; x < k_d2_size; ++x) {
+                        const float fx = (static_cast<float>(x) + 0.5f) * static_cast<float>(img_w) / static_cast<float>(k_d2_size) - 0.5f;
+                        const int xi = static_cast<int>(std::floor(fx));
+                        const float tx = fx - static_cast<float>(xi);
+                        float wx[4];
+                        catmull_w(tx, wx);
+                        const int xs[4] = {
+                            wrap_idx(xi - 1, img_w, has_chroma_cutout),
+                            wrap_idx(xi, img_w, has_chroma_cutout),
+                            wrap_idx(xi + 1, img_w, has_chroma_cutout),
+                            wrap_idx(xi + 2, img_w, has_chroma_cutout)};
+                        Vec3 col{0.0f, 0.0f, 0.0f};
+                        for (int ky = 0; ky < 4; ++ky) {
+                            Vec3 row_c{0.0f, 0.0f, 0.0f};
+                            const std::size_t rbase = static_cast<std::size_t>(ys[ky]) * static_cast<std::size_t>(img_w);
+                            for (int kx = 0; kx < 4; ++kx) {
+                                row_c = row_c + src_rgb[rbase + static_cast<std::size_t>(xs[kx])] * wx[kx];
+                            }
+                            col = col + row_c * wy[ky];
+                        }
+                        col.x = saturate(col.x);
+                        col.y = saturate(col.y);
+                        col.z = saturate(col.z);
+
+                        const int ax0 = wrap_idx(xi, img_w, has_chroma_cutout);
+                        const int ax1 = wrap_idx(xi + 1, img_w, has_chroma_cutout);
+                        const int ay0 = wrap_idx(yi, img_h, has_chroma_cutout);
+                        const int ay1 = wrap_idx(yi + 1, img_h, has_chroma_cutout);
+                        const float a0 = src_a[static_cast<std::size_t>(ay0) * static_cast<std::size_t>(img_w) + static_cast<std::size_t>(ax0)] * (1.0f - tx)
+                            + src_a[static_cast<std::size_t>(ay0) * static_cast<std::size_t>(img_w) + static_cast<std::size_t>(ax1)] * tx;
+                        const float a1 = src_a[static_cast<std::size_t>(ay1) * static_cast<std::size_t>(img_w) + static_cast<std::size_t>(ax0)] * (1.0f - tx)
+                            + src_a[static_cast<std::size_t>(ay1) * static_cast<std::size_t>(img_w) + static_cast<std::size_t>(ax1)] * tx;
+
+                        const std::size_t dst = static_cast<std::size_t>(y) * k_d2_size + x;
+                        lin_albedo[dst] = col;
+                        alpha_map[dst] = saturate(a0 * (1.0f - ty) + a1 * ty);
+                        base_luma[dst] = saturate(col.x * 0.299f + col.y * 0.587f + col.z * 0.114f);
+                    }
+                }
+                stbi_image_free(pixels);
+            }
+
+            double sum_r = 0.0, sum_g = 0.0, sum_b = 0.0, sum_sat = 0.0, sum_luma = 0.0, sum_luma2 = 0.0;
+            double sum_gx = 0.0, sum_gy = 0.0;
+            std::size_t opaque_cnt = 0;
+            for (UINT y = 0; y < k_d2_size; y += 2U) {
+                const UINT yp = (y + 2U) & (k_d2_size - 1U);
+                for (UINT x = 0; x < k_d2_size; x += 2U) {
+                    const std::size_t i = static_cast<std::size_t>(y) * k_d2_size + x;
+                    if (alpha_map[i] < 0.5f) continue;
+                    const Vec3& c = lin_albedo[i];
+                    const float mx = std::max(c.x, std::max(c.y, c.z));
+                    const float mn = std::min(c.x, std::min(c.y, c.z));
+                    const float sat = mx > 1e-4f ? (mx - mn) / mx : 0.0f;
+                    const float lum = base_luma[i];
+                    sum_r += c.x;
+                    sum_g += c.y;
+                    sum_b += c.z;
+                    sum_sat += sat;
+                    sum_luma += lum;
+                    sum_luma2 += lum * lum;
+                    const UINT xp = (x + 2U) & (k_d2_size - 1U);
+                    sum_gx += std::fabs(base_luma[static_cast<std::size_t>(y) * k_d2_size + xp] - lum);
+                    sum_gy += std::fabs(base_luma[static_cast<std::size_t>(yp) * k_d2_size + x] - lum);
+                    ++opaque_cnt;
+                }
+            }
+            const float inv_n = 1.0f / static_cast<float>(std::max<std::size_t>(opaque_cnt, 1U));
+            const float mean_r = static_cast<float>(sum_r) * inv_n;
+            const float mean_g = static_cast<float>(sum_g) * inv_n;
+            const float mean_b = static_cast<float>(sum_b) * inv_n;
+            const float mean_sat = static_cast<float>(sum_sat) * inv_n;
+            const float mean_luma = static_cast<float>(sum_luma) * inv_n;
+            const float luma_std = std::sqrt(std::max(0.0f, static_cast<float>(sum_luma2) * inv_n - mean_luma * mean_luma));
+            const float warmth = mean_r - mean_b;
+            const float gx_gy_ratio = static_cast<float>((sum_gx + 1e-4) / (sum_gy + 1e-4));
+
+            int mat_class = 0;
+            if (has_chroma_cutout) {
+                mat_class = (mean_sat > 0.24f || mean_luma > 0.28f) ? 4 : 3;
+            } else if (mean_sat < 0.17f && mean_luma < 0.45f) {
+                mat_class = 3;
+            } else if (mean_sat > 0.44f && (mean_b > mean_g * 0.88f || mean_r > mean_g * 1.45f)) {
+                mat_class = 4;
+            } else if (warmth > 0.04f && mean_luma < 0.24f) {
+                mat_class = 2;
+            } else if (luma_std > 0.145f && mean_luma < 0.44f && warmth > 0.05f) {
+                mat_class = 1;
+            } else if (mean_luma > 0.62f && mean_sat < 0.28f) {
+                mat_class = 5;
+            } else {
+                mat_class = 0;
+            }
+
+            std::vector<float> blur_luma(total_px);
+            for (UINT y = 0; y < k_d2_size; ++y) {
+                const UINT ym2 = (y + k_d2_size - 2U) & (k_d2_size - 1U);
+                const UINT yp2 = (y + 2U) & (k_d2_size - 1U);
+                const UINT ym5 = (y + k_d2_size - 5U) & (k_d2_size - 1U);
+                const UINT yp5 = (y + 5U) & (k_d2_size - 1U);
+                for (UINT x = 0; x < k_d2_size; ++x) {
+                    const UINT xm2 = (x + k_d2_size - 2U) & (k_d2_size - 1U);
+                    const UINT xp2 = (x + 2U) & (k_d2_size - 1U);
+                    const UINT xm5 = (x + k_d2_size - 5U) & (k_d2_size - 1U);
+                    const UINT xp5 = (x + 5U) & (k_d2_size - 1U);
+                    const float c0 = base_luma[static_cast<std::size_t>(y) * k_d2_size + x];
+                    const float ring1 = 0.25f * (
+                        base_luma[static_cast<std::size_t>(y) * k_d2_size + xm2] +
+                        base_luma[static_cast<std::size_t>(y) * k_d2_size + xp2] +
+                        base_luma[static_cast<std::size_t>(ym2) * k_d2_size + x] +
+                        base_luma[static_cast<std::size_t>(yp2) * k_d2_size + x]);
+                    const float ring2 = 0.25f * (
+                        base_luma[static_cast<std::size_t>(ym5) * k_d2_size + xm5] +
+                        base_luma[static_cast<std::size_t>(ym5) * k_d2_size + xp5] +
+                        base_luma[static_cast<std::size_t>(yp5) * k_d2_size + xm5] +
+                        base_luma[static_cast<std::size_t>(yp5) * k_d2_size + xp5]);
+                    blur_luma[static_cast<std::size_t>(y) * k_d2_size + x] = c0 * 0.24f + ring1 * 0.44f + ring2 * 0.32f;
+                }
+            }
+
+            std::vector<float> height_map(total_px);
+            std::vector<float> micro_detail(total_px);
+            const int slice_seed = static_cast<int>(s * 97U + 13U);
+            const bool vertical_wood = gx_gy_ratio > 1.15f;
+            for (UINT y = 0; y < k_d2_size; ++y) {
+                const float v = static_cast<float>(y) / static_cast<float>(k_d2_size);
+                for (UINT x = 0; x < k_d2_size; ++x) {
+                    const float u = static_cast<float>(x) / static_cast<float>(k_d2_size);
+                    const std::size_t idx = static_cast<std::size_t>(y) * k_d2_size + x;
+                    const float lum = base_luma[idx];
+                    const float bl = blur_luma[idx];
+                    const float local_rel = lum - bl;
+                    const float fine_n = tileable_fbm(u, v, 32, 3, slice_seed) - 0.5f;
+                    const float grain_n = tileable_value_noise(u, v, 128, slice_seed + 19) - 0.5f;
+                    float h_val = lum;
+                    float m_val = 0.0f;
+
+                    if (mat_class == 0) {
+                        const float grit = fine_n * 0.14f + grain_n * 0.08f;
+                        const float pore = std::max(0.0f, tileable_value_noise(u, v, 64, slice_seed + 41) - 0.72f) * -0.35f;
+                        h_val = saturate(lum * 0.72f + bl * 0.28f + local_rel * 0.55f + grit + pore);
+                        m_val = grit + pore * 0.5f;
+                    } else if (mat_class == 1) {
+                        const float dome = saturate(lum * 0.65f + bl * 0.35f + local_rel * 0.85f);
+                        const float pebble = fine_n * 0.16f + grain_n * 0.09f;
+                        h_val = saturate(dome + pebble);
+                        m_val = pebble;
+                    } else if (mat_class == 2) {
+                        const float along = vertical_wood ? v : u;
+                        const float across = vertical_wood ? u : v;
+                        const float fiber = std::sin((across * 88.0f + fine_n * 5.2f) * 6.2831853f) * 0.045f
+                            + (tileable_value_noise(across, along * 0.25f, 64, slice_seed + 7) - 0.5f) * 0.12f;
+                        h_val = saturate(lum * 0.80f + local_rel * 0.50f + fiber);
+                        m_val = fiber;
+                    } else if (mat_class == 3) {
+                        const float brush = (tileable_value_noise(u * 0.5f, v * 4.0f, 32, slice_seed + 23) - 0.5f) * 0.09f + grain_n * 0.05f;
+                        h_val = saturate(lum * 0.78f + local_rel * 0.65f + brush);
+                        m_val = brush;
+                    } else if (mat_class == 4) {
+                        const float weave = (std::sin(u * 512.0f * 1.570796f) * std::sin(v * 512.0f * 1.570796f)) * 0.06f + fine_n * 0.07f;
+                        h_val = saturate(lum * 0.75f + weave);
+                        m_val = weave;
+                    } else {
+                        const float stucco = fine_n * 0.10f + grain_n * 0.05f;
+                        h_val = saturate(lum * 0.82f + local_rel * 0.38f + stucco);
+                        m_val = stucco;
+                    }
+                    height_map[idx] = h_val;
+                    micro_detail[idx] = m_val;
+
+                    Vec3 c = lin_albedo[idx];
+                    const float sharp_boost = local_rel * 0.26f + m_val * 0.18f;
+                    const float delight = (mat_class == 0 || mat_class == 1) ? (std::max(0.0f, 0.22f - lum) * 0.18f) : 0.0f;
+                    c.x = saturate(c.x * (1.0f + sharp_boost) + delight * (c.x + 0.04f));
+                    c.y = saturate(c.y * (1.0f + sharp_boost) + delight * (c.y + 0.03f));
+                    c.z = saturate(c.z * (1.0f + sharp_boost) + delight * (c.z + 0.02f));
+                    lin_albedo[idx] = c;
+                }
+            }
+
+            std::vector<Vec3> normals(total_px);
+            std::vector<float> ao_map(total_px);
+            std::vector<float> rough_map(total_px);
+            std::vector<float> metal_map(total_px);
+            std::vector<float> coat_map(total_px);
+            const float fine_strength = (mat_class == 1) ? 4.4f : (mat_class == 0) ? 3.8f : (mat_class == 2) ? 3.4f : (mat_class == 3) ? 3.2f : (mat_class == 4) ? 2.4f : 2.6f;
+            const float macro_strength = (mat_class == 1) ? 2.8f : (mat_class == 0) ? 2.2f : (mat_class == 2) ? 1.8f : 1.4f;
+
+            for (UINT y = 0; y < k_d2_size; ++y) {
+                const UINT ym = (y + k_d2_size - 1U) & (k_d2_size - 1U);
+                const UINT yp = (y + 1U) & (k_d2_size - 1U);
+                const UINT ym3 = (y + k_d2_size - 3U) & (k_d2_size - 1U);
+                const UINT yp3 = (y + 3U) & (k_d2_size - 1U);
+                for (UINT x = 0; x < k_d2_size; ++x) {
+                    const UINT xm = (x + k_d2_size - 1U) & (k_d2_size - 1U);
+                    const UINT xp = (x + 1U) & (k_d2_size - 1U);
+                    const UINT xm3 = (x + k_d2_size - 3U) & (k_d2_size - 1U);
+                    const UINT xp3 = (x + 3U) & (k_d2_size - 1U);
+
+                    const float h_tl = height_map[static_cast<std::size_t>(ym) * k_d2_size + xm];
+                    const float h_tc = height_map[static_cast<std::size_t>(ym) * k_d2_size + x];
+                    const float h_tr = height_map[static_cast<std::size_t>(ym) * k_d2_size + xp];
+                    const float h_ml = height_map[static_cast<std::size_t>(y) * k_d2_size + xm];
+                    const float h_mr = height_map[static_cast<std::size_t>(y) * k_d2_size + xp];
+                    const float h_bl = height_map[static_cast<std::size_t>(yp) * k_d2_size + xm];
+                    const float h_bc = height_map[static_cast<std::size_t>(yp) * k_d2_size + x];
+                    const float h_br = height_map[static_cast<std::size_t>(yp) * k_d2_size + xp];
+
+                    const float scharr_dx = ((3.0f * h_tl + 10.0f * h_ml + 3.0f * h_bl) - (3.0f * h_tr + 10.0f * h_mr + 3.0f * h_br)) * (1.0f / 16.0f);
+                    const float scharr_dy = ((3.0f * h_tl + 10.0f * h_tc + 3.0f * h_tr) - (3.0f * h_bl + 10.0f * h_bc + 3.0f * h_br)) * (1.0f / 16.0f);
+                    const float macro_dx = (height_map[static_cast<std::size_t>(y) * k_d2_size + xm3] - height_map[static_cast<std::size_t>(y) * k_d2_size + xp3]) * 0.5f;
+                    const float macro_dy = (height_map[static_cast<std::size_t>(ym3) * k_d2_size + x] - height_map[static_cast<std::size_t>(yp3) * k_d2_size + x]) * 0.5f;
+
+                    const std::size_t idx = static_cast<std::size_t>(y) * k_d2_size + x;
+                    normals[idx] = normalize3({
+                        scharr_dx * fine_strength + macro_dx * macro_strength,
+                        scharr_dy * fine_strength + macro_dy * macro_strength,
+                        1.0f});
+
+                    const float hc = height_map[idx];
+                    const float bl = blur_luma[idx];
+                    const float cavity = hc - bl;
+                    const float grad = std::fabs(scharr_dx) + std::fabs(scharr_dy);
+                    const Vec3& c = lin_albedo[idx];
+                    const float max_c = std::max(c.x, std::max(c.y, c.z));
+                    const float min_c = std::min(c.x, std::min(c.y, c.z));
+                    const float sat = max_c > 1e-4f ? (max_c - min_c) / max_c : 0.0f;
+
+                    ao_map[idx] = std::clamp(0.68f + cavity * 2.15f + hc * 0.28f - grad * 0.35f, 0.24f, 1.0f);
+
+                    float rough = 0.78f;
+                    float metal = 0.0f;
+                    float coat = 0.0f;
+                    if (mat_class == 0) {
+                        const float mortar_mask = saturate((bl - hc) * 4.5f);
+                        rough = std::clamp(0.62f + mortar_mask * 0.32f + grad * 0.45f - micro_detail[idx] * 0.35f, 0.52f, 0.96f);
+                        metal = 0.0f;
+                        coat = 0.0f;
+                    } else if (mat_class == 1) {
+                        const float crown = saturate((hc - bl) * 3.8f + 0.35f);
+                        rough = std::clamp(0.90f - crown * 0.48f + grad * 0.30f, 0.34f, 0.96f);
+                        metal = 0.0f;
+                        coat = crown > 0.65f ? (crown - 0.65f) * 0.22f : 0.0f;
+                    } else if (mat_class == 2) {
+                        const bool iron_bolt = (sat < 0.14f && hc < 0.26f);
+                        if (iron_bolt) {
+                            metal = 0.78f;
+                            rough = 0.30f;
+                            coat = 0.05f;
+                        } else {
+                            rough = std::clamp(0.46f + (0.5f - hc) * 0.38f + grad * 0.35f, 0.34f, 0.78f);
+                            metal = 0.0f;
+                            coat = std::clamp(0.14f + cavity * 0.45f, 0.04f, 0.28f);
+                        }
+                    } else if (mat_class == 3) {
+                        const float rust_dust = saturate(sat * 3.2f + std::max(0.0f, bl - hc) * 2.5f);
+                        metal = std::clamp(0.92f - rust_dust * 0.78f, 0.06f, 0.94f);
+                        rough = std::clamp(0.22f + rust_dust * 0.54f + grad * 0.35f, 0.18f, 0.82f);
+                        coat = (1.0f - rust_dust) * 0.16f;
+                    } else if (mat_class == 4) {
+                        rough = std::clamp(0.86f + grad * 0.18f - micro_detail[idx] * 0.15f, 0.78f, 0.98f);
+                        metal = 0.0f;
+                        coat = 0.0f;
+                    } else {
+                        const float painted = saturate(sat * 2.4f);
+                        rough = std::clamp(0.78f - painted * 0.38f + grad * 0.30f, 0.34f, 0.90f);
+                        metal = 0.0f;
+                        coat = painted * 0.14f;
+                    }
+                    rough_map[idx] = rough;
+                    metal_map[idx] = metal;
+                    coat_map[idx] = coat;
+                }
+            }
+
+            albedo_data[s].resize(k_d2_mips);
+            normal_data[s].resize(k_d2_mips);
+            orm_data[s].resize(k_d2_mips);
+            UINT w = k_d2_size;
+            UINT h = k_d2_size;
+            for (UINT mip = 0; mip < k_d2_mips; ++mip) {
+                albedo_data[s][mip] = {w, h, std::vector<std::uint8_t>(static_cast<std::size_t>(w) * h * 4U)};
+                normal_data[s][mip] = {w, h, std::vector<std::uint8_t>(static_cast<std::size_t>(w) * h * 4U)};
+                orm_data[s][mip] = {w, h, std::vector<std::uint8_t>(static_cast<std::size_t>(w) * h * 4U)};
+                for (UINT y = 0; y < h; ++y) {
+                    for (UINT x = 0; x < w; ++x) {
+                        const std::size_t i = static_cast<std::size_t>(y) * w + x;
+                        const std::size_t o = i * 4U;
+                        albedo_data[s][mip].pixels[o + 0] = float_to_u8(linear_to_srgb(lin_albedo[i].x));
+                        albedo_data[s][mip].pixels[o + 1] = float_to_u8(linear_to_srgb(lin_albedo[i].y));
+                        albedo_data[s][mip].pixels[o + 2] = float_to_u8(linear_to_srgb(lin_albedo[i].z));
+                        albedo_data[s][mip].pixels[o + 3] = float_to_u8(alpha_map[i]);
+                        const Vec3 n = normalize3(normals[i]);
+                        normal_data[s][mip].pixels[o + 0] = float_to_u8(n.x * 0.5f + 0.5f);
+                        normal_data[s][mip].pixels[o + 1] = float_to_u8(n.y * 0.5f + 0.5f);
+                        normal_data[s][mip].pixels[o + 2] = float_to_u8(n.z * 0.5f + 0.5f);
+                        normal_data[s][mip].pixels[o + 3] = float_to_u8(height_map[i]);
+                        orm_data[s][mip].pixels[o + 0] = float_to_u8(ao_map[i]);
+                        orm_data[s][mip].pixels[o + 1] = float_to_u8(rough_map[i]);
+                        orm_data[s][mip].pixels[o + 2] = float_to_u8(metal_map[i]);
+                        orm_data[s][mip].pixels[o + 3] = float_to_u8(coat_map[i]);
+                    }
+                }
+                if (mip + 1U >= k_d2_mips) break;
+                const UINT nw = std::max<UINT>(1U, w / 2U);
+                const UINT nh = std::max<UINT>(1U, h / 2U);
+                std::vector<Vec3> na(static_cast<std::size_t>(nw) * nh);
+                std::vector<float> nalpha(static_cast<std::size_t>(nw) * nh);
+                std::vector<Vec3> nn(static_cast<std::size_t>(nw) * nh);
+                std::vector<float> nhgt(static_cast<std::size_t>(nw) * nh);
+                std::vector<float> nao(static_cast<std::size_t>(nw) * nh);
+                std::vector<float> nr(static_cast<std::size_t>(nw) * nh);
+                std::vector<float> nm(static_cast<std::size_t>(nw) * nh);
+                std::vector<float> ncoat(static_cast<std::size_t>(nw) * nh);
+                for (UINT y = 0; y < nh; ++y) {
+                    const UINT sy0 = std::min(y * 2U, h - 1U);
+                    const UINT sy1 = std::min(y * 2U + 1U, h - 1U);
+                    for (UINT x = 0; x < nw; ++x) {
+                        const UINT sx0 = std::min(x * 2U, w - 1U);
+                        const UINT sx1 = std::min(x * 2U + 1U, w - 1U);
+                        const std::size_t ids[4] = {
+                            static_cast<std::size_t>(sy0) * w + sx0,
+                            static_cast<std::size_t>(sy0) * w + sx1,
+                            static_cast<std::size_t>(sy1) * w + sx0,
+                            static_cast<std::size_t>(sy1) * w + sx1};
+                        Vec3 as{0.0f, 0.0f, 0.0f};
+                        float alps = 0.0f;
+                        Vec3 ns{0.0f, 0.0f, 0.0f};
+                        float hs = 0.0f;
+                        float aos = 0.0f;
+                        float a2s = 0.0f;
+                        float ms = 0.0f;
+                        float cs = 0.0f;
+                        for (std::size_t k : ids) {
+                            as = as + lin_albedo[k];
+                            alps += alpha_map[k];
+                            ns = ns + normals[k];
+                            hs += height_map[k];
+                            aos += ao_map[k];
+                            const float a = rough_map[k] * rough_map[k];
+                            a2s += a * a;
+                            ms += metal_map[k];
+                            cs += coat_map[k];
+                        }
+                        const Vec3 navg = ns * 0.25f;
+                        const float nlen = std::clamp(length3(navg), 0.05f, 1.0f);
+                        const float tvar = std::clamp((1.0f - nlen) / std::max(nlen, 0.05f), 0.0f, 0.35f);
+                        const float a2f = std::clamp(a2s * 0.25f + tvar * 0.5f, 0.0004f, 1.0f);
+                        const std::size_t dst = static_cast<std::size_t>(y) * nw + x;
+                        na[dst] = as * 0.25f;
+                        nalpha[dst] = alps * 0.25f;
+                        nn[dst] = normalize3(navg);
+                        nhgt[dst] = hs * 0.25f;
+                        nao[dst] = aos * 0.25f;
+                        nr[dst] = saturate(std::sqrt(std::sqrt(a2f)));
+                        nm[dst] = ms * 0.25f;
+                        ncoat[dst] = cs * 0.25f;
+                    }
+                }
+                lin_albedo = std::move(na);
+                alpha_map = std::move(nalpha);
+                normals = std::move(nn);
+                height_map = std::move(nhgt);
+                ao_map = std::move(nao);
+                rough_map = std::move(nr);
+                metal_map = std::move(nm);
+                coat_map = std::move(ncoat);
+                w = nw;
+                h = nh;
+            }
+        }
+    });
+
+    bundle.albedo_array = create_default_texture(device, k_d2_size, k_d2_size, static_cast<UINT16>(slice_count), k_d2_mips, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, "Create Dust2 albedo array");
+    bundle.normal_array = create_default_texture(device, k_d2_size, k_d2_size, static_cast<UINT16>(slice_count), k_d2_mips, DXGI_FORMAT_R8G8B8A8_UNORM, "Create Dust2 normal array");
+    bundle.orm_array = create_default_texture(device, k_d2_size, k_d2_size, static_cast<UINT16>(slice_count), k_d2_mips, DXGI_FORMAT_R8G8B8A8_UNORM, "Create Dust2 ORM array");
+
+    std::vector<UploadTask> tasks;
+    UINT64 total_staging_bytes = 0;
+    const UINT sub_count = slice_count * k_d2_mips;
+    auto add_task = [&](ID3D12Resource* tex, const std::vector<std::vector<MipLevelRgba8>>& data) {
+        UploadTask task{};
+        task.destination = tex;
+        task.subresource_count = sub_count;
+        task.footprints.resize(sub_count);
+        task.num_rows.resize(sub_count);
+        task.row_sizes.resize(sub_count);
+        task.src_data.resize(sub_count);
+        task.src_row_pitch.resize(sub_count);
+        const D3D12_RESOURCE_DESC desc = tex->GetDesc();
+        UINT64 required_bytes = 0;
+        total_staging_bytes = (total_staging_bytes + 511ULL) & ~511ULL;
+        task.staging_offset = total_staging_bytes;
+        device->GetCopyableFootprints(&desc, 0, sub_count, task.staging_offset, task.footprints.data(), task.num_rows.data(), task.row_sizes.data(), &required_bytes);
+        total_staging_bytes += required_bytes;
+        for (UINT s = 0; s < slice_count; ++s) {
+            for (UINT m = 0; m < k_d2_mips; ++m) {
+                const UINT idx = s * k_d2_mips + m;
+                task.src_data[idx] = data[s][m].pixels.data();
+                task.src_row_pitch[idx] = static_cast<std::size_t>(data[s][m].width) * 4U;
+            }
+        }
+        tasks.push_back(std::move(task));
+    };
+
+    add_task(bundle.albedo_array.Get(), albedo_data);
+    add_task(bundle.normal_array.Get(), normal_data);
+    add_task(bundle.orm_array.Get(), orm_data);
+
+    D3D12_HEAP_PROPERTIES upload_heap{};
+    upload_heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+    D3D12_RESOURCE_DESC upload_desc{};
+    upload_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    upload_desc.Width = total_staging_bytes;
+    upload_desc.Height = 1;
+    upload_desc.DepthOrArraySize = 1;
+    upload_desc.MipLevels = 1;
+    upload_desc.SampleDesc.Count = 1;
+    upload_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    ComPtr<ID3D12Resource> staging;
+    check_hr(device->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE, &upload_desc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&staging)), "Create Dust2 PBR staging");
+
+    std::uint8_t* mapped = nullptr;
+    D3D12_RANGE empty_range{0, 0};
+    check_hr(staging->Map(0, &empty_range, reinterpret_cast<void**>(&mapped)), "Map Dust2 PBR staging");
+    for (const auto& task : tasks) {
+        for (UINT sub = 0; sub < task.subresource_count; ++sub) {
+            const auto& fp = task.footprints[sub];
+            const auto* src_bytes = static_cast<const std::uint8_t*>(task.src_data[sub]);
+            std::uint8_t* dst_bytes = mapped + fp.Offset;
+            const std::size_t copy_bytes = static_cast<std::size_t>(task.row_sizes[sub]);
+            for (UINT row = 0; row < task.num_rows[sub]; ++row) {
+                std::memcpy(
+                    dst_bytes + static_cast<std::size_t>(row) * fp.Footprint.RowPitch,
+                    src_bytes + static_cast<std::size_t>(row) * task.src_row_pitch[sub],
+                    copy_bytes);
+            }
+        }
+    }
+    staging->Unmap(0, nullptr);
+
+    check_hr(command_allocator->Reset(), "Reset Dust2 PBR upload allocator");
+    check_hr(command_list->Reset(command_allocator, nullptr), "Reset Dust2 PBR upload command list");
+    for (const auto& task : tasks) {
+        for (UINT sub = 0; sub < task.subresource_count; ++sub) {
+            D3D12_TEXTURE_COPY_LOCATION dst_loc{};
+            dst_loc.pResource = task.destination;
+            dst_loc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            dst_loc.SubresourceIndex = sub;
+            D3D12_TEXTURE_COPY_LOCATION src_loc{};
+            src_loc.pResource = staging.Get();
+            src_loc.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            src_loc.PlacedFootprint = task.footprints[sub];
+            command_list->CopyTextureRegion(&dst_loc, 0, 0, 0, &src_loc, nullptr);
+        }
+    }
+
+    constexpr D3D12_RESOURCE_STATES final_state =
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    std::array<D3D12_RESOURCE_BARRIER, 3> barriers{};
+    ID3D12Resource* all_res[3] = {
+        bundle.albedo_array.Get(),
+        bundle.normal_array.Get(),
+        bundle.orm_array.Get()};
+    for (std::size_t i = 0; i < 3U; ++i) {
+        barriers[i].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barriers[i].Transition.pResource = all_res[i];
+        barriers[i].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        barriers[i].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+        barriers[i].Transition.StateAfter = final_state;
+    }
+    command_list->ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());
+    check_hr(command_list->Close(), "Close Dust2 PBR upload command list");
+
+    ID3D12CommandList* lists[] = {command_list};
+    upload_queue->ExecuteCommandLists(1, lists);
+    const std::uint64_t upload_fence = next_fence_value++;
+    check_hr(upload_queue->Signal(fence, upload_fence), "Signal Dust2 PBR upload fence");
+    if (fence->GetCompletedValue() < upload_fence) {
+        check_hr(fence->SetEventOnCompletion(upload_fence, fence_event), "Wait Dust2 PBR upload fence");
+        WaitForSingleObject(fence_event, 15000);
+    }
+
+    auto write_array_srv = [&](ID3D12Resource* res, DXGI_FORMAT fmt, D3D12_CPU_DESCRIPTOR_HANDLE dst) {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = fmt;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Texture2DArray.MostDetailedMip = 0;
+        srv.Texture2DArray.MipLevels = k_d2_mips;
+        srv.Texture2DArray.FirstArraySlice = 0;
+        srv.Texture2DArray.ArraySize = slice_count;
+        device->CreateShaderResourceView(res, &srv, dst);
+    };
+
+    D3D12_CPU_DESCRIPTOR_HANDLE cursor = srv_heap_start;
+    write_array_srv(bundle.albedo_array.Get(), DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, cursor);
+    cursor.ptr += srv_descriptor_stride;
+    write_array_srv(bundle.normal_array.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, cursor);
+    cursor.ptr += srv_descriptor_stride;
+    write_array_srv(bundle.orm_array.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, cursor);
+
+    const auto t1 = std::chrono::steady_clock::now();
+    bundle.build_time_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+    bundle.loaded = !texture_paths.empty();
+    return bundle;
+}
+
 }

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "dust2_scene.h"
 #include "frame_pacer.h"
 #include "latency_monitor.h"
 #include "pbr_assets.h"
@@ -156,7 +157,8 @@ public:
         std::uint64_t frame_id,
         LatencyMonitor& latency_monitor,
         bool wait_for_completion,
-        const TacticalRangeFrame* range_frame = nullptr);
+        const TacticalRangeFrame* range_frame = nullptr,
+        bool is_dust2_scene = false);
     void invalidate_source_history();
     FrameExecutionMetrics present_from_source(const PresentRequest& request, LatencyMonitor& latency_monitor, FramePacer& pacer);
     void resize(UINT width, UINT height);
@@ -182,6 +184,10 @@ public:
     const RangeGeometryPackage& range_geometry_meta() const { return range_geometry_meta_; }
     bool hero_pbr_textures_loaded() const { return pbr_assets_.hero_textures_loaded; }
     std::int64_t pbr_build_time_ms() const { return pbr_assets_.build_time_ms; }
+    std::int32_t dxr_tier() const { return dxr_tier_; }
+    const Dust2MapPackage& dust2_map() const { return dust2_map_; }
+    const Dust2OctreeTelemetry& dust2_octree_telemetry() const { return last_dust2_octree_telemetry_; }
+    std::int64_t dust2_pbr_build_time_ms() const { return dust2_pbr_.build_time_ms; }
 
 private:
     static constexpr UINT swap_chain_buffer_count = 2;
@@ -189,8 +195,9 @@ private:
     static constexpr UINT rtv_targets_per_dlss_slot = 3;
     static constexpr UINT source_slot_count = 3;
     static constexpr UINT targets_per_source_slot = 3;
-    static constexpr UINT compute_descriptors_per_source_slot = 13;
+    static constexpr UINT compute_descriptors_per_source_slot = 15;
     static constexpr UINT pbr_srv_descriptor_count = 8;
+    static constexpr UINT ext_srv_descriptor_count = 6;
     static constexpr UINT surface_cache_max_cells = 4194304;
     static constexpr UINT max_dirty_tile_capacity = 131072;
     static constexpr UINT tile_indirect_u32_count = 32;
@@ -221,6 +228,7 @@ private:
         Microsoft::WRL::ComPtr<ID3D12Resource> tile_map_target;
         Microsoft::WRL::ComPtr<ID3D12Resource> mat_gbuf0_target;
         Microsoft::WRL::ComPtr<ID3D12Resource> mat_gbuf1_target;
+        Microsoft::WRL::ComPtr<ID3D12Resource> half_spec_target;
         Microsoft::WRL::ComPtr<ID3D12CommandAllocator> command_allocator;
         SceneSnapshot snapshot{};
         std::chrono::steady_clock::time_point capture_time{};
@@ -268,6 +276,7 @@ private:
     StreamlineBackend streamline_;
     Microsoft::WRL::ComPtr<IDXGIFactory4> factory_;
     Microsoft::WRL::ComPtr<ID3D12Device> device_;
+    Microsoft::WRL::ComPtr<ID3D12Device5> device5_;
     Microsoft::WRL::ComPtr<ID3D12CommandQueue> present_queue_;
     Microsoft::WRL::ComPtr<ID3D12CommandQueue> scene_queue_;
     Microsoft::WRL::ComPtr<IDXGISwapChain3> swap_chain_;
@@ -281,6 +290,7 @@ private:
     std::array<Microsoft::WRL::ComPtr<ID3D12CommandAllocator>, swap_chain_buffer_count> present_command_allocators_;
     Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> present_command_list_;
     Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> scene_command_list_;
+    Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList4> scene_command_list4_;
     Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList5> scene_command_list5_;
     Microsoft::WRL::ComPtr<ID3D12Resource> vrs_image_;
     std::array<SourceSlot, source_slot_count> source_slots_;
@@ -311,6 +321,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> range_vis_classify_pipeline_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> range_vis_admit_pipeline_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> range_vis_shade_pipeline_;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> range_half_spec_pipeline_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> range_vis_composite_pipeline_;
     Microsoft::WRL::ComPtr<ID3D12Resource> surface_cache_uav_;
     Microsoft::WRL::ComPtr<ID3D12Resource> range_depth_buffer_;
@@ -322,6 +333,26 @@ private:
     D3D12_INDEX_BUFFER_VIEW range_ib_view_{};
     std::array<RangeSubmesh, static_cast<std::size_t>(RangeMeshKind::count)> range_submeshes_{};
     RangeGeometryPackage range_geometry_meta_{};
+    Microsoft::WRL::ComPtr<ID3D12Resource> range_lights_buf_;
+    Microsoft::WRL::ComPtr<ID3D12Resource> range_probes_buf_;
+    Microsoft::WRL::ComPtr<ID3D12Resource> range_blas_;
+    Microsoft::WRL::ComPtr<ID3D12Resource> range_tlas_;
+    std::uint32_t range_light_count_ = 0;
+    std::uint32_t range_probe_count_ = 0;
+    Dust2MapPackage dust2_map_{};
+    Dust2PbrBundle dust2_pbr_{};
+    Microsoft::WRL::ComPtr<ID3D12Resource> dust2_vertex_buffer_;
+    Microsoft::WRL::ComPtr<ID3D12Resource> dust2_index_buffer_;
+    D3D12_VERTEX_BUFFER_VIEW dust2_vb_view_{};
+    D3D12_INDEX_BUFFER_VIEW dust2_ib_view_{};
+    std::array<RangeSubmesh, static_cast<std::size_t>(RangeMeshKind::count)> dust2_viewmodel_submeshes_{};
+    Microsoft::WRL::ComPtr<ID3D12Resource> dust2_lights_buf_;
+    Microsoft::WRL::ComPtr<ID3D12Resource> dust2_probes_buf_;
+    Microsoft::WRL::ComPtr<ID3D12Resource> dust2_blas_;
+    Microsoft::WRL::ComPtr<ID3D12Resource> dust2_tlas_;
+    std::vector<Dust2DrawChunk> dust2_visible_chunks_;
+    Dust2OctreeTelemetry last_dust2_octree_telemetry_{};
+    std::int32_t dxr_tier_ = 0;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> present_root_signature_;
     std::array<Microsoft::WRL::ComPtr<ID3D12PipelineState>, 5> present_pipelines_;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> present_dlss_inputs_pipeline_;

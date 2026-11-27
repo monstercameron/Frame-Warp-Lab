@@ -122,6 +122,10 @@ public:
         vertical_fov_override_ = 0.0f;
         recoil_yaw_offset_ = 0.0f;
         recoil_pitch_offset_ = 0.0f;
+        manual_min_ = Float3{-3.5f, 0.45f, 0.4f};
+        manual_max_ = Float3{3.5f, 3.15f, 24.5f};
+        manual_move_speed_ = 4.2f;
+        clamp_to_range_bay_ = false;
     }
 
     void reset_for_tactical_range() {
@@ -135,6 +139,26 @@ public:
         vertical_fov_override_ = 1.15f;
         recoil_yaw_offset_ = 0.0f;
         recoil_pitch_offset_ = 0.0f;
+        manual_min_ = Float3{-5.6f, 1.42f, -0.8f};
+        manual_max_ = Float3{5.6f, 1.42f, 2.85f};
+        manual_move_speed_ = 4.2f;
+    }
+
+    void reset_for_dust2(Float3 spawn_pos, float spawn_yaw, Float3 world_min, Float3 world_max) {
+        scene_time_seconds_ = 0.0;
+        has_previous_ = false;
+        previous_cut_segment_ = 0;
+        path_ = CameraPath::manual;
+        manual_position_ = spawn_pos;
+        manual_yaw_ = spawn_yaw;
+        manual_pitch_ = 0.0f;
+        vertical_fov_override_ = 1.15f;
+        recoil_yaw_offset_ = 0.0f;
+        recoil_pitch_offset_ = 0.0f;
+        manual_min_ = Float3{world_min.x - 8.0f, 0.5f, world_min.z - 8.0f};
+        manual_max_ = Float3{world_max.x + 8.0f, world_max.y + 16.0f, world_max.z + 8.0f};
+        manual_move_speed_ = 8.5f;
+        clamp_to_range_bay_ = false;
     }
 
     void set_range_camera_modifiers(float vertical_fov_rad, float recoil_pitch_rad, float recoil_yaw_rad, bool clamp_to_bay) {
@@ -190,7 +214,7 @@ public:
                 1.15f);
             const float active_fov = vertical_fov_override_ > 0.1f ? vertical_fov_override_ : 1.04719755f;
             const CameraBasis basis = make_camera_basis(manual_position_, manual_yaw_, manual_pitch_, active_fov);
-            const float move_speed = 4.2f * step;
+            const float move_speed = manual_move_speed_ * step;
             if (clamp_to_range_bay_) {
                 simd::advance_clamped_position(
                     manual_position_.x,
@@ -213,12 +237,12 @@ public:
                     (basis.forward.x * input.forward_axis + basis.right.x * input.right_axis) * move_speed,
                     input.vertical_axis * move_speed,
                     (basis.forward.z * input.forward_axis + basis.right.z * input.right_axis) * move_speed,
-                    -3.5f,
-                    0.45f,
-                    0.4f,
-                    3.5f,
-                    3.15f,
-                    24.5f);
+                    manual_min_.x,
+                    manual_min_.y,
+                    manual_min_.z,
+                    manual_max_.x,
+                    manual_max_.y,
+                    manual_max_.z);
             }
         }
     }
@@ -285,6 +309,9 @@ private:
     float vertical_fov_override_ = 0.0f;
     float recoil_yaw_offset_ = 0.0f;
     float recoil_pitch_offset_ = 0.0f;
+    Float3 manual_min_{-3.5f, 0.45f, 0.4f};
+    Float3 manual_max_{3.5f, 3.15f, 24.5f};
+    float manual_move_speed_ = 4.2f;
     bool clamp_to_range_bay_ = false;
 };
 

@@ -380,6 +380,20 @@ int print_status(const WindowInstance& instance) {
     const std::uint32_t tile_deferred = std::atomic_ref<std::uint32_t>(state->last_tile_deferred_count).load(std::memory_order_acquire);
     const std::uint32_t tile_crit_total = std::atomic_ref<std::uint32_t>(state->last_tile_critical_total).load(std::memory_order_acquire);
     const std::uint32_t tile_crit_deferred = std::atomic_ref<std::uint32_t>(state->last_tile_critical_deferred).load(std::memory_order_acquire);
+    const std::int32_t dxr_tier = std::atomic_ref<std::int32_t>(state->dxr_tier).load(std::memory_order_acquire);
+    const std::int32_t dust2_loaded = std::atomic_ref<std::int32_t>(state->dust2_loaded).load(std::memory_order_acquire);
+    const std::uint32_t dust2_octree_total = std::atomic_ref<std::uint32_t>(state->dust2_octree_total_nodes).load(std::memory_order_acquire);
+    const std::uint32_t dust2_octree_visited = std::atomic_ref<std::uint32_t>(state->dust2_octree_visited_nodes).load(std::memory_order_acquire);
+    const std::uint32_t dust2_octree_culled = std::atomic_ref<std::uint32_t>(state->dust2_octree_culled_nodes).load(std::memory_order_acquire);
+    const std::uint32_t dust2_octree_probe_occl = std::atomic_ref<std::uint32_t>(state->dust2_octree_probe_occluded).load(std::memory_order_acquire);
+    const std::uint32_t dust2_lod0 = std::atomic_ref<std::uint32_t>(state->dust2_lod0_chunks).load(std::memory_order_acquire);
+    const std::uint32_t dust2_lod1 = std::atomic_ref<std::uint32_t>(state->dust2_lod1_chunks).load(std::memory_order_acquire);
+    const std::uint32_t dust2_lod2 = std::atomic_ref<std::uint32_t>(state->dust2_lod2_chunks).load(std::memory_order_acquire);
+    const std::uint32_t dust2_sub_tris = std::atomic_ref<std::uint32_t>(state->dust2_submitted_tris).load(std::memory_order_acquire);
+    const std::uint32_t dust2_tot_tris = std::atomic_ref<std::uint32_t>(state->dust2_total_lod0_tris).load(std::memory_order_acquire);
+    const std::uint32_t dust2_probes = std::atomic_ref<std::uint32_t>(state->dust2_active_probes).load(std::memory_order_acquire);
+    const std::uint32_t dust2_lights = std::atomic_ref<std::uint32_t>(state->dust2_active_lights).load(std::memory_order_acquire);
+    const std::int64_t dust2_pbr_ms = std::atomic_ref<std::int64_t>(state->dust2_pbr_build_ms).load(std::memory_order_acquire);
     const double smoothed_fps = smoothed_interval_us > 0 ? 1000000.0 / static_cast<double>(smoothed_interval_us) : 0.0;
 
     RECT client_rectangle{};
@@ -445,7 +459,7 @@ int print_status(const WindowInstance& instance) {
               << ",\"markers_emitted\":" << pcl_markers_emitted
               << ",\"pings_received\":" << pcl_pings_received
               << "},\"note\":\"input_to_present_us measures software input arrival to Present return; physical display scanout requires FrameView/PresentMon ETW or Reflex Latency Analyzer\"}"
-              << ",\"scene\":{\"name\":\"" << (scene_kind == static_cast<std::int32_t>(frame_warp_lab::SceneKind::range) ? "tactical_range" : "motion_lab")
+              << ",\"scene\":{\"name\":\"" << (scene_kind == static_cast<std::int32_t>(frame_warp_lab::SceneKind::dust2) ? "de_dust2" : (scene_kind == static_cast<std::int32_t>(frame_warp_lab::SceneKind::range) ? "tactical_range" : "motion_lab"))
               << "\",\"kind\":\"" << frame_warp_lab::scene_kind_name(scene_kind)
               << "\",\"time_ms\":" << scene_time_ms
               << ",\"fixed_dt_us\":" << fixed_dt_us
@@ -496,6 +510,21 @@ int print_status(const WindowInstance& instance) {
               << ",\"additional_rates_supported\":" << (vrs_additional_rates ? "true" : "false")
               << ",\"requested_mode\":\"" << frame_warp_lab::vrs_mode_name(vrs_requested_mode)
               << "\",\"active_mode\":\"" << frame_warp_lab::vrs_mode_name(vrs_active_mode) << "\"}"
+              << ",\"dxr\":{\"tier\":" << dxr_tier
+              << ",\"inline_raytracing_supported\":" << (dxr_tier >= 11 ? "true" : "false") << "}"
+              << ",\"dust2\":{\"loaded\":" << (dust2_loaded ? "true" : "false")
+              << ",\"pbr_build_ms\":" << dust2_pbr_ms
+              << ",\"octree_total_nodes\":" << dust2_octree_total
+              << ",\"octree_visited_nodes\":" << dust2_octree_visited
+              << ",\"octree_culled_nodes\":" << dust2_octree_culled
+              << ",\"octree_probe_occluded_nodes\":" << dust2_octree_probe_occl
+              << ",\"lod0_chunks\":" << dust2_lod0
+              << ",\"lod1_chunks\":" << dust2_lod1
+              << ",\"lod2_chunks\":" << dust2_lod2
+              << ",\"submitted_tris\":" << dust2_sub_tris
+              << ",\"total_lod0_tris\":" << dust2_tot_tris
+              << ",\"active_probes\":" << dust2_probes
+              << ",\"active_lights\":" << dust2_lights << "}"
               << ",\"adaptive_scheduler\":{\"enabled\":" << (adaptive_enabled ? "true" : "false")
               << ",\"dlssg_policy_enabled\":" << (adaptive_dlssg_enabled ? "true" : "false")
               << ",\"tier\":" << adaptive_tier
@@ -992,11 +1021,11 @@ int apply_setting(const WindowInstance& instance, const std::wstring& key, const
         if (value == L"on" || value == L"1" || value == L"true") parameter = 1;
         else if (value == L"off" || value == L"0" || value == L"false") parameter = 0;
         else return fail("invalid_value", "Expected clustered_lighting in {on, off}");
-    } else if (key == L"thin_gbuf") {
+    } else if (key == L"thin_gbuf" || key == L"half_res_spec") {
         command = frame_warp_lab::ControlCommand::set_thin_gbuf;
         if (value == L"on" || value == L"1" || value == L"true") parameter = 1;
         else if (value == L"off" || value == L"0" || value == L"false") parameter = 0;
-        else return fail("invalid_value", "Expected thin_gbuf in {on, off}");
+        else return fail("invalid_value", "Expected half_res_spec/thin_gbuf in {on, off}");
     } else if (key == L"surface_cache_mb") {
         command = frame_warp_lab::ControlCommand::set_surface_cache_mb;
         if (value == L"4") parameter = 4;
@@ -1035,7 +1064,8 @@ int apply_setting(const WindowInstance& instance, const std::wstring& key, const
         command = frame_warp_lab::ControlCommand::set_scene_kind;
         if (value == L"corridor") parameter = static_cast<LPARAM>(frame_warp_lab::SceneKind::corridor);
         else if (value == L"range") parameter = static_cast<LPARAM>(frame_warp_lab::SceneKind::range);
-        else return fail("invalid_value", "Expected scene in {range, corridor}");
+        else if (value == L"dust2" || value == L"de_dust2") parameter = static_cast<LPARAM>(frame_warp_lab::SceneKind::dust2);
+        else return fail("invalid_value", "Expected scene in {range, corridor, dust2}");
     } else if (key == L"ads") {
         command = frame_warp_lab::ControlCommand::set_range_ads;
         if (value == L"on" || value == L"1" || value == L"true") parameter = 1;
@@ -1226,6 +1256,9 @@ int print_capabilities() {
     }
     D3D12_FEATURE_DATA_D3D12_OPTIONS6 options{};
     result = device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS6, &options, sizeof(options));
+    D3D12_FEATURE_DATA_D3D12_OPTIONS5 options5{};
+    const HRESULT dxr_result = device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5, &options5, sizeof(options5));
+    const int dxr_tier_num = SUCCEEDED(dxr_result) ? static_cast<int>(options5.RaytracingTier) : 0;
 
     const bool nvapi_arm64_present = file_exists(L"C:\\Windows\\System32\\nvapia64.dll");
     const bool frameview_sdk_arm64_present = file_exists(L"C:\\Program Files\\NVIDIA Corporation\\FrameViewSDK\\bin\\FvSDK_arm64.dll")
@@ -1242,6 +1275,9 @@ int print_capabilities() {
     else std::cout << "{\"query_available\":true,\"tier\":" << static_cast<int>(options.VariableShadingRateTier)
                    << ",\"additional_shading_rates_supported\":" << (options.AdditionalShadingRatesSupported ? "true" : "false")
                    << ",\"tile_size_px\":" << options.ShadingRateImageTileSize << "}";
+    std::cout << ",\"dxr\":{\"query_available\":" << (SUCCEEDED(dxr_result) ? "true" : "false")
+              << ",\"tier\":" << dxr_tier_num
+              << ",\"inline_raytracing_supported\":" << (dxr_tier_num >= static_cast<int>(D3D12_RAYTRACING_TIER_1_1) ? "true" : "false") << "}";
     std::cout << ",\"nvidia_latency_tools\":{\"pcl_etw_provider_integrated\":true,\"nvapi_arm64_dll_present\":"
               << (nvapi_arm64_present ? "true" : "false")
               << ",\"frameview_sdk_arm64_present\":" << (frameview_sdk_arm64_present ? "true" : "false")

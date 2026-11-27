@@ -10,7 +10,7 @@
 namespace frame_warp_lab {
 
 inline constexpr wchar_t window_class_name[] = L"FrameWarpLabWindow";
-inline constexpr std::uint32_t runtime_state_version = 35;
+inline constexpr std::uint32_t runtime_state_version = 36;
 inline constexpr std::size_t runtime_event_capacity = 64;
 inline constexpr std::size_t runtime_frame_trace_capacity = 256;
 inline constexpr std::size_t hud_graph_sample_count = 128;
@@ -81,6 +81,7 @@ enum class ControlCommand : WPARAM {
 enum class SceneKind : std::int32_t {
     corridor = 0,
     range = 1,
+    dust2 = 2,
 };
 
 enum class DrsMode : std::int32_t {
@@ -469,6 +470,20 @@ struct RuntimeState {
     std::uint32_t last_tile_deferred_count;
     std::uint32_t last_tile_critical_total;
     std::uint32_t last_tile_critical_deferred;
+    std::int32_t dxr_tier;
+    std::int32_t dust2_loaded;
+    std::uint32_t dust2_octree_total_nodes;
+    std::uint32_t dust2_octree_visited_nodes;
+    std::uint32_t dust2_octree_culled_nodes;
+    std::uint32_t dust2_octree_probe_occluded;
+    std::uint32_t dust2_lod0_chunks;
+    std::uint32_t dust2_lod1_chunks;
+    std::uint32_t dust2_lod2_chunks;
+    std::uint32_t dust2_submitted_tris;
+    std::uint32_t dust2_total_lod0_tris;
+    std::uint32_t dust2_active_probes;
+    std::uint32_t dust2_active_lights;
+    std::int64_t dust2_pbr_build_ms;
     std::uint32_t last_capture_tag;
     std::int64_t last_capture_frame_id;
     std::int64_t last_capture_scene_time_us;
@@ -577,6 +592,7 @@ inline const char* scene_kind_name(std::int32_t kind) {
     switch (static_cast<SceneKind>(kind)) {
         case SceneKind::corridor: return "corridor";
         case SceneKind::range: return "range";
+        case SceneKind::dust2: return "dust2";
         default: return "unknown";
     }
 }

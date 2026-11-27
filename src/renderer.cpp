@@ -34,6 +34,7 @@ struct SceneConstantsData {
     std::uint32_t cache_params[4];
     std::uint32_t policy_params[4];
     std::uint32_t prev_and_alloc_dims[4];
+    std::uint32_t world_lighting_params[4];
 };
 
 struct PresentConstantsData {
@@ -316,7 +317,13 @@ Renderer::Renderer(HWND window)
     }
 
     check(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device_)), "Create D3D12 device");
+    device_.As(&device5_);
     streamline_.attach_device(device_.Get());
+
+    D3D12_FEATURE_DATA_D3D12_OPTIONS5 options5{};
+    if (SUCCEEDED(device_->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5, &options5, sizeof(options5)))) {
+        dxr_tier_ = static_cast<std::int32_t>(options5.RaytracingTier);
+    }
 
     D3D12_FEATURE_DATA_D3D12_OPTIONS6 options6{};
     if (SUCCEEDED(device_->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS6, &options6, sizeof(options6)))) {
@@ -394,7 +401,7 @@ Renderer::Renderer(HWND window)
 
     D3D12_DESCRIPTOR_HEAP_DESC compute_heap_description{};
     compute_heap_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    compute_heap_description.NumDescriptors = source_slot_count * compute_descriptors_per_source_slot + 2U + pbr_srv_descriptor_count;
+    compute_heap_description.NumDescriptors = source_slot_count * compute_descriptors_per_source_slot + 2U + pbr_srv_descriptor_count + ext_srv_descriptor_count * 2U;
     compute_heap_description.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     check(device_->CreateDescriptorHeap(&compute_heap_description, IID_PPV_ARGS(&scene_compute_heap_)), "Create scene compute heap");
 
@@ -408,6 +415,7 @@ Renderer::Renderer(HWND window)
         check(device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&slot.command_allocator)), "Create scene command allocator");
     }
     check(device_->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, source_slots_[0].command_allocator.Get(), nullptr, IID_PPV_ARGS(&scene_command_list_)), "Create scene command list");
+    scene_command_list_.As(&scene_command_list4_);
     scene_command_list_.As(&scene_command_list5_);
     check(scene_command_list_->Close(), "Close initial scene command list");
 
@@ -635,7 +643,8 @@ bool Renderer::submit_scene_async(
     std::uint64_t frame_id,
     LatencyMonitor& latency_monitor,
     bool wait_for_completion,
-    const TacticalRangeFrame* range_frame) {
+    const TacticalRangeFrame* range_frame,
+    bool is_dust2_scene) {
     if (viewport_width_ == 0 || viewport_height_ == 0 || render_width_ == 0 || render_height_ == 0) return false;
     poll_completed_scenes();
     if (has_scene_in_flight()) return false;
@@ -746,6 +755,24 @@ bool Renderer::submit_scene_async(
         prev_active_h,
         alloc_render_width_,
         alloc_render_height_);
+    const bool use_dust2 = is_dust2_scene && dust2_map_.loaded && dust2_vertex_buffer_ && dust2_index_buffer_;
+    const bool dxr_ready = dxr_tier_ >= static_cast<std::int32_t>(D3D12_RAYTRACING_TIER_1_1)
+        && ((use_dust2 && dust2_tlas_) || (!use_dust2 && range_tlas_));
+    const std::uint32_t active_lights = use_dust2
+        ? static_cast<std::uint32_t>(dust2_map_.lights.size())
+        : range_light_count_;
+    const std::uint32_t active_probes = use_dust2
+        ? static_cast<std::uint32_t>(dust2_map_.probes.size())
+        : range_probe_count_;
+    const std::uint32_t world_flags = (use_dust2 ? 1U : 0U)
+        | (dxr_ready ? 2U : 0U)
+        | (thin_gbuf_enabled ? 4U : 0U);
+    simd::store_uint4(
+        scene_constants->world_lighting_params,
+        active_lights,
+        active_probes,
+        world_flags,
+        static_cast<std::uint32_t>(snapshot.source_frame_id));
 
     latency_monitor.emit_marker(LatencyMarker::render_submit_start, frame_id);
     check(slot.command_allocator->Reset(), "Reset scene command allocator");
@@ -757,6 +784,14 @@ bool Renderer::submit_scene_async(
     }
 
     if (range_frame != nullptr && range_pipeline_ && range_root_signature_ && range_depth_buffer_) {
+        if (use_dust2) {
+            select_dust2_octree_draws(
+                dust2_map_,
+                snapshot.camera,
+                aspect_ratio,
+                dust2_visible_chunks_,
+                last_dust2_octree_telemetry_);
+        }
         write_float4(
             scene_constants->ball_center_stress,
             range_frame->hud.muzzle_world_pos,
@@ -782,6 +817,52 @@ bool Renderer::submit_scene_async(
         scene_command_list_->RSSetScissorRects(1, &scissor);
         scene_command_list_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
+        const auto active_vb_view = use_dust2 ? dust2_vb_view_ : range_vb_view_;
+        const auto active_ib_view = use_dust2 ? dust2_ib_view_ : range_ib_view_;
+        ID3D12Resource* active_vb_res = use_dust2 ? dust2_vertex_buffer_.Get() : range_vertex_buffer_.Get();
+        ID3D12Resource* active_ib_res = use_dust2 ? dust2_index_buffer_.Get() : range_index_buffer_.Get();
+        const auto& active_vm_submeshes = use_dust2 ? dust2_viewmodel_submeshes_ : range_submeshes_;
+
+        const auto heap_gpu_start = scene_compute_heap_->GetGPUDescriptorHandleForHeapStart();
+        const UINT ext_base_slot = source_slot_count * compute_descriptors_per_source_slot
+            + 2U
+            + pbr_srv_descriptor_count
+            + (use_dust2 ? ext_srv_descriptor_count : 0U);
+        D3D12_GPU_DESCRIPTOR_HANDLE active_ext_srv_gpu{
+            heap_gpu_start.ptr + static_cast<UINT64>(ext_base_slot) * shader_resource_descriptor_stride_};
+
+        const auto draw_world_geometry = [&]() {
+            if (use_dust2) {
+                for (const auto& ch : dust2_visible_chunks_) {
+                    const std::uint32_t meta[4] = {0U, 0U, ch.index_offset / 3U, 0U};
+                    scene_command_list_->SetGraphicsRoot32BitConstants(1, 4, meta, 0);
+                    scene_command_list_->DrawIndexedInstanced(ch.index_count, 1, ch.index_offset, 0, 0);
+                }
+            } else {
+                for (std::uint32_t i = 0; i < count; ++i) {
+                    const auto& dc = range_frame->draws[i];
+                    if (dc.viewmodel) continue;
+                    const auto& sm = range_submeshes_[static_cast<std::size_t>(dc.mesh)];
+                    if (sm.index_count == 0U) continue;
+                    const std::uint32_t meta[4] = {dc.instance_index, 0U, sm.index_offset / 3U, 0U};
+                    scene_command_list_->SetGraphicsRoot32BitConstants(1, 4, meta, 0);
+                    scene_command_list_->DrawIndexedInstanced(sm.index_count, 1, sm.index_offset, 0, 0);
+                }
+            }
+        };
+
+        const auto draw_viewmodel_geometry = [&]() {
+            for (std::uint32_t i = 0; i < count; ++i) {
+                const auto& dc = range_frame->draws[i];
+                if (!dc.viewmodel) continue;
+                const auto& sm = active_vm_submeshes[static_cast<std::size_t>(dc.mesh)];
+                if (sm.index_count == 0U) continue;
+                const std::uint32_t meta[4] = {dc.instance_index, 1U, sm.index_offset / 3U, 0U};
+                scene_command_list_->SetGraphicsRoot32BitConstants(1, 4, meta, 0);
+                scene_command_list_->DrawIndexedInstanced(sm.index_count, 1, sm.index_offset, 0, 0);
+            }
+        };
+
         const auto dsv_handle = depth_stencil_heap_->GetCPUDescriptorHandleForHeapStart();
         const bool use_visbuffer_par = selective_tiles_enabled
             && range_vis_pipeline_
@@ -801,13 +882,13 @@ bool Renderer::submit_scene_async(
             rg.track(slot.tile_map_target.Get(), source_slot_readable_state);
             rg.track(slot.mat_gbuf0_target.Get(), source_slot_readable_state);
             rg.track(slot.mat_gbuf1_target.Get(), source_slot_readable_state);
+            rg.track(slot.half_spec_target.Get(), source_slot_readable_state);
             rg.track(tile_indirect_args_uav_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             rg.track(tile_candidate_meta_uav_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             rg.track(dirty_tile_list_uav_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             rg.track(surface_cache_uav_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
             ID3D12DescriptorHeap* scene_heaps[] = {scene_compute_heap_.Get()};
-            const auto heap_gpu_start = scene_compute_heap_->GetGPUDescriptorHandleForHeapStart();
             D3D12_GPU_DESCRIPTOR_HANDLE range_pbr_srv_gpu{
                 heap_gpu_start.ptr
                 + static_cast<UINT64>(source_slot_count * compute_descriptors_per_source_slot + 2U) * shader_resource_descriptor_stride_};
@@ -845,8 +926,9 @@ bool Renderer::submit_scene_async(
                     scene_command_list_->SetGraphicsRootConstantBufferView(0, scene_constant_buffer_->GetGPUVirtualAddress() + constant_offset);
                     scene_command_list_->SetGraphicsRootShaderResourceView(2, range_instance_buffer_->GetGPUVirtualAddress() + inst_offset);
                     scene_command_list_->SetGraphicsRootDescriptorTable(3, range_pbr_srv_gpu);
-                    scene_command_list_->IASetVertexBuffers(0, 1, &range_vb_view_);
-                    scene_command_list_->IASetIndexBuffer(&range_ib_view_);
+                    scene_command_list_->SetGraphicsRootDescriptorTable(4, active_ext_srv_gpu);
+                    scene_command_list_->IASetVertexBuffers(0, 1, &active_vb_view);
+                    scene_command_list_->IASetIndexBuffer(&active_ib_view);
                     if (scene_command_list5_ && vrs_tier_ > 0) {
                         scene_command_list5_->RSSetShadingRate(D3D12_SHADING_RATE_1X1, nullptr);
                         if (vrs_tier_ >= static_cast<std::int32_t>(D3D12_VARIABLE_SHADING_RATE_TIER_2)) {
@@ -854,25 +936,9 @@ bool Renderer::submit_scene_async(
                         }
                     }
 
-                    for (std::uint32_t i = 0; i < count; ++i) {
-                        const auto& dc = range_frame->draws[i];
-                        if (dc.viewmodel) continue;
-                        const auto& sm = range_submeshes_[static_cast<std::size_t>(dc.mesh)];
-                        if (sm.index_count == 0U) continue;
-                        const std::uint32_t meta[4] = {dc.instance_index, 0U, sm.index_offset / 3U, 0U};
-                        scene_command_list_->SetGraphicsRoot32BitConstants(1, 4, meta, 0);
-                        scene_command_list_->DrawIndexedInstanced(sm.index_count, 1, sm.index_offset, 0, 0);
-                    }
+                    draw_world_geometry();
                     scene_command_list_->ClearDepthStencilView(dsv_handle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
-                    for (std::uint32_t i = 0; i < count; ++i) {
-                        const auto& dc = range_frame->draws[i];
-                        if (!dc.viewmodel) continue;
-                        const auto& sm = range_submeshes_[static_cast<std::size_t>(dc.mesh)];
-                        if (sm.index_count == 0U) continue;
-                        const std::uint32_t meta[4] = {dc.instance_index, 1U, sm.index_offset / 3U, 0U};
-                        scene_command_list_->SetGraphicsRoot32BitConstants(1, 4, meta, 0);
-                        scene_command_list_->DrawIndexedInstanced(sm.index_count, 1, sm.index_offset, 0, 0);
-                    }
+                    draw_viewmodel_geometry();
                 });
 
             rg.execute_pass(
@@ -911,8 +977,13 @@ bool Renderer::submit_scene_async(
                 heap_gpu_start.ptr + (static_cast<UINT64>(safe_prev_slot) * compute_descriptors_per_source_slot + 9ULL) * shader_resource_descriptor_stride_};
             D3D12_GPU_DESCRIPTOR_HANDLE curr_mat_uav_gpu{
                 heap_gpu_start.ptr + (static_cast<UINT64>(slot_index) * compute_descriptors_per_source_slot + 11ULL) * shader_resource_descriptor_stride_};
+            D3D12_GPU_DESCRIPTOR_HANDLE curr_half_spec_srv_gpu{
+                heap_gpu_start.ptr + (static_cast<UINT64>(slot_index) * compute_descriptors_per_source_slot + 13ULL) * shader_resource_descriptor_stride_};
+            D3D12_GPU_DESCRIPTOR_HANDLE curr_half_spec_uav_gpu{
+                heap_gpu_start.ptr + (static_cast<UINT64>(slot_index) * compute_descriptors_per_source_slot + 14ULL) * shader_resource_descriptor_stride_};
 
             const bool run_split_composite = split_diff_spec_enabled && range_vis_composite_pipeline_;
+            const bool run_half_res_spec = run_split_composite && thin_gbuf_enabled && range_half_spec_pipeline_;
 
             rg.execute_pass(
                 scene_command_list_.Get(),
@@ -935,13 +1006,16 @@ bool Renderer::submit_scene_async(
                     scene_command_list_->SetComputeRootDescriptorTable(3, shared_uav_gpu);
                     scene_command_list_->SetComputeRootUnorderedAccessView(4, tile_indirect_args_uav_->GetGPUVirtualAddress());
                     scene_command_list_->SetComputeRootDescriptorTable(5, range_pbr_srv_gpu);
-                    scene_command_list_->SetComputeRootShaderResourceView(6, range_vertex_buffer_->GetGPUVirtualAddress());
-                    scene_command_list_->SetComputeRootShaderResourceView(7, range_index_buffer_->GetGPUVirtualAddress());
+                    scene_command_list_->SetComputeRootShaderResourceView(6, active_vb_res->GetGPUVirtualAddress());
+                    scene_command_list_->SetComputeRootShaderResourceView(7, active_ib_res->GetGPUVirtualAddress());
                     scene_command_list_->SetComputeRootShaderResourceView(8, range_instance_buffer_->GetGPUVirtualAddress() + inst_offset);
                     scene_command_list_->SetComputeRootDescriptorTable(9, curr_final_color_uav);
                     scene_command_list_->SetComputeRootUnorderedAccessView(10, surface_cache_uav_->GetGPUVirtualAddress());
                     scene_command_list_->SetComputeRootDescriptorTable(11, prev_mat_srv_gpu);
                     scene_command_list_->SetComputeRootDescriptorTable(12, curr_mat_uav_gpu);
+                    scene_command_list_->SetComputeRootDescriptorTable(13, active_ext_srv_gpu);
+                    scene_command_list_->SetComputeRootDescriptorTable(14, curr_half_spec_srv_gpu);
+                    scene_command_list_->SetComputeRootDescriptorTable(15, curr_half_spec_uav_gpu);
 
                     scene_command_list_->SetPipelineState(range_vis_classify_pipeline_.Get());
                     scene_command_list_->Dispatch(tiles_x, tiles_y, 1);
@@ -1003,6 +1077,19 @@ bool Renderer::submit_scene_async(
             };
 
             if (run_split_composite) {
+                if (run_half_res_spec) {
+                    const UINT half_w = (render_width_ + 1U) / 2U;
+                    const UINT half_h = (render_height_ + 1U) / 2U;
+                    rg.execute_pass(
+                        scene_command_list_.Get(),
+                        [&](RenderGraphContext& g) {
+                            g.transition(slot.half_spec_target.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                        },
+                        [&]() {
+                            scene_command_list_->SetPipelineState(range_half_spec_pipeline_.Get());
+                            scene_command_list_->Dispatch((half_w + 7U) / 8U, (half_h + 7U) / 8U, 1);
+                        });
+                }
                 rg.execute_pass(
                     scene_command_list_.Get(),
                     [&](RenderGraphContext& g) {
@@ -1011,6 +1098,7 @@ bool Renderer::submit_scene_async(
                         g.uav(tile_candidate_meta_uav_.Get());
                         g.uav(slot.mat_gbuf0_target.Get());
                         g.uav(slot.mat_gbuf1_target.Get());
+                        g.transition(slot.half_spec_target.Get(), source_slot_readable_state);
                         g.transition(slot.color_target.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
                     },
                     [&]() {
@@ -1046,7 +1134,7 @@ bool Renderer::submit_scene_async(
                             5U * sizeof(std::uint32_t));
                     });
 
-                if ((shader_flags & 128U) != 0U) {
+                if (!use_dust2 && (shader_flags & 128U) != 0U) {
                     rg.execute_pass(
                         scene_command_list_.Get(),
                         [&](RenderGraphContext& g) {
@@ -1091,7 +1179,7 @@ bool Renderer::submit_scene_async(
                             5U * sizeof(std::uint32_t));
                     });
 
-                if ((shader_flags & 128U) != 0U) {
+                if (!use_dust2 && (shader_flags & 128U) != 0U) {
                     bool drew_glass = false;
                     rg.execute_pass(
                         scene_command_list_.Get(),
@@ -1134,7 +1222,11 @@ bool Renderer::submit_scene_async(
                 + dlss_input_slot_count * rtv_targets_per_dlss_slot
                 + static_cast<UINT>(slot_index) * targets_per_source_slot) * render_target_descriptor_stride_;
 
-            const float clear_col[4] = {0.035f, 0.050f, 0.068f, 1.0f};
+            const float clear_col[4] = {
+                use_dust2 ? 0.58f : 0.035f,
+                use_dust2 ? 0.68f : 0.050f,
+                use_dust2 ? 0.80f : 0.068f,
+                0.0f};
             const float clear_depth_rtv[4] = {1000.0f, 0.0f, 0.0f, 0.0f};
             const float clear_motion[4] = {0.0f, 0.0f, 0.0f, 0.0f};
             D3D12_CPU_DESCRIPTOR_HANDLE rtv_c = offscreen_rtv;
@@ -1153,11 +1245,12 @@ bool Renderer::submit_scene_async(
             scene_command_list_->SetGraphicsRootConstantBufferView(0, scene_constant_buffer_->GetGPUVirtualAddress() + constant_offset);
             scene_command_list_->SetGraphicsRootShaderResourceView(2, range_instance_buffer_->GetGPUVirtualAddress() + inst_offset);
             D3D12_GPU_DESCRIPTOR_HANDLE range_pbr_srv_gpu{
-                scene_compute_heap_->GetGPUDescriptorHandleForHeapStart().ptr
+                heap_gpu_start.ptr
                 + static_cast<UINT64>(source_slot_count * compute_descriptors_per_source_slot + 2U) * shader_resource_descriptor_stride_};
             scene_command_list_->SetGraphicsRootDescriptorTable(3, range_pbr_srv_gpu);
-            scene_command_list_->IASetVertexBuffers(0, 1, &range_vb_view_);
-            scene_command_list_->IASetIndexBuffer(&range_ib_view_);
+            scene_command_list_->SetGraphicsRootDescriptorTable(4, active_ext_srv_gpu);
+            scene_command_list_->IASetVertexBuffers(0, 1, &active_vb_view);
+            scene_command_list_->IASetIndexBuffer(&active_ib_view);
 
             if (scene_command_list5_ && vrs_tier_ > 0) {
                 const VrsMode effective_vrs = resolve_effective_vrs_mode(vrs_mode);
@@ -1182,15 +1275,7 @@ bool Renderer::submit_scene_async(
                 }
             }
 
-            for (std::uint32_t i = 0; i < count; ++i) {
-                const auto& dc = range_frame->draws[i];
-                if (dc.viewmodel) continue;
-                const auto& sm = range_submeshes_[static_cast<std::size_t>(dc.mesh)];
-                if (sm.index_count == 0U) continue;
-                const std::uint32_t meta[4] = {dc.instance_index, 0U, sm.index_offset / 3U, 0U};
-                scene_command_list_->SetGraphicsRoot32BitConstants(1, 4, meta, 0);
-                scene_command_list_->DrawIndexedInstanced(sm.index_count, 1, sm.index_offset, 0, 0);
-            }
+            draw_world_geometry();
 
             scene_command_list_->ClearDepthStencilView(dsv_handle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
             if (scene_command_list5_ && vrs_tier_ > 0) {
@@ -1199,18 +1284,10 @@ bool Renderer::submit_scene_async(
                     scene_command_list5_->RSSetShadingRateImage(nullptr);
                 }
             }
-            for (std::uint32_t i = 0; i < count; ++i) {
-                const auto& dc = range_frame->draws[i];
-                if (!dc.viewmodel) continue;
-                const auto& sm = range_submeshes_[static_cast<std::size_t>(dc.mesh)];
-                if (sm.index_count == 0U) continue;
-                const std::uint32_t meta[4] = {dc.instance_index, 1U, sm.index_offset / 3U, 0U};
-                scene_command_list_->SetGraphicsRoot32BitConstants(1, 4, meta, 0);
-                scene_command_list_->DrawIndexedInstanced(sm.index_count, 1, sm.index_offset, 0, 0);
-            }
+            draw_viewmodel_geometry();
 
             const auto& glass_sm = range_submeshes_[static_cast<std::size_t>(RangeMeshKind::transparent_glass)];
-            if ((shader_flags & 128U) != 0U && range_transparent_pipeline_ && range_transparent_root_signature_ && glass_sm.index_count > 0U) {
+            if (!use_dust2 && (shader_flags & 128U) != 0U && range_transparent_pipeline_ && range_transparent_root_signature_ && glass_sm.index_count > 0U) {
                 const std::array<D3D12_RESOURCE_BARRIER, 2> dm_to_srv = {
                     transition_barrier(slot.depth_target.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, source_slot_readable_state),
                     transition_barrier(slot.motion_target.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, source_slot_readable_state),
@@ -2007,6 +2084,7 @@ void Renderer::resize(UINT width, UINT height) {
         slot.tile_map_target.Reset();
         slot.mat_gbuf0_target.Reset();
         slot.mat_gbuf1_target.Reset();
+        slot.half_spec_target.Reset();
         slot.tile_stats = TileCacheStats{};
         slot.used_selective_tiles = false;
         slot.in_flight = false;
@@ -2090,6 +2168,7 @@ void Renderer::set_render_resolution(UINT override_width, UINT override_height, 
         slot.tile_map_target.Reset();
         slot.mat_gbuf0_target.Reset();
         slot.mat_gbuf1_target.Reset();
+        slot.half_spec_target.Reset();
         slot.tile_stats = TileCacheStats{};
         slot.active_width = 0;
         slot.active_height = 0;
@@ -2157,6 +2236,7 @@ void Renderer::create_pipelines() {
     const auto range_vis_classify_cs = load_shader_bytecode(shaders / L"range_vis_classify_cs.cso");
     const auto range_vis_admit_cs = load_shader_bytecode(shaders / L"range_vis_admit_cs.cso");
     const auto range_vis_shade_cs = load_shader_bytecode(shaders / L"range_vis_shade_cs.cso");
+    const auto range_half_spec_cs = load_shader_bytecode(shaders / L"range_half_spec_cs.cso");
     const auto range_vis_composite_cs = load_shader_bytecode(shaders / L"range_vis_composite_cs.cso");
 
     D3D12_DESCRIPTOR_RANGE scene_pbr_srv_range{};
@@ -2399,7 +2479,13 @@ void Renderer::create_pipelines() {
     compute_desc.CS = {tile_shade_indirect_cs.data(), tile_shade_indirect_cs.size()};
     check(device_->CreateComputePipelineState(&compute_desc, IID_PPV_ARGS(&tile_shade_indirect_pipeline_)), "Create tile shade indirect compute pipeline");
 
-    std::array<D3D12_ROOT_PARAMETER, 4> range_params{};
+    D3D12_DESCRIPTOR_RANGE range_ext_srv_range{};
+    range_ext_srv_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    range_ext_srv_range.NumDescriptors = ext_srv_descriptor_count;
+    range_ext_srv_range.BaseShaderRegister = 16;
+    range_ext_srv_range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+    std::array<D3D12_ROOT_PARAMETER, 5> range_params{};
     range_params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
     range_params[0].Descriptor.ShaderRegister = 0;
     range_params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
@@ -2414,6 +2500,10 @@ void Renderer::create_pipelines() {
     range_params[3].DescriptorTable.NumDescriptorRanges = 1;
     range_params[3].DescriptorTable.pDescriptorRanges = &scene_pbr_srv_range;
     range_params[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    range_params[4].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    range_params[4].DescriptorTable.NumDescriptorRanges = 1;
+    range_params[4].DescriptorTable.pDescriptorRanges = &range_ext_srv_range;
+    range_params[4].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
     D3D12_ROOT_SIGNATURE_DESC range_root_desc{};
     range_root_desc.NumParameters = static_cast<UINT>(range_params.size());
@@ -2473,7 +2563,7 @@ void Renderer::create_pipelines() {
     trans_depth_srv_range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
 
     std::array<D3D12_ROOT_PARAMETER, 5> range_trans_params{};
-    for (std::size_t i = 0; i < range_params.size(); ++i) {
+    for (std::size_t i = 0; i < 4U; ++i) {
         range_trans_params[i] = range_params[i];
     }
     range_trans_params[4].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
@@ -2563,7 +2653,19 @@ void Renderer::create_pipelines() {
     curr_mat_uav_range.BaseShaderRegister = 10;
     curr_mat_uav_range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
 
-    std::array<D3D12_ROOT_PARAMETER, 13> range_vis_params{};
+    D3D12_DESCRIPTOR_RANGE half_spec_srv_range{};
+    half_spec_srv_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    half_spec_srv_range.NumDescriptors = 1;
+    half_spec_srv_range.BaseShaderRegister = 22;
+    half_spec_srv_range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+    D3D12_DESCRIPTOR_RANGE half_spec_uav_range{};
+    half_spec_uav_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+    half_spec_uav_range.NumDescriptors = 1;
+    half_spec_uav_range.BaseShaderRegister = 12;
+    half_spec_uav_range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+    std::array<D3D12_ROOT_PARAMETER, 16> range_vis_params{};
     for (std::size_t i = 0; i < tile_compute_parameters.size(); ++i) {
         range_vis_params[i] = tile_compute_parameters[i];
     }
@@ -2591,6 +2693,18 @@ void Renderer::create_pipelines() {
     range_vis_params[12].DescriptorTable.NumDescriptorRanges = 1;
     range_vis_params[12].DescriptorTable.pDescriptorRanges = &curr_mat_uav_range;
     range_vis_params[12].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    range_vis_params[13].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    range_vis_params[13].DescriptorTable.NumDescriptorRanges = 1;
+    range_vis_params[13].DescriptorTable.pDescriptorRanges = &range_ext_srv_range;
+    range_vis_params[13].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    range_vis_params[14].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    range_vis_params[14].DescriptorTable.NumDescriptorRanges = 1;
+    range_vis_params[14].DescriptorTable.pDescriptorRanges = &half_spec_srv_range;
+    range_vis_params[14].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    range_vis_params[15].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    range_vis_params[15].DescriptorTable.NumDescriptorRanges = 1;
+    range_vis_params[15].DescriptorTable.pDescriptorRanges = &half_spec_uav_range;
+    range_vis_params[15].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
     D3D12_ROOT_SIGNATURE_DESC range_vis_root_desc{};
     range_vis_root_desc.NumParameters = static_cast<UINT>(range_vis_params.size());
@@ -2612,6 +2726,8 @@ void Renderer::create_pipelines() {
     check(device_->CreateComputePipelineState(&rvis_cs_desc, IID_PPV_ARGS(&range_vis_admit_pipeline_)), "Create range VisBuffer admit pipeline");
     rvis_cs_desc.CS = {range_vis_shade_cs.data(), range_vis_shade_cs.size()};
     check(device_->CreateComputePipelineState(&rvis_cs_desc, IID_PPV_ARGS(&range_vis_shade_pipeline_)), "Create range VisBuffer shade pipeline");
+    rvis_cs_desc.CS = {range_half_spec_cs.data(), range_half_spec_cs.size()};
+    check(device_->CreateComputePipelineState(&rvis_cs_desc, IID_PPV_ARGS(&range_half_spec_pipeline_)), "Create range half-res rough specular pipeline");
     rvis_cs_desc.CS = {range_vis_composite_cs.data(), range_vis_composite_cs.size()};
     check(device_->CreateComputePipelineState(&rvis_cs_desc, IID_PPV_ARGS(&range_vis_composite_pipeline_)), "Create range VisBuffer composite pipeline");
 }
@@ -2849,6 +2965,260 @@ void Renderer::create_range_resources() {
     const std::size_t inst_bytes = static_cast<std::size_t>(source_slot_count) * max_range_instances * sizeof(RangeInstanceGpu);
     range_instance_buffer_ = create_buffer(device_.Get(), D3D12_HEAP_TYPE_UPLOAD, inst_bytes, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ, "Create range instance buffer");
     check(range_instance_buffer_->Map(0, &empty_range, reinterpret_cast<void**>(&mapped_range_instances_)), "Map range instance buffer");
+
+    auto upload_default_buffer = [&](const void* src_data, std::size_t bytes, D3D12_RESOURCE_STATES final_state, const char* label) -> ComPtr<ID3D12Resource> {
+        const std::size_t safe_bytes = std::max<std::size_t>(bytes, 64U);
+        ComPtr<ID3D12Resource> dst = create_buffer(device_.Get(), D3D12_HEAP_TYPE_DEFAULT, safe_bytes, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST, label);
+        ComPtr<ID3D12Resource> up = create_buffer(device_.Get(), D3D12_HEAP_TYPE_UPLOAD, safe_bytes, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ, label);
+        void* up_ptr = nullptr;
+        D3D12_RANGE r{0, 0};
+        check(up->Map(0, &r, &up_ptr), label);
+        if (bytes > 0U && src_data != nullptr) {
+            std::memcpy(up_ptr, src_data, bytes);
+        } else {
+            std::memset(up_ptr, 0, safe_bytes);
+        }
+        up->Unmap(0, nullptr);
+        check(source_slots_[0].command_allocator->Reset(), "Reset upload allocator");
+        check(scene_command_list_->Reset(source_slots_[0].command_allocator.Get(), nullptr), "Reset upload command list");
+        scene_command_list_->CopyBufferRegion(dst.Get(), 0, up.Get(), 0, safe_bytes);
+        const auto bar = transition_barrier(dst.Get(), D3D12_RESOURCE_STATE_COPY_DEST, final_state);
+        scene_command_list_->ResourceBarrier(1, &bar);
+        check(scene_command_list_->Close(), "Close upload command list");
+        ID3D12CommandList* ulists[] = {scene_command_list_.Get()};
+        scene_queue_->ExecuteCommandLists(1, ulists);
+        const auto fv = next_scene_fence_value_++;
+        check(scene_queue_->Signal(scene_fence_.Get(), fv), "Signal upload fence");
+        wait_for_fence(scene_fence_.Get(), scene_fence_event_.get(), fv);
+        return dst;
+    };
+
+    auto build_static_blas_tlas = [&](
+        ID3D12Resource* vb,
+        UINT vertex_count,
+        ID3D12Resource* ib,
+        UINT index_offset,
+        UINT index_count,
+        ComPtr<ID3D12Resource>& out_blas,
+        ComPtr<ID3D12Resource>& out_tlas) {
+        if (dxr_tier_ < static_cast<std::int32_t>(D3D12_RAYTRACING_TIER_1_1) || !device5_ || !scene_command_list4_ || vertex_count == 0U || index_count == 0U) {
+            return;
+        }
+        D3D12_RAYTRACING_GEOMETRY_DESC geom{};
+        geom.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
+        geom.Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
+        geom.Triangles.Transform3x4 = 0;
+        geom.Triangles.IndexFormat = DXGI_FORMAT_R32_UINT;
+        geom.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
+        geom.Triangles.IndexCount = index_count;
+        geom.Triangles.VertexCount = vertex_count;
+        geom.Triangles.IndexBuffer = ib->GetGPUVirtualAddress() + static_cast<UINT64>(index_offset) * sizeof(std::uint32_t);
+        geom.Triangles.VertexBuffer.StartAddress = vb->GetGPUVirtualAddress();
+        geom.Triangles.VertexBuffer.StrideInBytes = sizeof(RangeVertex);
+
+        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS blas_in{};
+        blas_in.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+        blas_in.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+        blas_in.NumDescs = 1;
+        blas_in.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+        blas_in.pGeometryDescs = &geom;
+
+        D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO blas_info{};
+        device5_->GetRaytracingAccelerationStructurePrebuildInfo(&blas_in, &blas_info);
+        out_blas = create_buffer(device_.Get(), D3D12_HEAP_TYPE_DEFAULT, std::max<UINT64>(blas_info.ResultDataMaxSizeInBytes, 256ULL), D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE, "Create DXR BLAS");
+
+        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS tlas_in{};
+        tlas_in.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
+        tlas_in.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+        tlas_in.NumDescs = 1;
+        tlas_in.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+
+        D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO tlas_info{};
+        device5_->GetRaytracingAccelerationStructurePrebuildInfo(&tlas_in, &tlas_info);
+        out_tlas = create_buffer(device_.Get(), D3D12_HEAP_TYPE_DEFAULT, std::max<UINT64>(tlas_info.ResultDataMaxSizeInBytes, 256ULL), D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE, "Create DXR TLAS");
+
+        const UINT64 scratch_bytes = std::max<UINT64>(std::max(blas_info.ScratchDataSizeInBytes, tlas_info.ScratchDataSizeInBytes), 256ULL);
+        ComPtr<ID3D12Resource> scratch = create_buffer(device_.Get(), D3D12_HEAP_TYPE_DEFAULT, scratch_bytes, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, "Create DXR scratch");
+
+        D3D12_RAYTRACING_INSTANCE_DESC inst_desc{};
+        inst_desc.Transform[0][0] = 1.0f;
+        inst_desc.Transform[1][1] = 1.0f;
+        inst_desc.Transform[2][2] = 1.0f;
+        inst_desc.InstanceID = 0;
+        inst_desc.InstanceMask = 0xFF;
+        inst_desc.InstanceContributionToHitGroupIndex = 0;
+        inst_desc.Flags = D3D12_RAYTRACING_INSTANCE_FLAG_NONE;
+        inst_desc.AccelerationStructure = out_blas->GetGPUVirtualAddress();
+        ComPtr<ID3D12Resource> inst_upload = create_buffer(device_.Get(), D3D12_HEAP_TYPE_UPLOAD, sizeof(D3D12_RAYTRACING_INSTANCE_DESC), D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ, "Create DXR instance upload");
+        void* ip = nullptr;
+        D3D12_RANGE ir{0, 0};
+        check(inst_upload->Map(0, &ir, &ip), "Map DXR instance upload");
+        std::memcpy(ip, &inst_desc, sizeof(inst_desc));
+        inst_upload->Unmap(0, nullptr);
+        tlas_in.InstanceDescs = inst_upload->GetGPUVirtualAddress();
+
+        check(source_slots_[0].command_allocator->Reset(), "Reset DXR build allocator");
+        check(scene_command_list_->Reset(source_slots_[0].command_allocator.Get(), nullptr), "Reset DXR build command list");
+
+        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC blas_build{};
+        blas_build.DestAccelerationStructureData = out_blas->GetGPUVirtualAddress();
+        blas_build.Inputs = blas_in;
+        blas_build.ScratchAccelerationStructureData = scratch->GetGPUVirtualAddress();
+        scene_command_list4_->BuildRaytracingAccelerationStructure(&blas_build, 0, nullptr);
+
+        D3D12_RESOURCE_BARRIER blas_uav = uav_barrier(out_blas.Get());
+        scene_command_list_->ResourceBarrier(1, &blas_uav);
+
+        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC tlas_build{};
+        tlas_build.DestAccelerationStructureData = out_tlas->GetGPUVirtualAddress();
+        tlas_build.Inputs = tlas_in;
+        tlas_build.ScratchAccelerationStructureData = scratch->GetGPUVirtualAddress();
+        scene_command_list4_->BuildRaytracingAccelerationStructure(&tlas_build, 0, nullptr);
+
+        D3D12_RESOURCE_BARRIER tlas_uav = uav_barrier(out_tlas.Get());
+        scene_command_list_->ResourceBarrier(1, &tlas_uav);
+
+        check(scene_command_list_->Close(), "Close DXR build command list");
+        ID3D12CommandList* dlists[] = {scene_command_list_.Get()};
+        scene_queue_->ExecuteCommandLists(1, dlists);
+        const auto fv = next_scene_fence_value_++;
+        check(scene_queue_->Signal(scene_fence_.Get(), fv), "Signal DXR build fence");
+        wait_for_fence(scene_fence_.Get(), scene_fence_event_.get(), fv);
+    };
+
+    const auto range_lights = build_range_cluster_lights();
+    const auto range_probes = build_range_visibility_probes();
+    range_light_count_ = static_cast<std::uint32_t>(range_lights.size());
+    range_probe_count_ = static_cast<std::uint32_t>(range_probes.size());
+    range_lights_buf_ = upload_default_buffer(range_lights.data(), range_lights.size() * sizeof(GpuClusterLight), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, "Upload range cluster lights");
+    range_probes_buf_ = upload_default_buffer(range_probes.data(), range_probes.size() * sizeof(OctreeVisProbeGpu), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, "Upload range visibility probes");
+    const auto& static_range_sm = range_submeshes_[static_cast<std::size_t>(RangeMeshKind::static_world)];
+    build_static_blas_tlas(
+        range_vertex_buffer_.Get(),
+        static_cast<UINT>(pkg.vertices.size()),
+        range_index_buffer_.Get(),
+        static_range_sm.index_offset,
+        static_range_sm.index_count,
+        range_blas_,
+        range_tlas_);
+
+    dust2_map_ = load_and_build_dust2_map();
+    const UINT ext_range_slot = source_slot_count * compute_descriptors_per_source_slot + 2U + pbr_srv_descriptor_count;
+    const UINT ext_dust2_slot = ext_range_slot + ext_srv_descriptor_count;
+    auto heap_cpu_start = scene_compute_heap_->GetCPUDescriptorHandleForHeapStart();
+    D3D12_CPU_DESCRIPTOR_HANDLE range_ext_cpu{heap_cpu_start.ptr + static_cast<SIZE_T>(ext_range_slot) * shader_resource_descriptor_stride_};
+    D3D12_CPU_DESCRIPTOR_HANDLE dust2_ext_cpu{heap_cpu_start.ptr + static_cast<SIZE_T>(ext_dust2_slot) * shader_resource_descriptor_stride_};
+
+    dust2_pbr_ = create_and_upload_dust2_pbr_assets(
+        device_.Get(),
+        scene_queue_.Get(),
+        source_slots_[0].command_allocator.Get(),
+        scene_command_list_.Get(),
+        scene_fence_.Get(),
+        scene_fence_event_.get(),
+        next_scene_fence_value_,
+        dust2_map_.texture_paths,
+        dust2_ext_cpu,
+        shader_resource_descriptor_stride_);
+
+    {
+        auto write_d2_array = [&](ID3D12Resource* res, DXGI_FORMAT fmt, D3D12_CPU_DESCRIPTOR_HANDLE dst) {
+            D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+            srv.Format = fmt;
+            srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+            srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            srv.Texture2DArray.MostDetailedMip = 0;
+            srv.Texture2DArray.MipLevels = 9;
+            srv.Texture2DArray.FirstArraySlice = 0;
+            srv.Texture2DArray.ArraySize = std::max<UINT>(1U, dust2_pbr_.material_count);
+            device_->CreateShaderResourceView(res, &srv, dst);
+        };
+        D3D12_CPU_DESCRIPTOR_HANDLE rc = range_ext_cpu;
+        write_d2_array(dust2_pbr_.albedo_array.Get(), DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, rc);
+        rc.ptr += shader_resource_descriptor_stride_;
+        write_d2_array(dust2_pbr_.normal_array.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, rc);
+        rc.ptr += shader_resource_descriptor_stride_;
+        write_d2_array(dust2_pbr_.orm_array.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, rc);
+    }
+
+    if (dust2_map_.loaded) {
+        std::vector<RangeVertex> combined_d2_verts = dust2_map_.vertices;
+        std::vector<std::uint32_t> combined_d2_indices = dust2_map_.indices;
+        const auto pistol_v_base = static_cast<std::uint32_t>(combined_d2_verts.size());
+        combined_d2_verts.insert(combined_d2_verts.end(), pkg.vertices.begin(), pkg.vertices.end());
+        for (std::size_t mi = 0; mi < static_cast<std::size_t>(RangeMeshKind::count); ++mi) {
+            const auto& rsm = range_submeshes_[mi];
+            dust2_viewmodel_submeshes_[mi].index_offset = static_cast<std::uint32_t>(combined_d2_indices.size());
+            dust2_viewmodel_submeshes_[mi].index_count = rsm.index_count;
+            for (std::uint32_t ii = 0; ii < rsm.index_count; ++ii) {
+                combined_d2_indices.push_back(pistol_v_base + pkg.indices[rsm.index_offset + ii]);
+            }
+        }
+        const std::size_t d2_vb_bytes = combined_d2_verts.size() * sizeof(RangeVertex);
+        const std::size_t d2_ib_bytes = combined_d2_indices.size() * sizeof(std::uint32_t);
+        dust2_vertex_buffer_ = upload_default_buffer(combined_d2_verts.data(), d2_vb_bytes, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, "Upload Dust2 vertex buffer");
+        dust2_index_buffer_ = upload_default_buffer(combined_d2_indices.data(), d2_ib_bytes, D3D12_RESOURCE_STATE_INDEX_BUFFER | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, "Upload Dust2 index buffer");
+        dust2_vb_view_.BufferLocation = dust2_vertex_buffer_->GetGPUVirtualAddress();
+        dust2_vb_view_.SizeInBytes = static_cast<UINT>(d2_vb_bytes);
+        dust2_vb_view_.StrideInBytes = static_cast<UINT>(sizeof(RangeVertex));
+        dust2_ib_view_.BufferLocation = dust2_index_buffer_->GetGPUVirtualAddress();
+        dust2_ib_view_.SizeInBytes = static_cast<UINT>(d2_ib_bytes);
+        dust2_ib_view_.Format = DXGI_FORMAT_R32_UINT;
+
+        dust2_lights_buf_ = upload_default_buffer(dust2_map_.lights.data(), dust2_map_.lights.size() * sizeof(GpuClusterLight), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, "Upload Dust2 cluster lights");
+        dust2_probes_buf_ = upload_default_buffer(dust2_map_.probes.data(), dust2_map_.probes.size() * sizeof(OctreeVisProbeGpu), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, "Upload Dust2 octree probes");
+        build_static_blas_tlas(
+            dust2_vertex_buffer_.Get(),
+            static_cast<UINT>(dust2_map_.vertices.size()),
+            dust2_index_buffer_.Get(),
+            0U,
+            dust2_map_.lod0_total_index_count,
+            dust2_blas_,
+            dust2_tlas_);
+    }
+
+    auto write_ext_tail = [&](D3D12_CPU_DESCRIPTOR_HANDLE base_cpu, ID3D12Resource* lights_res, UINT light_cnt, ID3D12Resource* probes_res, UINT probe_cnt, ID3D12Resource* tlas_res) {
+        D3D12_CPU_DESCRIPTOR_HANDLE c{base_cpu.ptr + 3ULL * shader_resource_descriptor_stride_};
+        D3D12_SHADER_RESOURCE_VIEW_DESC lsrv{};
+        lsrv.Format = DXGI_FORMAT_UNKNOWN;
+        lsrv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        lsrv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        lsrv.Buffer.FirstElement = 0;
+        lsrv.Buffer.NumElements = std::max<UINT>(light_cnt, 1U);
+        lsrv.Buffer.StructureByteStride = sizeof(GpuClusterLight);
+        device_->CreateShaderResourceView(lights_res, &lsrv, c);
+        c.ptr += shader_resource_descriptor_stride_;
+
+        D3D12_SHADER_RESOURCE_VIEW_DESC psrv{};
+        psrv.Format = DXGI_FORMAT_UNKNOWN;
+        psrv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        psrv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        psrv.Buffer.FirstElement = 0;
+        psrv.Buffer.NumElements = std::max<UINT>(probe_cnt, 1U);
+        psrv.Buffer.StructureByteStride = sizeof(OctreeVisProbeGpu);
+        device_->CreateShaderResourceView(probes_res, &psrv, c);
+        c.ptr += shader_resource_descriptor_stride_;
+
+        if (tlas_res != nullptr && dxr_tier_ >= static_cast<std::int32_t>(D3D12_RAYTRACING_TIER_1_1)) {
+            D3D12_SHADER_RESOURCE_VIEW_DESC tsrv{};
+            tsrv.Format = DXGI_FORMAT_UNKNOWN;
+            tsrv.ViewDimension = D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE;
+            tsrv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            tsrv.RaytracingAccelerationStructure.Location = tlas_res->GetGPUVirtualAddress();
+            device_->CreateShaderResourceView(nullptr, &tsrv, c);
+        } else {
+            device_->CreateShaderResourceView(probes_res, &psrv, c);
+        }
+    };
+
+    write_ext_tail(range_ext_cpu, range_lights_buf_.Get(), range_light_count_, range_probes_buf_.Get(), range_probe_count_, range_tlas_.Get());
+    write_ext_tail(
+        dust2_ext_cpu,
+        dust2_lights_buf_ ? dust2_lights_buf_.Get() : range_lights_buf_.Get(),
+        dust2_lights_buf_ ? static_cast<UINT>(dust2_map_.lights.size()) : range_light_count_,
+        dust2_probes_buf_ ? dust2_probes_buf_.Get() : range_probes_buf_.Get(),
+        dust2_probes_buf_ ? static_cast<UINT>(dust2_map_.probes.size()) : range_probe_count_,
+        dust2_tlas_ ? dust2_tlas_.Get() : range_tlas_.Get());
 }
 
 void Renderer::create_vrs_resources() {
@@ -2997,6 +3367,9 @@ void Renderer::create_source_targets() {
         slot.tile_map_target = create_offscreen_texture(device_.Get(), tiles_x, tiles_y, DXGI_FORMAT_R8_UINT, "Create source tile map target", D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, source_slot_readable_state);
         slot.mat_gbuf0_target = create_offscreen_texture(device_.Get(), alloc_render_width_, alloc_render_height_, DXGI_FORMAT_R8G8B8A8_UNORM, "Create source thin material G-buffer 0", D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, source_slot_readable_state);
         slot.mat_gbuf1_target = create_offscreen_texture(device_.Get(), alloc_render_width_, alloc_render_height_, DXGI_FORMAT_R8G8B8A8_UNORM, "Create source thin material G-buffer 1", D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, source_slot_readable_state);
+        const UINT half_alloc_w = std::max<UINT>(1U, (alloc_render_width_ + 1U) / 2U);
+        const UINT half_alloc_h = std::max<UINT>(1U, (alloc_render_height_ + 1U) / 2U);
+        slot.half_spec_target = create_offscreen_texture(device_.Get(), half_alloc_w, half_alloc_h, DXGI_FORMAT_R16G16B16A16_FLOAT, "Create source half-res rough specular target", D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, source_slot_readable_state);
 
         device_->CreateRenderTargetView(slot.color_target.Get(), nullptr, rtv);
         rtv.ptr += render_target_descriptor_stride_;
@@ -3070,6 +3443,12 @@ void Renderer::create_source_targets() {
         compute_cpu.ptr += shader_resource_descriptor_stride_;
         uav_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
         device_->CreateUnorderedAccessView(slot.mat_gbuf1_target.Get(), nullptr, &uav_desc, compute_cpu);
+        compute_cpu.ptr += shader_resource_descriptor_stride_;
+        srv_desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        device_->CreateShaderResourceView(slot.half_spec_target.Get(), &srv_desc, compute_cpu);
+        compute_cpu.ptr += shader_resource_descriptor_stride_;
+        uav_desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        device_->CreateUnorderedAccessView(slot.half_spec_target.Get(), nullptr, &uav_desc, compute_cpu);
         compute_cpu.ptr += shader_resource_descriptor_stride_;
     }
 

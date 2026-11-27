@@ -4,8 +4,19 @@
 #include <wrl/client.h>
 
 #include <cstdint>
+#include <string>
+#include <vector>
 
 namespace frame_warp_lab {
+
+struct Dust2PbrBundle {
+    Microsoft::WRL::ComPtr<ID3D12Resource> albedo_array;
+    Microsoft::WRL::ComPtr<ID3D12Resource> normal_array;
+    Microsoft::WRL::ComPtr<ID3D12Resource> orm_array;
+    std::uint32_t material_count = 0;
+    std::int64_t build_time_ms = 0;
+    bool loaded = false;
+};
 
 struct PbrAssetBundle {
     Microsoft::WRL::ComPtr<ID3D12Resource> albedo_array;
@@ -28,6 +39,18 @@ PbrAssetBundle create_and_upload_pbr_assets(
     ID3D12Fence* fence,
     HANDLE fence_event,
     std::uint64_t& next_fence_value,
+    D3D12_CPU_DESCRIPTOR_HANDLE srv_heap_start,
+    UINT srv_descriptor_stride);
+
+Dust2PbrBundle create_and_upload_dust2_pbr_assets(
+    ID3D12Device* device,
+    ID3D12CommandQueue* upload_queue,
+    ID3D12CommandAllocator* command_allocator,
+    ID3D12GraphicsCommandList* command_list,
+    ID3D12Fence* fence,
+    HANDLE fence_event,
+    std::uint64_t& next_fence_value,
+    const std::vector<std::string>& texture_paths,
     D3D12_CPU_DESCRIPTOR_HANDLE srv_heap_start,
     UINT srv_descriptor_stride);
 

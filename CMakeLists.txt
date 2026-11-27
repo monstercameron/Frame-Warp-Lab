@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(FrameWarpLab VERSION 0.37.1 LANGUAGES C CXX)
+project(FrameWarpLab VERSION 0.38.0 LANGUAGES C CXX)
 
 if(NOT WIN32)
     message(FATAL_ERROR "Frame Warp Lab currently requires Windows and Direct3D 12.")
@@ -87,6 +87,7 @@ add_executable(frame_warp_lab WIN32
     src/lua_engine.cpp
     src/tactical_range.cpp
     src/range_mesh.cpp
+    src/dust2_scene.cpp
     src/latency_monitor.cpp
     src/streamline_backend.cpp
 )
@@ -153,14 +154,15 @@ add_dxc_shader(COMPILED_SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/selective_t
 add_dxc_shader(COMPILED_SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/selective_tiles.hlsl" tile_admit_main cs_6_0 tile_admit_cs.cso)
 add_dxc_shader(COMPILED_SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/selective_tiles.hlsl" tile_shade_main cs_6_0 tile_shade_indirect_cs.cso)
 add_dxc_shader(COMPILED_SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/range_mesh.hlsl" range_vs_main vs_6_0 range_vs.cso)
-add_dxc_shader(COMPILED_SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/range_mesh.hlsl" range_ps_main ps_6_0 range_ps.cso)
+add_dxc_shader(COMPILED_SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/range_mesh.hlsl" range_ps_main ps_6_5 range_ps.cso -DENABLE_DXR_INLINE=1)
 add_dxc_shader(COMPILED_SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/range_mesh.hlsl" range_vis_ps_main ps_6_0 range_vis_ps.cso)
 add_dxc_shader(COMPILED_SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/range_mesh.hlsl" range_transparent_ps_main ps_6_0 range_transparent_ps.cso)
 add_dxc_shader(COMPILED_SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/motion_lab.hlsl" corridor_transparent_ps_main ps_6_0 corridor_transparent_ps.cso)
-add_dxc_shader(COMPILED_SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/range_vis_par.hlsl" range_vis_classify_main cs_6_0 range_vis_classify_cs.cso)
+add_dxc_shader(COMPILED_SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/range_vis_par.hlsl" range_vis_classify_main cs_6_5 range_vis_classify_cs.cso -DENABLE_DXR_INLINE=1)
 add_dxc_shader(COMPILED_SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/range_vis_par.hlsl" range_vis_admit_main cs_6_0 range_vis_admit_cs.cso)
-add_dxc_shader(COMPILED_SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/range_vis_par.hlsl" range_vis_shade_main cs_6_0 range_vis_shade_cs.cso)
-add_dxc_shader(COMPILED_SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/range_vis_par.hlsl" range_vis_composite_main cs_6_0 range_vis_composite_cs.cso)
+add_dxc_shader(COMPILED_SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/range_vis_par.hlsl" range_vis_shade_main cs_6_5 range_vis_shade_cs.cso -DENABLE_DXR_INLINE=1)
+add_dxc_shader(COMPILED_SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/range_vis_par.hlsl" range_half_spec_main cs_6_5 range_half_spec_cs.cso -DENABLE_DXR_INLINE=1)
+add_dxc_shader(COMPILED_SHADERS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/range_vis_par.hlsl" range_vis_composite_main cs_6_5 range_vis_composite_cs.cso -DENABLE_DXR_INLINE=1)
 
 add_custom_target(frame_warp_shaders ALL DEPENDS ${COMPILED_SHADERS})
 add_dependencies(frame_warp_lab frame_warp_shaders)

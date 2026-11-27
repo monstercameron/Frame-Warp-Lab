@@ -9,6 +9,11 @@ cbuffer RangeSceneConstants : register(b0) {
     float4 previous_camera_forward_time;
     float4 muzzle_light_pos_intensity;
     float4 range_flags;
+    uint4 pad_tile_params;
+    uint4 pad_cache_params;
+    uint4 pad_policy_params;
+    uint4 pad_prev_dims;
+    uint4 world_lighting_params;
 };
 
 cbuffer RangeDrawConstants : register(b1) {
@@ -72,7 +77,7 @@ float4 project_camera_clip(float3 world_pos) {
     float vy = dot(rel, camera_up_rcp_width.xyz);
     float vz = dot(rel, camera_forward_rcp_height.xyz);
     float near_z = 0.04;
-    float far_z = 80.0;
+    float far_z = ((world_lighting_params.z & 1u) != 0u) ? 200.0 : 80.0;
     float cx = vx / max(camera_right_tan_x.w, 1e-4);
     float cy = vy / max(camera_position_tan_y.w, 1e-4);
     float cz = (far_z * (vz - near_z)) / (far_z - near_z);
@@ -117,6 +122,12 @@ SceneOutput range_ps_main(RangeVertexOut input) {
     if (eval_range_alpha_cutout_discard(input.uv, input.material_id, sflags)) {
         discard;
     }
+    if (input.material_id >= 16u) {
+        float d2_slice = clamp((float)(input.material_id - 16u), 0.0, 99.0);
+        if (dust2_albedo_array.Sample(pbr_aniso_sampler, float3(input.uv, d2_slice)).a < 0.45) {
+            discard;
+        }
+    }
     float3 shaded = shade_range_surface_pbr(
         input.world_pos,
         input.world_normal,
@@ -136,6 +147,7 @@ SceneOutput range_ps_main(RangeVertexOut input) {
         camera_position_tan_y.xyz,
         camera_forward_rcp_height.xyz,
         muzzle_light_pos_intensity,
+        world_lighting_params,
         pbr_hero_albedo,
         pbr_hero_normal,
         pbr_hero_orm,
@@ -159,6 +171,12 @@ VisBufferOut range_vis_ps_main(RangeVertexOut input, uint prim_id : SV_Primitive
     uint sflags = (uint)(range_flags.w + 0.5);
     if (eval_range_alpha_cutout_discard(input.uv, input.material_id, sflags)) {
         discard;
+    }
+    if (input.material_id >= 16u) {
+        float d2_slice = clamp((float)(input.material_id - 16u), 0.0, 99.0);
+        if (dust2_albedo_array.Sample(pbr_aniso_sampler, float3(input.uv, d2_slice)).a < 0.45) {
+            discard;
+        }
     }
     uint inst_encoded = (draw_meta.x + 1u) & 0x7Fu;
     uint vm_bit = draw_meta.y & 1u;
