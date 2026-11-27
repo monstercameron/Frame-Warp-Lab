@@ -185,6 +185,7 @@ public:
         std::atomic_ref<std::int32_t>(state_->cs_bots_alive_ct).store(t.bots_alive_ct, std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->cs_bots_alive_t).store(t.bots_alive_t, std::memory_order_release);
         std::atomic_ref<std::int32_t>(state_->cs_bot_kills).store(t.bot_kills, std::memory_order_release);
+        std::atomic_ref<std::int32_t>(state_->cs_ragdolls_active).store(t.ragdolls_active, std::memory_order_release);
     }
 
     void update_dust2_octree(const frame_warp_lab::Dust2OctreeTelemetry& d) {
@@ -1312,6 +1313,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 else if (event_code == 3) tactical_range.emit_named_event("target.force_reset");
                 else if (event_code == 4) tactical_range.emit_named_event("range.reset");
                 else if (event_code == 5) tactical_range.emit_named_event("player.jump");
+                else if (event_code == 6) tactical_range.emit_named_event("bot.test_kill");
             } else if (command == frame_warp_lab::ControlCommand::set_player_test_input) {
                 cli_player_input_mask = static_cast<std::uint32_t>(message_lparam) & 0x7FU;
             } else if (command == frame_warp_lab::ControlCommand::set_weapon) {

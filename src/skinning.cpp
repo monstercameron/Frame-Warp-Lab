@@ -187,6 +187,51 @@ inline Float3 quat_rotate(Quat4 q, Float3 v) {
     return {r.x, r.y, r.z};
 }
 
+inline Float3 vec3_norm(Float3 v, Float3 fb);
+void compute_world_matrices(
+    const std::vector<RigNode>& nodes,
+    const std::vector<Float3>& local_t,
+    const std::vector<Quat4>& local_r,
+    const std::vector<Float3>& local_s,
+    std::vector<Mat4x4>& out_world);
+
+inline Quat4 quat_from_rot3(const Mat4x4& m) {
+    const Float3 c0 = vec3_norm({m.m[0], m.m[4], m.m[8]}, {1.0f, 0.0f, 0.0f});
+    const Float3 c1 = vec3_norm({m.m[1], m.m[5], m.m[9]}, {0.0f, 1.0f, 0.0f});
+    const Float3 c2 = vec3_norm({m.m[2], m.m[6], m.m[10]}, {0.0f, 0.0f, 1.0f});
+    const float m00 = c0.x, m01 = c1.x, m02 = c2.x;
+    const float m10 = c0.y, m11 = c1.y, m12 = c2.y;
+    const float m20 = c0.z, m21 = c1.z, m22 = c2.z;
+    const float tr = m00 + m11 + m22;
+    Quat4 q{};
+    if (tr > 0.0f) {
+        const float s = std::sqrt(tr + 1.0f) * 2.0f;
+        q.w = 0.25f * s;
+        q.x = (m21 - m12) / s;
+        q.y = (m02 - m20) / s;
+        q.z = (m10 - m01) / s;
+    } else if (m00 > m11 && m00 > m22) {
+        const float s = std::sqrt(1.0f + m00 - m11 - m22) * 2.0f;
+        q.w = (m21 - m12) / s;
+        q.x = 0.25f * s;
+        q.y = (m01 + m10) / s;
+        q.z = (m02 + m20) / s;
+    } else if (m11 > m22) {
+        const float s = std::sqrt(1.0f + m11 - m00 - m22) * 2.0f;
+        q.w = (m02 - m20) / s;
+        q.x = (m01 + m10) / s;
+        q.y = 0.25f * s;
+        q.z = (m12 + m21) / s;
+    } else {
+        const float s = std::sqrt(1.0f + m22 - m00 - m11) * 2.0f;
+        q.w = (m10 - m01) / s;
+        q.x = (m02 + m20) / s;
+        q.y = (m12 + m21) / s;
+        q.z = 0.25f * s;
+    }
+    return quat_norm(q);
+}
+
 void compute_rest_world_rotations(SkinnedCharacterTemplate& tpl) {
     const std::size_t n = tpl.nodes.size();
     tpl.rest_world_rot.resize(n);
@@ -206,6 +251,136 @@ void compute_rest_world_rotations(SkinnedCharacterTemplate& tpl) {
     for (std::size_t i = 0; i < n; ++i) {
         eval_q(eval_q, i);
     }
+
+    std::vector<Float3> rt(n);
+    std::vector<Quat4> rr(n);
+    std::vector<Float3> rs(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        rt[i] = tpl.nodes[i].rest_t;
+        rr[i] = tpl.nodes[i].rest_r;
+        rs[i] = tpl.nodes[i].rest_s;
+    }
+    compute_world_matrices(tpl.nodes, rt, rr, rs, tpl.rest_node_world);
+    Mat4x4 root_xform = mat4_mul(mat4_rot_y(tpl.yaw_correction), mat4_rot_x(tpl.pitch_correction));
+    root_xform.m[0] *= tpl.root_scale;
+    root_xform.m[1] *= tpl.root_scale;
+    root_xform.m[2] *= tpl.root_scale;
+    root_xform.m[4] *= tpl.root_scale;
+    root_xform.m[5] *= tpl.root_scale;
+    root_xform.m[6] *= tpl.root_scale;
+    root_xform.m[8] *= tpl.root_scale;
+    root_xform.m[9] *= tpl.root_scale;
+    root_xform.m[10] *= tpl.root_scale;
+    root_xform.m[7] += tpl.y_offset;
+    for (auto& nw : tpl.rest_node_world) {
+        nw = mat4_mul(root_xform, nw);
+    }
+
+    const auto& bp = tpl.biped;
+    tpl.ragdoll_primary_nodes = {{
+        bp.pelvis,
+        bp.spine1 >= 0 ? bp.spine1 : bp.spine0,
+        bp.head >= 0 ? bp.head : bp.neck,
+        bp.arm_upper_l,
+        bp.arm_lower_l,
+        bp.arm_upper_r,
+        bp.arm_lower_r,
+        bp.leg_upper_l,
+        bp.leg_lower_l,
+        bp.leg_upper_r,
+        bp.leg_lower_r,
+    }};
+
+    tpl.node_ragdoll_limb.assign(n, 0U);
+    std::vector<std::int8_t> direct_limb(n, -1);
+    for (std::uint32_t li = 0; li < k_ragdoll_limb_count; ++li) {
+        const std::int32_t pn = tpl.ragdoll_primary_nodes[li];
+        if (pn >= 0 && static_cast<std::size_t>(pn) < n) {
+            direct_limb[static_cast<std::size_t>(pn)] = static_cast<std::int8_t>(li);
+        }
+    }
+    for (std::size_t i = 0; i < n; ++i) {
+        const std::string& nm = tpl.nodes[i].name;
+        if (nm.rfind("arm_lower_L", 0) == 0 || nm.rfind("hand_L", 0) == 0 || nm.rfind("weapon_hand_L", 0) == 0) direct_limb[i] = 4;
+        else if (nm.rfind("arm_upper_L", 0) == 0) direct_limb[i] = 3;
+        else if (nm.rfind("arm_lower_R", 0) == 0 || nm.rfind("hand_R", 0) == 0 || nm.rfind("weapon_hand_R", 0) == 0) direct_limb[i] = 6;
+        else if (nm.rfind("arm_upper_R", 0) == 0) direct_limb[i] = 5;
+        else if (nm.rfind("leg_lower_L", 0) == 0 || nm.rfind("ankle_L", 0) == 0 || nm.rfind("ball_L", 0) == 0 || nm.rfind("lfoot", 0) == 0) direct_limb[i] = 8;
+        else if (nm.rfind("leg_upper_L", 0) == 0 || nm.rfind("jiggle_climbinggear", 0) == 0) direct_limb[i] = 7;
+        else if (nm.rfind("leg_lower_R", 0) == 0 || nm.rfind("ankle_R", 0) == 0 || nm.rfind("ball_R", 0) == 0 || nm.rfind("rfoot", 0) == 0) direct_limb[i] = 10;
+        else if (nm.rfind("leg_upper_R", 0) == 0 || nm.rfind("jiggle_holster", 0) == 0) direct_limb[i] = 9;
+        else if (nm.rfind("head_", 0) == 0 || nm.rfind("neck_", 0) == 0) direct_limb[i] = 2;
+        else if (nm.rfind("spine_", 0) == 0 || nm.rfind("clavicle_", 0) == 0) direct_limb[i] = 1;
+        else if (nm.rfind("pelvis_", 0) == 0) direct_limb[i] = 0;
+    }
+
+    for (std::size_t i = 0; i < n; ++i) {
+        std::int32_t cur = static_cast<std::int32_t>(i);
+        std::uint8_t found = 0U;
+        for (int hop = 0; hop < 32 && cur >= 0 && static_cast<std::size_t>(cur) < n; ++hop) {
+            if (direct_limb[static_cast<std::size_t>(cur)] >= 0) {
+                found = static_cast<std::uint8_t>(direct_limb[static_cast<std::size_t>(cur)]);
+                break;
+            }
+            cur = tpl.nodes[static_cast<std::size_t>(cur)].parent;
+        }
+        tpl.node_ragdoll_limb[i] = found;
+    }
+
+    auto node_pos = [&](std::int32_t idx, Float3 fb) -> Float3 {
+        if (idx >= 0 && static_cast<std::size_t>(idx) < tpl.rest_node_world.size()) {
+            const Mat4x4& m = tpl.rest_node_world[static_cast<std::size_t>(idx)];
+            return {m.m[3], m.m[7], m.m[11]};
+        }
+        return fb;
+    };
+    auto mid_pt = [](Float3 a, Float3 b, float w = 0.5f) -> Float3 {
+        return {a.x + (b.x - a.x) * w, a.y + (b.y - a.y) * w, a.z + (b.z - a.z) * w};
+    };
+
+    const Float3 p_pelvis = node_pos(bp.pelvis, {0.0f, 0.94f, 0.0f});
+    const Float3 p_spine0 = node_pos(bp.spine0, {0.0f, 1.04f, 0.0f});
+    const Float3 p_neck = node_pos(bp.neck, {0.0f, 1.48f, 0.0f});
+    const Float3 p_head = node_pos(bp.head, {0.0f, 1.56f, 0.0f});
+    const Float3 p_aul = node_pos(bp.arm_upper_l, {0.19f, 1.42f, 0.0f});
+    const Float3 p_all = node_pos(bp.arm_lower_l, {0.42f, 1.40f, 0.0f});
+    const Float3 p_hl = node_pos(bp.hand_l, {0.64f, 1.38f, 0.0f});
+    const Float3 p_aur = node_pos(bp.arm_upper_r, {-0.19f, 1.42f, 0.0f});
+    const Float3 p_alr = node_pos(bp.arm_lower_r, {-0.42f, 1.40f, 0.0f});
+    const Float3 p_hr = node_pos(bp.hand_r, {-0.64f, 1.38f, 0.0f});
+    const Float3 p_lul = node_pos(bp.leg_upper_l, {0.10f, 0.90f, 0.0f});
+    const Float3 p_lll = node_pos(bp.leg_lower_l, {0.10f, 0.49f, 0.0f});
+    const Float3 p_akl = node_pos(bp.ankle_l, {0.10f, 0.09f, 0.0f});
+    const Float3 p_lur = node_pos(bp.leg_upper_r, {-0.10f, 0.90f, 0.0f});
+    const Float3 p_llr = node_pos(bp.leg_lower_r, {-0.10f, 0.49f, 0.0f});
+    const Float3 p_akr = node_pos(bp.ankle_r, {-0.10f, 0.09f, 0.0f});
+
+    tpl.ragdoll_rest_joint_pos = {{
+        p_pelvis,
+        p_spine0,
+        p_neck,
+        p_aul,
+        p_all,
+        p_aur,
+        p_alr,
+        p_lul,
+        p_lll,
+        p_lur,
+        p_llr,
+    }};
+    tpl.ragdoll_rest_center = {{
+        p_pelvis,
+        mid_pt(p_spine0, p_neck, 0.50f),
+        {p_head.x, p_head.y + 0.08f, p_head.z},
+        mid_pt(p_aul, p_all, 0.50f),
+        mid_pt(p_all, p_hl, 0.50f),
+        mid_pt(p_aur, p_alr, 0.50f),
+        mid_pt(p_alr, p_hr, 0.50f),
+        mid_pt(p_lul, p_lll, 0.50f),
+        mid_pt(p_lll, p_akl, 0.50f),
+        mid_pt(p_lur, p_llr, 0.50f),
+        mid_pt(p_llr, p_akr, 0.50f),
+    }};
 }
 
 void apply_valve_biped_procedural_pose(
@@ -227,7 +402,7 @@ void apply_valve_biped_procedural_pose(
     };
 
     const float t = clip_time;
-    const float breath = std::sin(t * 2.4f) * 0.025f;
+    const float breath = std::sin(t * 2.5f) * 0.022f;
     float stride_freq = 0.0f;
     float stride_amp = 0.0f;
     float crouch = 0.0f;
@@ -236,17 +411,17 @@ void apply_valve_biped_procedural_pose(
     float death_u = 0.0f;
 
     if (clip_index == 1) {
-        stride_freq = 6.5f;
-        stride_amp = 0.36f;
+        stride_freq = 6.8f;
+        stride_amp = 0.42f;
     } else if (clip_index == 2) {
-        stride_freq = 9.5f;
-        stride_amp = 0.54f;
+        stride_freq = 10.2f;
+        stride_amp = 0.62f;
     } else if (clip_index == 3) {
-        stride_freq = 6.2f;
-        stride_amp = 0.30f;
-        shoot_kick = std::fabs(std::sin(t * 16.0f)) * 0.08f;
+        stride_freq = 6.4f;
+        stride_amp = 0.34f;
+        shoot_kick = std::fabs(std::sin(t * 18.0f)) * 0.095f;
     } else if (clip_index == 4) {
-        shoot_kick = std::fabs(std::sin(t * 16.0f)) * 0.09f;
+        shoot_kick = std::fabs(std::sin(t * 18.0f)) * 0.105f;
     } else if (clip_index == 5) {
         crouch = 1.0f;
     } else if (clip_index == 6) {
@@ -257,30 +432,43 @@ void apply_valve_biped_procedural_pose(
     }
 
     const float ph = t * stride_freq;
-    const float leg_l = std::sin(ph) * stride_amp;
+    const float s_ph = std::sin(ph);
+    const float c_ph = std::cos(ph);
+    const float leg_l = s_ph * stride_amp;
     const float leg_r = -leg_l;
-    const float knee_l = std::max(0.0f, -std::cos(ph)) * stride_amp * 0.90f + crouch * 0.68f;
-    const float knee_r = std::max(0.0f, std::cos(ph)) * stride_amp * 0.90f + crouch * 0.68f;
+    const float knee_l = std::max(0.0f, -c_ph) * stride_amp * 1.05f + 0.06f + crouch * 0.78f;
+    const float knee_r = std::max(0.0f, c_ph) * stride_amp * 1.05f + 0.06f + crouch * 0.78f;
+    const float ankle_l = -leg_l * 0.35f - knee_l * 0.25f;
+    const float ankle_r = -leg_r * 0.35f - knee_r * 0.25f;
+    const float hip_twist = s_ph * stride_amp * 0.14f;
+    const float hip_sway = c_ph * stride_amp * 0.045f;
 
-    const float arm_sway = std::sin(ph) * stride_amp * 0.14f;
-    rot_world(bp.arm_upper_l, quat_mul(quat_from_axis_x(-0.58f + arm_sway - shoot_kick * 0.6f), quat_mul(quat_from_axis_y(0.32f), quat_from_axis_z(-1.05f))));
-    rot_world(bp.arm_lower_l, quat_mul(quat_from_axis_x(-0.78f), quat_from_axis_y(0.55f)));
-    rot_world(bp.arm_upper_r, quat_mul(quat_from_axis_x(-0.52f - arm_sway - shoot_kick * 0.9f), quat_mul(quat_from_axis_y(-0.26f), quat_from_axis_z(1.05f))));
-    rot_world(bp.arm_lower_r, quat_mul(quat_from_axis_x(-0.82f - shoot_kick), quat_from_axis_y(-0.48f)));
+    const float combat_blade = 0.30f;
+    rot_world(bp.spine0, quat_mul(quat_from_axis_y(combat_blade * 0.45f - hip_twist * 0.5f), quat_from_axis_x(0.08f + breath + crouch * 0.26f - flinch * 0.28f)));
+    rot_world(bp.spine1, quat_mul(quat_from_axis_y(combat_blade * 0.55f - hip_twist * 0.5f), quat_from_axis_x(0.06f + breath * 0.8f - shoot_kick * 0.55f)));
+    rot_world(bp.neck, quat_from_axis_y(-combat_blade * 0.45f));
+    rot_world(bp.head, quat_mul(quat_from_axis_y(-combat_blade * 0.55f), quat_from_axis_x(-0.08f - breath * 0.5f + flinch * 0.25f)));
 
-    rot_world(bp.leg_upper_l, quat_from_axis_x(-leg_l - crouch * 0.55f));
+    const float arm_sway = s_ph * stride_amp * 0.08f;
+    rot_world(bp.clavicle_l, quat_from_axis_y(0.14f));
+    rot_world(bp.clavicle_r, quat_from_axis_y(-0.10f));
+    rot_world(bp.arm_upper_l, quat_mul(quat_from_axis_x(-0.78f + arm_sway - shoot_kick * 0.65f), quat_mul(quat_from_axis_y(0.42f), quat_from_axis_z(-1.14f))));
+    rot_world(bp.arm_lower_l, quat_mul(quat_from_axis_x(-0.88f), quat_from_axis_y(0.72f)));
+    rot_world(bp.arm_upper_r, quat_mul(quat_from_axis_x(-0.62f - arm_sway - shoot_kick * 0.95f), quat_mul(quat_from_axis_y(-0.22f), quat_from_axis_z(1.16f))));
+    rot_world(bp.arm_lower_r, quat_mul(quat_from_axis_x(-0.95f - shoot_kick), quat_from_axis_y(-0.56f)));
+
+    rot_world(bp.leg_upper_l, quat_mul(quat_from_axis_y(0.08f), quat_from_axis_x(-leg_l - 0.06f - crouch * 0.62f)));
     rot_world(bp.leg_lower_l, quat_from_axis_x(knee_l));
-    rot_world(bp.leg_upper_r, quat_from_axis_x(-leg_r - crouch * 0.55f));
+    rot_world(bp.ankle_l, quat_from_axis_x(ankle_l));
+    rot_world(bp.leg_upper_r, quat_mul(quat_from_axis_y(-0.14f), quat_from_axis_x(-leg_r - 0.04f - crouch * 0.62f)));
     rot_world(bp.leg_lower_r, quat_from_axis_x(knee_r));
-
-    rot_world(bp.spine0, quat_from_axis_x(breath + crouch * 0.22f - flinch * 0.26f));
-    rot_world(bp.spine1, quat_from_axis_x(breath * 0.8f - shoot_kick * 0.45f));
-    rot_world(bp.head, quat_from_axis_x(-breath * 0.5f + flinch * 0.20f));
+    rot_world(bp.ankle_r, quat_from_axis_x(ankle_r));
 
     if (bp.pelvis >= 0 && static_cast<std::size_t>(bp.pelvis) < out_t.size()) {
         const auto pi = static_cast<std::size_t>(bp.pelvis);
-        const float bob_m = std::fabs(std::sin(ph)) * stride_amp * 0.045f;
-        const float drop_m = crouch * 0.34f + death_u * 0.78f - bob_m;
+        rot_world(bp.pelvis, quat_mul(quat_from_axis_y(hip_twist), quat_from_axis_z(hip_sway)));
+        const float bob_m = std::fabs(s_ph) * stride_amp * 0.055f;
+        const float drop_m = crouch * 0.36f + death_u * 0.78f - bob_m;
         const float inv_s = tpl.root_scale > 1e-4f ? (1.0f / tpl.root_scale) : 1.0f;
         const std::int32_t parent_idx = tpl.nodes[pi].parent;
         const Quat4 parent_w = (parent_idx >= 0 && static_cast<std::size_t>(parent_idx) < tpl.rest_world_rot.size())
@@ -591,16 +779,23 @@ SkinnedCharacterTemplate load_skinned_character_glb(
         if (rn.name.rfind("spine_0_", 0) == 0 && tpl.biped.spine0 < 0) tpl.biped.spine0 = ii;
         if (rn.name.rfind("spine_1_", 0) == 0 && tpl.biped.spine1 < 0) tpl.biped.spine1 = ii;
         if (rn.name.rfind("spine_2_", 0) == 0 && tpl.biped.spine2 < 0) tpl.biped.spine2 = ii;
+        if (rn.name.rfind("spine_3_", 0) == 0 && tpl.biped.spine3 < 0) tpl.biped.spine3 = ii;
         if (rn.name.rfind("neck_0_", 0) == 0 && tpl.biped.neck < 0) tpl.biped.neck = ii;
         if (rn.name.rfind("head_0_", 0) == 0 && tpl.biped.head < 0) tpl.biped.head = ii;
+        if (rn.name.rfind("clavicle_L_", 0) == 0 && tpl.biped.clavicle_l < 0) tpl.biped.clavicle_l = ii;
         if (rn.name.rfind("arm_upper_L_", 0) == 0 && rn.name.find("TWIST") == std::string::npos && tpl.biped.arm_upper_l < 0) tpl.biped.arm_upper_l = ii;
         if (rn.name.rfind("arm_lower_L_", 0) == 0 && rn.name.find("TWIST") == std::string::npos && tpl.biped.arm_lower_l < 0) tpl.biped.arm_lower_l = ii;
+        if (rn.name.rfind("hand_L_", 0) == 0 && tpl.biped.hand_l < 0) tpl.biped.hand_l = ii;
+        if (rn.name.rfind("clavicle_R_", 0) == 0 && tpl.biped.clavicle_r < 0) tpl.biped.clavicle_r = ii;
         if (rn.name.rfind("arm_upper_R_", 0) == 0 && rn.name.find("TWIST") == std::string::npos && tpl.biped.arm_upper_r < 0) tpl.biped.arm_upper_r = ii;
         if (rn.name.rfind("arm_lower_R_", 0) == 0 && rn.name.find("TWIST") == std::string::npos && tpl.biped.arm_lower_r < 0) tpl.biped.arm_lower_r = ii;
+        if (rn.name.rfind("hand_R_", 0) == 0 && tpl.biped.hand_r < 0) tpl.biped.hand_r = ii;
         if (rn.name.rfind("leg_upper_L_", 0) == 0 && rn.name.find("TWIST") == std::string::npos && tpl.biped.leg_upper_l < 0) tpl.biped.leg_upper_l = ii;
         if (rn.name.rfind("leg_lower_L_", 0) == 0 && rn.name.find("TWIST") == std::string::npos && tpl.biped.leg_lower_l < 0) tpl.biped.leg_lower_l = ii;
+        if (rn.name.rfind("ankle_L_", 0) == 0 && tpl.biped.ankle_l < 0) tpl.biped.ankle_l = ii;
         if (rn.name.rfind("leg_upper_R_", 0) == 0 && rn.name.find("TWIST") == std::string::npos && tpl.biped.leg_upper_r < 0) tpl.biped.leg_upper_r = ii;
         if (rn.name.rfind("leg_lower_R_", 0) == 0 && rn.name.find("TWIST") == std::string::npos && tpl.biped.leg_lower_r < 0) tpl.biped.leg_lower_r = ii;
+        if (rn.name.rfind("ankle_R_", 0) == 0 && tpl.biped.ankle_r < 0) tpl.biped.ankle_r = ii;
     }
 
     if (data->skins_count > 0U) {
@@ -823,7 +1018,9 @@ void evaluate_skinned_character(
     RangeVertex* out_vertices,
     Float3& out_head_local,
     Float3& out_chest_local,
-    Float3& out_muzzle_local) {
+    Float3& out_muzzle_local,
+    std::array<RagdollLimbPose, k_ragdoll_limb_count>* out_limb_poses,
+    Float3* out_hand_r_local) {
     const std::size_t node_count = tpl.nodes.size();
     std::vector<Float3> t_cur(node_count);
     std::vector<Quat4> r_cur(node_count);
@@ -838,8 +1035,8 @@ void evaluate_skinned_character(
     } else if (pose.clip_index >= 0 && static_cast<std::size_t>(pose.clip_index) < tpl.clips.size()) {
         sample_clip_trs(tpl.clips[static_cast<std::size_t>(pose.clip_index)], pose.clip_time, pose.loop_clip, t_cur, r_cur, s_cur);
     }
-    if (!tpl.procedural_valve_biped
-        && pose.prev_clip_index >= 0
+    if (pose.prev_clip_index >= 0
+        && pose.prev_clip_index != pose.clip_index
         && static_cast<std::size_t>(pose.prev_clip_index) < tpl.clips.size()
         && pose.blend_alpha < 0.995f) {
         std::vector<Float3> t_prev(node_count);
@@ -850,7 +1047,11 @@ void evaluate_skinned_character(
             r_prev[i] = tpl.nodes[i].rest_r;
             s_prev[i] = tpl.nodes[i].rest_s;
         }
-        sample_clip_trs(tpl.clips[static_cast<std::size_t>(pose.prev_clip_index)], pose.prev_clip_time, true, t_prev, r_prev, s_prev);
+        if (tpl.procedural_valve_biped) {
+            apply_valve_biped_procedural_pose(tpl, pose.prev_clip_index, pose.prev_clip_time, t_prev, r_prev);
+        } else {
+            sample_clip_trs(tpl.clips[static_cast<std::size_t>(pose.prev_clip_index)], pose.prev_clip_time, true, t_prev, r_prev, s_prev);
+        }
         const float a = std::clamp(pose.blend_alpha, 0.0f, 1.0f);
         for (std::size_t i = 0; i < node_count; ++i) {
             t_cur[i] = {
@@ -954,7 +1155,126 @@ void evaluate_skinned_character(
     if (tpl.weapon_node_index >= 0 && static_cast<std::size_t>(tpl.weapon_node_index) < node_world.size()) {
         const Mat4x4& wm = node_world[static_cast<std::size_t>(tpl.weapon_node_index)];
         out_muzzle_local = {wm.m[3], wm.m[7] + 0.04f, wm.m[11] + 0.25f};
+        if (out_hand_r_local != nullptr) {
+            *out_hand_r_local = {wm.m[3], wm.m[7], wm.m[11]};
+        }
+    } else if (out_hand_r_local != nullptr) {
+        if (tpl.biped.hand_r >= 0 && static_cast<std::size_t>(tpl.biped.hand_r) < node_world.size()) {
+            const Mat4x4& hm = node_world[static_cast<std::size_t>(tpl.biped.hand_r)];
+            *out_hand_r_local = {hm.m[3], hm.m[7], hm.m[11]};
+        } else {
+            *out_hand_r_local = {0.14f, 1.24f, 0.22f};
+        }
     }
+
+    if (out_limb_poses != nullptr && tpl.rest_node_world.size() == node_world.size()) {
+        for (std::uint32_t li = 0; li < k_ragdoll_limb_count; ++li) {
+            const std::int32_t pn = tpl.ragdoll_primary_nodes[li];
+            RagdollLimbPose lp{};
+            lp.pos = tpl.ragdoll_rest_center[li];
+            if (pn >= 0 && static_cast<std::size_t>(pn) < node_world.size()) {
+                const Mat4x4& mc = node_world[static_cast<std::size_t>(pn)];
+                const Mat4x4& mr = tpl.rest_node_world[static_cast<std::size_t>(pn)];
+                const Quat4 qc = quat_from_rot3(mc);
+                const Quat4 qr = quat_from_rot3(mr);
+                const Quat4 qd = quat_mul(qc, quat_conj(qr));
+                const Float3 pc{mc.m[3], mc.m[7], mc.m[11]};
+                const Float3 pr{mr.m[3], mr.m[7], mr.m[11]};
+                const Float3 off{
+                    tpl.ragdoll_rest_center[li].x - pr.x,
+                    tpl.ragdoll_rest_center[li].y - pr.y,
+                    tpl.ragdoll_rest_center[li].z - pr.z};
+                const Float3 rot_off = quat_rotate(qd, off);
+                lp.pos = {pc.x + rot_off.x, pc.y + rot_off.y, pc.z + rot_off.z};
+                lp.qx = qd.x;
+                lp.qy = qd.y;
+                lp.qz = qd.z;
+                lp.qw = qd.w;
+            }
+            (*out_limb_poses)[li] = lp;
+        }
+    }
+}
+
+void evaluate_ragdoll_skinned_character(
+    const SkinnedCharacterTemplate& tpl,
+    const std::array<RagdollLimbPose, k_ragdoll_limb_count>& world_limb_poses,
+    RangeVertex* out_vertices,
+    Float3& out_head_world,
+    Float3& out_chest_world,
+    Float3& out_hand_r_world) {
+    const std::size_t node_count = tpl.nodes.size();
+    if (tpl.rest_node_world.size() != node_count || tpl.node_ragdoll_limb.size() != node_count) {
+        return;
+    }
+    std::array<Mat4x4, k_ragdoll_limb_count> limb_deltas{};
+    for (std::uint32_t li = 0; li < k_ragdoll_limb_count; ++li) {
+        const auto& lp = world_limb_poses[li];
+        const Quat4 q = quat_norm({lp.qx, lp.qy, lp.qz, lp.qw});
+        const Mat4x4 rot_m = mat4_trs({0.0f, 0.0f, 0.0f}, q, {1.0f, 1.0f, 1.0f});
+        const Float3 rc = tpl.ragdoll_rest_center[li];
+        const Float3 r_rc = mat4_dir(rot_m, rc);
+        Mat4x4 d = rot_m;
+        d.m[3] = lp.pos.x - r_rc.x;
+        d.m[7] = lp.pos.y - r_rc.y;
+        d.m[11] = lp.pos.z - r_rc.z;
+        limb_deltas[li] = d;
+    }
+
+    std::vector<Mat4x4> node_world(node_count);
+    for (std::size_t i = 0; i < node_count; ++i) {
+        const std::uint8_t li = tpl.node_ragdoll_limb[i] < k_ragdoll_limb_count ? tpl.node_ragdoll_limb[i] : 0U;
+        node_world[i] = mat4_mul(limb_deltas[li], tpl.rest_node_world[i]);
+    }
+
+    const std::size_t jcount = tpl.joint_nodes.size();
+    std::vector<Mat4x4> skin_mats(jcount, mat4_identity());
+    for (std::size_t ji = 0; ji < jcount; ++ji) {
+        const std::int32_t ni = tpl.joint_nodes[ji];
+        if (ni >= 0 && static_cast<std::size_t>(ni) < node_world.size()) {
+            skin_mats[ji] = mat4_mul(node_world[static_cast<std::size_t>(ni)], tpl.inverse_bind_matrices[ji]);
+        }
+    }
+
+    const std::size_t vcount = tpl.source_vertices.size();
+    for (std::size_t vi = 0; vi < vcount; ++vi) {
+        const SkinnedSourceVertex& sv = tpl.source_vertices[vi];
+        Float3 p{0.0f, 0.0f, 0.0f};
+        Float3 n{0.0f, 0.0f, 0.0f};
+        Float3 t{0.0f, 0.0f, 0.0f};
+        if (sv.rigid_node_index >= 0 && static_cast<std::size_t>(sv.rigid_node_index) < node_world.size()) {
+            const Mat4x4& nm = node_world[static_cast<std::size_t>(sv.rigid_node_index)];
+            p = mat4_point(nm, sv.pos);
+            n = mat4_dir(nm, sv.normal);
+            t = mat4_dir(nm, sv.tangent);
+        } else if (!skin_mats.empty()) {
+            for (int k = 0; k < 4; ++k) {
+                const float w = sv.weights[k];
+                if (w <= 1e-5f) continue;
+                const std::size_t ji = sv.joints[k] < skin_mats.size() ? sv.joints[k] : 0U;
+                const Mat4x4& sm = skin_mats[ji];
+                const Float3 sp = mat4_point(sm, sv.pos);
+                const Float3 sn = mat4_dir(sm, sv.normal);
+                const Float3 st = mat4_dir(sm, sv.tangent);
+                p.x += sp.x * w; p.y += sp.y * w; p.z += sp.z * w;
+                n.x += sn.x * w; n.y += sn.y * w; n.z += sn.z * w;
+                t.x += st.x * w; t.y += st.y * w; t.z += st.z * w;
+            }
+        }
+        const Float3 nn = vec3_norm(n);
+        const Float3 tt = vec3_norm(t, {1.0f, 0.0f, 0.0f});
+        out_vertices[vi] = {
+            p.x, p.y, p.z,
+            nn.x, nn.y, nn.z,
+            tt.x, tt.y, tt.z,
+            sv.u, sv.v,
+            sv.material_id,
+            sv.emissive};
+    }
+
+    out_head_world = world_limb_poses[2].pos;
+    out_chest_world = world_limb_poses[1].pos;
+    out_hand_r_world = world_limb_poses[6].pos;
 }
 
 }

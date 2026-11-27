@@ -103,6 +103,7 @@ struct EcsLuaTelemetry {
     std::int32_t bots_alive_ct = 0;
     std::int32_t bots_alive_t = 0;
     std::int32_t bot_kills = 0;
+    std::int32_t ragdolls_active = 0;
 };
 
 struct TacticalHudSnapshot {

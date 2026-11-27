@@ -17,6 +17,8 @@
 #include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
 #include <Jolt/Physics/Collision/Shape/CylinderShape.h>
 #include <Jolt/Physics/Collision/Shape/MeshShape.h>
+#include <Jolt/Physics/Collision/Shape/SphereShape.h>
+#include <Jolt/Physics/Collision/GroupFilterTable.h>
 #include <Jolt/Physics/Collision/RayCast.h>
 #include <Jolt/Physics/Collision/CastResult.h>
 #include <Jolt/Physics/Collision/ShapeCast.h>
@@ -26,6 +28,7 @@
 #include <Jolt/Physics/Body/BodyActivationListener.h>
 #include <Jolt/Physics/Body/BodyFilter.h>
 #include <Jolt/Physics/Constraints/HingeConstraint.h>
+#include <Jolt/Physics/Constraints/SwingTwistConstraint.h>
 
 #include <algorithm>
 #include <array>
@@ -107,10 +110,19 @@ struct CasingPhysicsBinding {
     JPH::BodyID body_id{};
 };
 
+struct BotRagdollState {
+    bool active = false;
+    float age = 0.0f;
+    std::array<JPH::BodyID, k_ragdoll_limb_count> bodies{};
+    std::array<JPH::Ref<JPH::Constraint>, k_ragdoll_limb_count - 1U> constraints{};
+};
+
 class PlayerCollisionBodyFilter final : public JPH::BodyFilter {
 public:
-    explicit PlayerCollisionBodyFilter(const std::array<CasingPhysicsBinding, k_range_casing_count>& casings)
-        : casings_(casings) {}
+    explicit PlayerCollisionBodyFilter(
+        const std::array<CasingPhysicsBinding, k_range_casing_count>& casings,
+        const std::array<BotRagdollState, 8>* ragdolls = nullptr)
+        : casings_(casings), ragdolls_(ragdolls) {}
 
     bool ShouldCollide(const JPH::BodyID& id) const override {
         for (const auto& c : casings_) {
@@ -118,11 +130,22 @@ public:
                 return false;
             }
         }
+        if (ragdolls_ != nullptr) {
+            for (const auto& rd : *ragdolls_) {
+                if (!rd.active) continue;
+                for (const auto& bid : rd.bodies) {
+                    if (!bid.IsInvalid() && bid == id) {
+                        return false;
+                    }
+                }
+            }
+        }
         return true;
     }
 
 private:
     const std::array<CasingPhysicsBinding, k_range_casing_count>& casings_;
+    const std::array<BotRagdollState, 8>* ragdolls_;
 };
 
 Mat4x4 identity_mat4() {
@@ -335,6 +358,12 @@ struct TacticalRangeSimulation::Impl {
     EntityHandle weapon_dual_left_entity = k_invalid_entity;
     EntityHandle cs_match_entity = k_invalid_entity;
     std::array<EntityHandle, 8> bot_entities{};
+    std::array<EntityHandle, 8> bot_weapon_entities{};
+    std::array<BotRagdollState, 8> bot_ragdolls{};
+    std::array<std::array<RagdollLimbPose, k_ragdoll_limb_count>, 8> bot_last_limb_poses{};
+    std::array<bool, 8> bot_has_limb_poses{};
+    std::array<Float3, 8> bot_hand_r_local{};
+    JPH::Ref<JPH::GroupFilterTable> ragdoll_group_filter;
     EntityHandle muzzle_flash_entity = k_invalid_entity;
     EntityHandle tracer_entity = k_invalid_entity;
     EntityHandle spark_entity = k_invalid_entity;
@@ -399,11 +428,210 @@ struct TacticalRangeSimulation::Impl {
 
     Impl() {
         ensure_jolt_initialized();
-        physics.Init(512, 0, 512, 512, bp_interface, obj_vs_bp_filter, obj_pair_filter);
+        physics.Init(1024, 0, 2048, 2048, bp_interface, obj_vs_bp_filter, obj_pair_filter);
         physics.SetGravity(JPH::Vec3(0.0f, -9.81f, 0.0f));
+        ragdoll_group_filter = new JPH::GroupFilterTable(k_ragdoll_limb_count);
+        for (JPH::CollisionGroup::SubGroupID a = 0; a < k_ragdoll_limb_count; ++a) {
+            for (JPH::CollisionGroup::SubGroupID b = a + 1; b < k_ragdoll_limb_count; ++b) {
+                ragdoll_group_filter->DisableCollision(a, b);
+            }
+        }
         build_physics_and_ecs();
         register_engine_event_bridges();
         initialize_lua();
+    }
+
+    ~Impl() {
+        destroy_all_ragdolls();
+    }
+
+    void destroy_bot_ragdoll(std::size_t bi) {
+        if (bi >= bot_ragdolls.size()) return;
+        BotRagdollState& rd = bot_ragdolls[bi];
+        if (!rd.active) return;
+        for (auto& c : rd.constraints) {
+            if (c != nullptr) {
+                physics.RemoveConstraint(c);
+                c = nullptr;
+            }
+        }
+        auto& body_if = physics.GetBodyInterface();
+        for (auto& bid : rd.bodies) {
+            if (!bid.IsInvalid()) {
+                body_if.RemoveBody(bid);
+                body_if.DestroyBody(bid);
+                bid = JPH::BodyID();
+            }
+        }
+        rd.active = false;
+        rd.age = 0.0f;
+    }
+
+    void destroy_all_ragdolls() {
+        for (std::size_t bi = 0; bi < bot_ragdolls.size(); ++bi) {
+            destroy_bot_ragdoll(bi);
+        }
+    }
+
+    void spawn_bot_ragdoll(std::size_t bi, Float3 hit_dir, float damage, bool headshot) {
+        if (bi >= bot_ragdolls.size()) return;
+        destroy_bot_ragdoll(bi);
+        const BotComponent* bc = ecs.bots().try_get(bot_entities[bi]);
+        const SkinnedCharacterTemplate* tpl = (bi < 4U) ? ct_bot_template : t_bot_template;
+        if (bc == nullptr || tpl == nullptr || !tpl->loaded) return;
+
+        const Mat4x4 bot_world = mul_mat4(
+            make_translation_mat4(bc->pos.x, bc->pos.y, bc->pos.z),
+            make_rot_y(bc->yaw));
+        const JPH::Quat bot_q = JPH::Quat::sRotation(JPH::Vec3::sAxisY(), bc->yaw);
+
+        struct LimbSpec {
+            bool is_sphere;
+            float r;
+            float hh;
+            float mass;
+            bool horiz_x;
+        };
+        const std::array<LimbSpec, k_ragdoll_limb_count> specs = {{
+            {false, 0.13f, 0.06f, 16.0f, false},
+            {false, 0.14f, 0.14f, 22.0f, false},
+            {true,  0.115f, 0.0f,  5.0f, false},
+            {true,  0.075f, 0.0f,  3.5f, false},
+            {true,  0.065f, 0.0f,  2.5f, false},
+            {true,  0.075f, 0.0f,  3.5f, false},
+            {true,  0.065f, 0.0f,  2.5f, false},
+            {false, 0.075f, 0.14f, 9.0f, false},
+            {false, 0.062f, 0.14f, 5.5f, false},
+            {false, 0.075f, 0.14f, 9.0f, false},
+            {false, 0.062f, 0.14f, 5.5f, false},
+        }};
+
+        auto& body_if = physics.GetBodyInterface();
+        BotRagdollState& rd = bot_ragdolls[bi];
+        std::array<JPH::Body*, k_ragdoll_limb_count> created_bodies{};
+        std::array<JPH::RVec3, k_ragdoll_limb_count> world_centers{};
+        std::array<JPH::Quat, k_ragdoll_limb_count> world_rots{};
+
+        for (std::uint32_t li = 0; li < k_ragdoll_limb_count; ++li) {
+            RagdollLimbPose lp{};
+            if (bot_has_limb_poses[bi]) {
+                lp = bot_last_limb_poses[bi][li];
+            } else {
+                lp.pos = tpl->ragdoll_rest_center[li];
+            }
+            const Float3 wp = transform_point(bot_world, lp.pos);
+            const JPH::Quat lq = JPH::Quat(lp.qx, lp.qy, lp.qz, lp.qw).Normalized();
+            const JPH::Quat wq = (bot_q * lq).Normalized();
+            world_centers[li] = JPH::RVec3(wp.x, wp.y, wp.z);
+            world_rots[li] = wq;
+
+            JPH::RefConst<JPH::Shape> shape;
+            if (specs[li].is_sphere) {
+                shape = new JPH::SphereShape(specs[li].r);
+            } else {
+                shape = new JPH::CapsuleShape(specs[li].hh, specs[li].r);
+            }
+            JPH::BodyCreationSettings bcs(
+                shape,
+                world_centers[li],
+                wq,
+                JPH::EMotionType::Dynamic,
+                Layers::MOVING);
+            bcs.mOverrideMassProperties = JPH::EOverrideMassProperties::CalculateInertia;
+            bcs.mMassPropertiesOverride.mMass = specs[li].mass;
+            bcs.mLinearDamping = 0.28f;
+            bcs.mAngularDamping = 0.55f;
+            bcs.mFriction = 0.78f;
+            bcs.mRestitution = 0.06f;
+            bcs.mCollisionGroup = JPH::CollisionGroup(
+                ragdoll_group_filter,
+                static_cast<JPH::CollisionGroup::GroupID>(100U + bi),
+                static_cast<JPH::CollisionGroup::SubGroupID>(li));
+            JPH::Body* body = body_if.CreateBody(bcs);
+            if (body != nullptr) {
+                body_if.AddBody(body->GetID(), JPH::EActivation::Activate);
+                rd.bodies[li] = body->GetID();
+                created_bodies[li] = body;
+            }
+        }
+
+        struct JointDef {
+            std::uint32_t parent;
+            std::uint32_t child;
+            float cone_rad;
+            float twist_rad;
+        };
+        const std::array<JointDef, k_ragdoll_limb_count - 1U> jdefs = {{
+            {0, 1, 0.38f, 0.32f},
+            {1, 2, 0.45f, 0.45f},
+            {1, 3, 0.85f, 0.55f},
+            {3, 4, 0.65f, 0.25f},
+            {1, 5, 0.85f, 0.55f},
+            {5, 6, 0.65f, 0.25f},
+            {0, 7, 0.72f, 0.30f},
+            {7, 8, 0.68f, 0.15f},
+            {0, 9, 0.72f, 0.30f},
+            {9, 10, 0.68f, 0.15f},
+        }};
+
+        for (std::size_t ji = 0; ji < jdefs.size(); ++ji) {
+            const auto& jd = jdefs[ji];
+            JPH::Body* pb = created_bodies[jd.parent];
+            JPH::Body* cb = created_bodies[jd.child];
+            if (pb == nullptr || cb == nullptr) continue;
+            const Float3 rest_joint = tpl->ragdoll_rest_joint_pos[jd.child];
+            const Float3 rest_c = tpl->ragdoll_rest_center[jd.child];
+            const JPH::Vec3 off(rest_joint.x - rest_c.x, rest_joint.y - rest_c.y, rest_joint.z - rest_c.z);
+            const JPH::RVec3 pivot = world_centers[jd.child] + world_rots[jd.child] * off;
+            JPH::Vec3 twist_axis = JPH::Vec3(world_centers[jd.child] - world_centers[jd.parent]);
+            if (twist_axis.LengthSq() < 1e-5f) {
+                twist_axis = JPH::Vec3::sAxisY();
+            } else {
+                twist_axis = twist_axis.Normalized();
+            }
+            JPH::Vec3 ref_axis = std::fabs(twist_axis.GetY()) < 0.9f ? JPH::Vec3::sAxisY() : JPH::Vec3::sAxisX();
+            JPH::Vec3 plane_axis = twist_axis.Cross(ref_axis).Normalized();
+
+            JPH::SwingTwistConstraintSettings cs;
+            cs.mSpace = JPH::EConstraintSpace::WorldSpace;
+            cs.mPosition1 = pivot;
+            cs.mPosition2 = pivot;
+            cs.mTwistAxis1 = twist_axis;
+            cs.mTwistAxis2 = twist_axis;
+            cs.mPlaneAxis1 = plane_axis;
+            cs.mPlaneAxis2 = plane_axis;
+            cs.mNormalHalfConeAngle = jd.cone_rad;
+            cs.mPlaneHalfConeAngle = jd.cone_rad;
+            cs.mTwistMinAngle = -jd.twist_rad;
+            cs.mTwistMaxAngle = jd.twist_rad;
+            cs.mMaxFrictionTorque = 6.5f;
+            JPH::Constraint* c = cs.Create(*pb, *cb);
+            if (c != nullptr) {
+                physics.AddConstraint(c);
+                rd.constraints[ji] = c;
+            }
+        }
+
+        const float dlen = std::sqrt(hit_dir.x * hit_dir.x + hit_dir.y * hit_dir.y + hit_dir.z * hit_dir.z);
+        const Float3 dn = dlen > 1e-4f
+            ? Float3{hit_dir.x / dlen, hit_dir.y / dlen, hit_dir.z / dlen}
+            : Float3{0.0f, 0.2f, 1.0f};
+        const float strength = std::clamp(damage * 0.65f, 38.0f, 115.0f);
+        if (headshot && !rd.bodies[2].IsInvalid()) {
+            body_if.AddImpulse(rd.bodies[2], JPH::Vec3(dn.x * strength * 0.55f, (dn.y + 0.32f) * strength * 0.40f, dn.z * strength * 0.55f));
+            if (!rd.bodies[1].IsInvalid()) {
+                body_if.AddImpulse(rd.bodies[1], JPH::Vec3(dn.x * strength * 0.70f, 12.0f, dn.z * strength * 0.70f));
+            }
+        } else {
+            if (!rd.bodies[1].IsInvalid()) {
+                body_if.AddImpulse(rd.bodies[1], JPH::Vec3(dn.x * strength, (dn.y + 0.22f) * strength * 0.45f, dn.z * strength));
+            }
+            if (!rd.bodies[0].IsInvalid()) {
+                body_if.AddImpulse(rd.bodies[0], JPH::Vec3(dn.x * strength * 0.55f, 8.0f, dn.z * strength * 0.55f));
+            }
+        }
+        rd.active = true;
+        rd.age = 0.0f;
     }
 
     void add_static_box(Float3 center, Float3 half_extents) {
@@ -482,6 +710,7 @@ struct TacticalRangeSimulation::Impl {
         if (dust2_world_active == is_dust2) {
             return;
         }
+        destroy_all_ragdolls();
         dust2_world_active = is_dust2;
         auto& bi = physics.GetBodyInterface();
         if (is_dust2) {
@@ -597,6 +826,11 @@ struct TacticalRangeSimulation::Impl {
             bc.active = false;
             ecs.bots().emplace(be, bc);
             bot_entities[bi] = be;
+            const std::string bwname = (is_ct ? "bot_fbi_gun_" : "bot_t_gun_") + std::to_string(bi % 4U);
+            const RangeMeshKind gwkind = is_ct ? RangeMeshKind::weapon_smg : RangeMeshKind::weapon_rifle;
+            const char* gwuri = is_ct ? "assets/models/weapons/mp5.glb" : "assets/models/weapons/ak47.glb";
+            bot_weapon_entities[bi] = spawn_render_entity(bwname.c_str(), "bot_weapon", gwuri, gwkind, false, false);
+            bot_hand_r_local[bi] = {0.14f, 1.24f, 0.24f};
         }
 
         auto& bi = physics.GetBodyInterface();
@@ -784,6 +1018,22 @@ struct TacticalRangeSimulation::Impl {
     }
 
     void register_engine_event_bridges() {
+        events.subscribe("bot.killed", [this](const std::string&, const EventPayload& payload) {
+            const auto ent = static_cast<EntityHandle>(payload.get_u64("entity", k_invalid_entity));
+            for (std::size_t bi = 0; bi < bot_entities.size(); ++bi) {
+                if (bot_entities[bi] == ent) {
+                    const Float3 dir{
+                        static_cast<float>(payload.get_number("hit_dir_x", 1.0)),
+                        static_cast<float>(payload.get_number("hit_dir_y", 0.18)),
+                        static_cast<float>(payload.get_number("hit_dir_z", 0.0))};
+                    const auto dmg = static_cast<float>(payload.get_number("damage", 80.0));
+                    const bool hs = payload.get_bool("headshot", false);
+                    spawn_bot_ragdoll(bi, dir, dmg, hs);
+                    break;
+                }
+            }
+        }, 0U);
+
         events.subscribe("shell.eject_requested", [this](const std::string&, const EventPayload& payload) {
             const WeaponComponent* w = ecs.weapons().try_get(weapon_entity);
             if (w == nullptr) return;
@@ -832,7 +1082,7 @@ struct TacticalRangeSimulation::Impl {
             JPH::RayCastSettings rcs{};
             rcs.mBackFaceModeTriangles = JPH::EBackFaceMode::CollideWithBackFaces;
             JPH::ClosestHitCollisionCollector<JPH::CastRayCollector> collector;
-            PlayerCollisionBodyFilter bfilter(casings);
+            PlayerCollisionBodyFilter bfilter(casings, &bot_ragdolls);
             physics.GetNarrowPhaseQuery().CastRay(ray, rcs, collector, {}, {}, bfilter);
             const bool did_hit = collector.HadHit();
             float best_dist = did_hit ? (collector.mHit.mFraction * max_ray_dist) : max_ray_dist;
@@ -895,6 +1145,9 @@ struct TacticalRangeSimulation::Impl {
                 bev.set_number("hit_x", tracer_end.x);
                 bev.set_number("hit_y", tracer_end.y);
                 bev.set_number("hit_z", tracer_end.z);
+                bev.set_number("hit_dir_x", ray_dir.x);
+                bev.set_number("hit_dir_y", ray_dir.y);
+                bev.set_number("hit_dir_z", ray_dir.z);
                 events.emit("bot.damaged", bev);
             } else if (did_hit) {
                 const JPH::RVec3 hp_jolt = ray.GetPointOnRay(collector.mHit.mFraction);
@@ -1025,7 +1278,7 @@ struct TacticalRangeSimulation::Impl {
             JPH::RayCastSettings rcs{};
             rcs.mBackFaceModeTriangles = JPH::EBackFaceMode::CollideWithBackFaces;
             JPH::ClosestHitCollisionCollector<JPH::CastRayCollector> collector;
-            PlayerCollisionBodyFilter bfilter(casings);
+            PlayerCollisionBodyFilter bfilter(casings, &bot_ragdolls);
             physics.GetNarrowPhaseQuery().CastRay(ray, rcs, collector, {}, {}, bfilter);
             if (collector.HadHit()) {
                 out.hit = true;
@@ -1088,7 +1341,7 @@ struct TacticalRangeSimulation::Impl {
             };
 
             OpposingShapeCastCollector collector(disp_dir);
-            PlayerCollisionBodyFilter bfilter(casings);
+            PlayerCollisionBodyFilter bfilter(casings, &bot_ragdolls);
             physics.GetNarrowPhaseQuery().CastShape(shape_cast, scs, JPH::RVec3::sZero(), collector, {}, {}, bfilter);
             if (collector.has_hit_) {
                 out.hit = true;
@@ -1111,7 +1364,7 @@ struct TacticalRangeSimulation::Impl {
             css.mBackFaceMode = JPH::EBackFaceMode::CollideWithBackFaces;
             css.mActiveEdgeMode = JPH::EActiveEdgeMode::CollideOnlyWithActive;
             css.mMaxSeparationDistance = 0.0f;
-            PlayerCollisionBodyFilter bfilter(casings);
+            PlayerCollisionBodyFilter bfilter(casings, &bot_ragdolls);
             JPH::RVec3 cur_center(center.x, center.y, center.z);
             bool any_hit = false;
             for (int iter = 0; iter < 4; ++iter) {
@@ -1170,6 +1423,7 @@ struct TacticalRangeSimulation::Impl {
     }
 
     void reset_state() {
+        destroy_all_ragdolls();
         events.emit("range.reset");
         tracer_timer = 0.0f;
         impact_timer = 0.0f;
@@ -1212,6 +1466,21 @@ struct TacticalRangeSimulation::Impl {
         events.flush();
         lua.step(static_cast<double>(dt));
         events.flush();
+
+        for (std::size_t bi = 0; bi < bot_entities.size(); ++bi) {
+            BotComponent* bc = ecs.bots().try_get(bot_entities[bi]);
+            if (bc == nullptr) continue;
+            if (bc->anim_blend < 1.0f) {
+                bc->anim_blend = std::min(1.0f, bc->anim_blend + dt * 7.5f);
+            }
+            if (bot_ragdolls[bi].active) {
+                if (!bc->active || bc->alive) {
+                    destroy_bot_ragdoll(bi);
+                } else {
+                    bot_ragdolls[bi].age += dt;
+                }
+            }
+        }
 
         const auto phys_t0 = std::chrono::steady_clock::now();
         constexpr double fixed_step = 1.0 / 240.0;
@@ -1422,19 +1691,43 @@ struct TacticalRangeSimulation::Impl {
 
         for (std::uint32_t bot_idx = 0; bot_idx < 8U; ++bot_idx) {
             const EntityHandle be = bot_entities[bot_idx];
+            const EntityHandle bwe = bot_weapon_entities[bot_idx];
             BotComponent* bc = ecs.bots().try_get(be);
             if (bc == nullptr) continue;
+            const bool is_vis = bc->active && (bot_vb_counts[bot_idx] > 0U);
             if (auto* br = ecs.renderables().try_get(be)) {
-                br->visible = bc->active && (bot_vb_counts[bot_idx] > 0U);
+                br->visible = is_vis;
                 const float hf = bc->hit_flash;
                 br->tint = {1.0f, 1.0f - 0.55f * hf, 1.0f - 0.60f * hf};
                 br->emissive = hf * 1.1f;
             }
+            if (auto* bwr = ecs.renderables().try_get(bwe)) {
+                bwr->visible = is_vis;
+                bwr->tint = {1.0f, 1.0f, 1.0f};
+                bwr->emissive = 0.0f;
+            }
             if (bc->active) {
-                const Mat4x4 bw = mul_mat4(
-                    make_translation_mat4(bc->pos.x, bc->pos.y, bc->pos.z),
-                    make_rot_y(bc->yaw));
-                update_entity_xform(be, bw, false, bw);
+                if (bot_ragdolls[bot_idx].active) {
+                    const Mat4x4 idm = identity_mat4();
+                    update_entity_xform(be, idm, false, idm);
+                    const JPH::BodyID rhand_body = bot_ragdolls[bot_idx].bodies[6];
+                    if (!rhand_body.IsInvalid()) {
+                        const Mat4x4 rw = from_jolt_mat44(bi.GetWorldTransform(rhand_body));
+                        const Mat4x4 gw = mul_mat4(rw, make_translation_mat4(0.0f, -0.05f, 0.16f));
+                        update_entity_xform(bwe, gw, false, gw);
+                    }
+                } else {
+                    const Mat4x4 bw = mul_mat4(
+                        make_translation_mat4(bc->pos.x, bc->pos.y, bc->pos.z),
+                        make_rot_y(bc->yaw));
+                    update_entity_xform(be, bw, false, bw);
+                    const Float3 hl = bot_hand_r_local[bot_idx];
+                    const Mat4x4 gun_l = mul_mat4(
+                        make_translation_mat4(hl.x - 0.02f, hl.y + 0.03f, hl.z + 0.10f),
+                        mul_mat4(make_rot_x(-bc->aim_pitch), make_scale_mat4(0.95f, 0.95f, 0.95f)));
+                    const Mat4x4 gw = mul_mat4(bw, gun_l);
+                    update_entity_xform(bwe, gw, false, gw);
+                }
             }
         }
     }
@@ -1710,12 +2003,16 @@ EcsLuaTelemetry TacticalRangeSimulation::ecs_lua_telemetry() const {
     const PlayerControllerComponent* p = impl_->ecs.players().try_get(impl_->player_entity);
     std::int32_t alive_ct = 0;
     std::int32_t alive_t = 0;
-    for (EntityHandle be : impl_->bot_entities) {
-        if (const auto* bc = impl_->ecs.bots().try_get(be)) {
+    std::int32_t active_ragdolls = 0;
+    for (std::size_t bi = 0; bi < impl_->bot_entities.size(); ++bi) {
+        if (const auto* bc = impl_->ecs.bots().try_get(impl_->bot_entities[bi])) {
             if (bc->active && bc->alive) {
                 if (bc->team == 0) ++alive_ct;
                 else ++alive_t;
             }
+        }
+        if (impl_->bot_ragdolls[bi].active) {
+            ++active_ragdolls;
         }
     }
     return EcsLuaTelemetry{
@@ -1747,6 +2044,7 @@ EcsLuaTelemetry TacticalRangeSimulation::ecs_lua_telemetry() const {
         alive_ct,
         alive_t,
         impl_->bot_kills,
+        active_ragdolls,
     };
 }
 
@@ -1766,28 +2064,58 @@ void TacticalRangeSimulation::build_render_frame(
                 if (bc == nullptr || !bc->active) continue;
                 const SkinnedCharacterTemplate* tpl = (bi < 4U) ? impl_->ct_bot_template : impl_->t_bot_template;
                 if (tpl == nullptr || !tpl->loaded) continue;
-                SkinnedPoseParams pose{};
-                pose.clip_index = tpl->find_clip(bc->anim_clip);
-                pose.clip_time = bc->anim_time;
-                pose.loop_clip = bc->anim_loop;
-                pose.prev_clip_index = tpl->find_clip(bc->prev_anim_clip);
-                pose.prev_clip_time = bc->prev_anim_time;
-                pose.blend_alpha = bc->anim_blend;
-                pose.aim_pitch_rad = bc->aim_pitch;
-                Float3 head_l{}, chest_l{}, muz_l{};
-                evaluate_skinned_character(
-                    *tpl,
-                    pose,
-                    out_frame.skinned_bot_vertices.data() + impl_->bot_vb_offsets[bi],
-                    head_l,
-                    chest_l,
-                    muz_l);
-                const Mat4x4 bw = mul_mat4(
-                    make_translation_mat4(bc->pos.x, bc->pos.y, bc->pos.z),
-                    make_rot_y(bc->yaw));
-                bc->head_world_pos = transform_point(bw, head_l);
-                bc->chest_world_pos = transform_point(bw, chest_l);
-                bc->muzzle_world_pos = transform_point(bw, muz_l);
+                if (impl_->bot_ragdolls[bi].active) {
+                    const auto& body_if = impl_->physics.GetBodyInterfaceNoLock();
+                    std::array<RagdollLimbPose, k_ragdoll_limb_count> world_limbs{};
+                    for (std::uint32_t li = 0; li < k_ragdoll_limb_count; ++li) {
+                        const JPH::BodyID bid = impl_->bot_ragdolls[bi].bodies[li];
+                        if (!bid.IsInvalid()) {
+                            const JPH::RVec3 p = body_if.GetCenterOfMassPosition(bid);
+                            const JPH::Quat q = body_if.GetRotation(bid);
+                            world_limbs[li] = {
+                                {static_cast<float>(p.GetX()), static_cast<float>(p.GetY()), static_cast<float>(p.GetZ())},
+                                q.GetX(), q.GetY(), q.GetZ(), q.GetW()};
+                        }
+                    }
+                    Float3 hw{}, cw{}, handw{};
+                    evaluate_ragdoll_skinned_character(
+                        *tpl,
+                        world_limbs,
+                        out_frame.skinned_bot_vertices.data() + impl_->bot_vb_offsets[bi],
+                        hw,
+                        cw,
+                        handw);
+                    bc->head_world_pos = hw;
+                    bc->chest_world_pos = cw;
+                    bc->muzzle_world_pos = handw;
+                } else {
+                    SkinnedPoseParams pose{};
+                    pose.clip_index = tpl->find_clip(bc->anim_clip);
+                    pose.clip_time = bc->anim_time;
+                    pose.loop_clip = bc->anim_loop;
+                    pose.prev_clip_index = tpl->find_clip(bc->prev_anim_clip);
+                    pose.prev_clip_time = bc->prev_anim_time;
+                    pose.blend_alpha = bc->anim_blend;
+                    pose.aim_pitch_rad = bc->aim_pitch;
+                    Float3 head_l{}, chest_l{}, muz_l{}, hand_l{};
+                    evaluate_skinned_character(
+                        *tpl,
+                        pose,
+                        out_frame.skinned_bot_vertices.data() + impl_->bot_vb_offsets[bi],
+                        head_l,
+                        chest_l,
+                        muz_l,
+                        &impl_->bot_last_limb_poses[bi],
+                        &hand_l);
+                    impl_->bot_has_limb_poses[bi] = true;
+                    impl_->bot_hand_r_local[bi] = hand_l;
+                    const Mat4x4 bw = mul_mat4(
+                        make_translation_mat4(bc->pos.x, bc->pos.y, bc->pos.z),
+                        make_rot_y(bc->yaw));
+                    bc->head_world_pos = transform_point(bw, head_l);
+                    bc->chest_world_pos = transform_point(bw, chest_l);
+                    bc->muzzle_world_pos = transform_point(bw, muz_l);
+                }
             }
         });
     } else {

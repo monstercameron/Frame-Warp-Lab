@@ -315,6 +315,7 @@ int print_status(const WindowInstance& instance) {
     const std::int32_t cs_bots_alive_ct = std::atomic_ref<std::int32_t>(state->cs_bots_alive_ct).load(std::memory_order_acquire);
     const std::int32_t cs_bots_alive_t = std::atomic_ref<std::int32_t>(state->cs_bots_alive_t).load(std::memory_order_acquire);
     const std::int32_t cs_bot_kills = std::atomic_ref<std::int32_t>(state->cs_bot_kills).load(std::memory_order_acquire);
+    const std::int32_t cs_ragdolls_active = std::atomic_ref<std::int32_t>(state->cs_ragdolls_active).load(std::memory_order_acquire);
     const std::int32_t overlay_enabled = std::atomic_ref<std::int32_t>(state->overlay_enabled).load(std::memory_order_acquire);
     const std::int32_t flash_indicator_enabled = std::atomic_ref<std::int32_t>(state->flash_indicator_enabled).load(std::memory_order_acquire);
     const std::int32_t raw_input_enabled = std::atomic_ref<std::int32_t>(state->raw_input_enabled).load(std::memory_order_acquire);
@@ -514,6 +515,7 @@ int print_status(const WindowInstance& instance) {
               << "\",\"bots_alive_ct\":" << cs_bots_alive_ct
               << ",\"bots_alive_t\":" << cs_bots_alive_t
               << ",\"bot_kills\":" << cs_bot_kills
+              << ",\"ragdolls_active\":" << cs_ragdolls_active
               << "},\"ecs\":{\"entities\":" << ecs_entity_count
               << ",\"renderables\":" << ecs_renderable_count
               << ",\"physics_bodies\":" << ecs_physics_count
@@ -1516,7 +1518,8 @@ int wmain(int argument_count, wchar_t** arguments) {
         else if (ev_name == L"reset_targets" || ev_name == L"target.force_reset") code = 3;
         else if (ev_name == L"reset_range" || ev_name == L"range.reset") code = 4;
         else if (ev_name == L"player_jump" || ev_name == L"player.jump") code = 5;
-        else return fail("invalid_event", "Expected event in {fire, reload, reset_targets, reset_range, player_jump}");
+        else if (ev_name == L"kill_bot" || ev_name == L"bot.test_kill") code = 6;
+        else return fail("invalid_event", "Expected event in {fire, reload, reset_targets, reset_range, player_jump, kill_bot}");
         if (!PostMessageW(matched_instance->window, frame_warp_lab::control_message, static_cast<WPARAM>(frame_warp_lab::ControlCommand::emit_range_event), code)) {
             return fail("control_failed", "Could not dispatch range event");
         }

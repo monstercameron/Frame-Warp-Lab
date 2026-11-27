@@ -134,10 +134,18 @@ function M.on_init(entity_id)
                 anim_time = 0.0,
                 anim_speed = 1.1,
                 anim_loop = false,
-                respawn_timer = 5.5,
+                respawn_timer = 6.5,
             })
             ecs.record_bot_kill(b.team)
-            events.emit("bot.killed", { entity = target_id, team = b.team, headshot = payload.headshot == true })
+            events.emit("bot.killed", {
+                entity = target_id,
+                team = b.team,
+                headshot = payload.headshot == true,
+                damage = dmg,
+                hit_dir_x = payload.hit_dir_x or 1.0,
+                hit_dir_y = payload.hit_dir_y or 0.15,
+                hit_dir_z = payload.hit_dir_z or 0.0,
+            })
         else
             ecs.set_bot(target_id, {
                 hp = new_hp,
@@ -146,6 +154,41 @@ function M.on_init(entity_id)
                 anim_time = 0.0,
                 anim_speed = 1.35,
                 anim_loop = false,
+            })
+        end
+    end)
+
+    events.on("bot.test_kill", function()
+        local player_ent = ecs.find("player")
+        local pl = player_ent ~= 0 and ecs.get_player(player_ent) or nil
+        local px = pl ~= nil and pl.feet_x or 0.0
+        local pz = pl ~= nil and pl.feet_z or 36.0
+        local bots = ecs.find_by_tag("cs_bot")
+        local best_id = nil
+        local best_d = 9999.0
+        local best_dx, best_dz = 1.0, 0.0
+        for i = 1, #bots do
+            local b = ecs.get_bot(bots[i])
+            if b ~= nil and b.active and b.alive then
+                local dx = b.x - px
+                local dz = b.z - pz
+                local d = math.sqrt(dx * dx + dz * dz)
+                if d < best_d then
+                    best_d = d
+                    best_id = bots[i]
+                    best_dx = dx / math.max(d, 0.01)
+                    best_dz = dz / math.max(d, 0.01)
+                end
+            end
+        end
+        if best_id ~= nil then
+            events.emit("bot.damaged", {
+                entity = best_id,
+                damage = 140,
+                headshot = true,
+                hit_dir_x = best_dx,
+                hit_dir_y = 0.18,
+                hit_dir_z = best_dz,
             })
         end
     end)

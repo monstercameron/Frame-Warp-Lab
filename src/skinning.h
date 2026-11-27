@@ -17,6 +17,15 @@ struct ArsenalPbrMaterialDesc;
 inline constexpr std::uint32_t k_inline_pbr_material_flag = 0x80000000U;
 inline constexpr std::uint32_t k_arsenal_pbr_material_flag = 0x40000000U;
 inline constexpr std::uint32_t k_max_cs_bots = 8U;
+inline constexpr std::uint32_t k_ragdoll_limb_count = 11U;
+
+struct RagdollLimbPose {
+    Float3 pos{0.0f, 0.0f, 0.0f};
+    float qx = 0.0f;
+    float qy = 0.0f;
+    float qz = 0.0f;
+    float qw = 1.0f;
+};
 
 inline std::uint32_t pack_inline_pbr_material(float lin_r, float lin_g, float lin_b, float roughness, float metallic) {
     auto to_srgb_u8 = [](float c) -> std::uint32_t {
@@ -88,16 +97,23 @@ struct ValveBipedBones {
     std::int32_t spine0 = -1;
     std::int32_t spine1 = -1;
     std::int32_t spine2 = -1;
+    std::int32_t spine3 = -1;
     std::int32_t neck = -1;
     std::int32_t head = -1;
+    std::int32_t clavicle_l = -1;
     std::int32_t arm_upper_l = -1;
     std::int32_t arm_lower_l = -1;
+    std::int32_t hand_l = -1;
+    std::int32_t clavicle_r = -1;
     std::int32_t arm_upper_r = -1;
     std::int32_t arm_lower_r = -1;
+    std::int32_t hand_r = -1;
     std::int32_t leg_upper_l = -1;
     std::int32_t leg_lower_l = -1;
+    std::int32_t ankle_l = -1;
     std::int32_t leg_upper_r = -1;
     std::int32_t leg_lower_r = -1;
+    std::int32_t ankle_r = -1;
 };
 
 struct SkinnedCharacterTemplate {
@@ -115,6 +131,11 @@ struct SkinnedCharacterTemplate {
     ValveBipedBones biped{};
     std::vector<RigNode> nodes;
     std::vector<Quat4> rest_world_rot;
+    std::vector<Mat4x4> rest_node_world;
+    std::vector<std::uint8_t> node_ragdoll_limb;
+    std::array<std::int32_t, k_ragdoll_limb_count> ragdoll_primary_nodes{};
+    std::array<Float3, k_ragdoll_limb_count> ragdoll_rest_center{};
+    std::array<Float3, k_ragdoll_limb_count> ragdoll_rest_joint_pos{};
     std::vector<std::int32_t> joint_nodes;
     std::vector<Mat4x4> inverse_bind_matrices;
     std::vector<AnimClip> clips;
@@ -145,6 +166,16 @@ void evaluate_skinned_character(
     RangeVertex* out_vertices,
     Float3& out_head_local,
     Float3& out_chest_local,
-    Float3& out_muzzle_local);
+    Float3& out_muzzle_local,
+    std::array<RagdollLimbPose, k_ragdoll_limb_count>* out_limb_poses = nullptr,
+    Float3* out_hand_r_local = nullptr);
+
+void evaluate_ragdoll_skinned_character(
+    const SkinnedCharacterTemplate& tpl,
+    const std::array<RagdollLimbPose, k_ragdoll_limb_count>& world_limb_poses,
+    RangeVertex* out_vertices,
+    Float3& out_head_world,
+    Float3& out_chest_world,
+    Float3& out_hand_r_world);
 
 }
