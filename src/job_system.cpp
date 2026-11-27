@@ -61,7 +61,7 @@ void EngineJobSystem::parallel_for(
         return;
     }
 
-    std::atomic<std::size_t> remaining{batch_count - 1U};
+    std::size_t remaining = batch_count - 1U;
     std::mutex done_mutex;
     std::condition_variable done_cv;
 
@@ -72,8 +72,8 @@ void EngineJobSystem::parallel_for(
             const std::size_t end = std::min(item_count, begin + grain);
             queue_.push_back([begin, end, &range_fn, &remaining, &done_mutex, &done_cv]() {
                 range_fn(begin, end);
-                if (remaining.fetch_sub(1U, std::memory_order_acq_rel) == 1U) {
-                    std::lock_guard<std::mutex> dl(done_mutex);
+                std::lock_guard<std::mutex> dl(done_mutex);
+                if (--remaining == 0U) {
                     done_cv.notify_one();
                 }
             });
@@ -85,9 +85,9 @@ void EngineJobSystem::parallel_for(
     range_fn(0U, std::min(item_count, grain));
     jobs_executed_.fetch_add(1ULL, std::memory_order_relaxed);
 
-    if (remaining.load(std::memory_order_acquire) > 0U) {
+    {
         std::unique_lock<std::mutex> dl(done_mutex);
-        done_cv.wait(dl, [&remaining]() { return remaining.load(std::memory_order_acquire) == 0U; });
+        done_cv.wait(dl, [&remaining]() { return remaining == 0U; });
     }
 }
 

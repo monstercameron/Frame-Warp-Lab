@@ -1,5 +1,12 @@
 # Development log
 
+## v0.36.1 — Fix Fatal Stack Use-After-Free Race in `EngineJobSystem::parallel_for`
+
+- Fixed a deterministic concurrency crash in `src/job_system.cpp` (`EngineJobSystem::parallel_for`) that triggered after ~3–6 seconds of running the Gun Range (`~400–700` frames at 120 Hz):
+  - Previously, worker threads decremented `std::atomic<std::size_t> remaining` *before* acquiring `done_mutex` to notify `done_cv`, while the caller thread skipped locking `done_mutex` whenever `remaining.load() == 0`. Whenever the last worker decremented `remaining` to `0` right before the caller checked it, `parallel_for` returned and destroyed the stack-allocated `done_mutex` / `done_cv` while the worker thread was still locking/unlocking `done_mutex` (manifesting as MSVC STL `mutex.cpp(152): unlock of mutex not owned by the current thread` in Debug and a stack/SRWLOCK crash after ~5 seconds in Release).
+  - Moved the decrement of `remaining` inside `std::lock_guard<std::mutex> dl(done_mutex)` and made the caller thread unconditionally acquire `std::unique_lock<std::mutex> dl(done_mutex)` and wait for `remaining == 0`, guaranteeing the last worker has completely released `done_mutex` and finished `done_cv.notify_one()` before `parallel_for` returns.
+- Verified zero code comments, ARM64 Release + Debug builds, 0 Debug D3D12 Debug Layer errors, and sustained 15-second multi-threaded Gun Range stress runs (`>1,500` frames, `>7,500` `parallel_for` jobs with continuous firing, ADS, reload, and `PAR-3` + Split Shading + Surface Cache + Unified Controller) in both Debug and Release with `0` crashes.
+
 ## v0.36.0 — Hardened Atomic Adaptive Surface-Space Cache, Generational ECS UIDs, Tiled Clustered Specular Infrastructure & Quality-Aware Unified Controller
 
 - Addressed every verified architectural weakness identified in the `v0.35.0` external review across the surface-space cache, ECS instance identity, specular lighting pipeline, and unified controller (`src/tactical_range.h`, `src/tactical_range.cpp`, `src/runtime_state.h`, `src/adaptive_scheduler.h`, `src/renderer.h`, `src/renderer.cpp`, `src/main.cpp`, `src/cli.cpp`, `shaders/range_mesh.hlsl`, `shaders/range_lighting.hlsl`, `shaders/range_vis_par.hlsl`, `CMakeLists.txt`, `scripts/run_clustered_surface_cache_v2_experiment.ps1`, `research.md`):
