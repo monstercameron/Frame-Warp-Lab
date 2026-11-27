@@ -40,11 +40,19 @@ struct LoadedWeaponMesh {
     float ads_sight_y = 0.08f;
 };
 
+enum class WeaponAxisMode : std::uint8_t {
+    z_pos = 0,
+    z_neg = 1,
+    x_pos = 2,
+    x_neg = 3,
+};
+
 LoadedWeaponMesh load_weapon_glb_merged(
     const std::filesystem::path& relative_glb_path,
     float target_length_m,
-    bool flip_z_forward,
+    WeaponAxisMode axis_mode,
+    bool use_world_transform,
     bool skip_arms,
-    bool shotgun_material_fallback = false);
+    std::vector<ArsenalPbrMaterialDesc>& out_materials);
 
 }

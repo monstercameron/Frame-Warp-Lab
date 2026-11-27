@@ -2,6 +2,7 @@
 
 #include "tactical_range.h"
 #include "skinning.h"
+#include "pbr_assets.h"
 
 #include <array>
 #include <cstdint>
@@ -45,6 +46,7 @@ struct RangeGeometryPackage {
     std::uint32_t bots_total_vertices = 0U;
     std::array<std::uint32_t, 8> bot_vb_offsets{};
     std::array<std::uint32_t, 8> bot_vb_counts{};
+    std::vector<ArsenalPbrMaterialDesc> arsenal_pbr_materials;
 };
 
 RangeGeometryPackage build_tactical_range_geometry();

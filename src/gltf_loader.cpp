@@ -8,8 +8,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <limits>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace frame_warp_lab {
@@ -256,9 +258,10 @@ LoadedGltfAsset load_gltf_meshes(
 LoadedWeaponMesh load_weapon_glb_merged(
     const std::filesystem::path& relative_glb_path,
     float target_length_m,
-    bool flip_z_forward,
+    WeaponAxisMode axis_mode,
+    bool use_world_transform,
     bool skip_arms,
-    bool shotgun_material_fallback) {
+    std::vector<ArsenalPbrMaterialDesc>& out_materials) {
     LoadedWeaponMesh out{};
     const std::filesystem::path resolved = resolve_asset_path(relative_glb_path);
     std::error_code ec;
@@ -275,6 +278,65 @@ LoadedWeaponMesh load_weapon_glb_merged(
         cgltf_free(data);
         return out;
     }
+
+    auto read_image_bytes = [](const cgltf_texture_view& tv) -> std::vector<std::uint8_t> {
+        std::vector<std::uint8_t> bytes;
+        if (tv.texture == nullptr || tv.texture->image == nullptr) {
+            return bytes;
+        }
+        const cgltf_image* img = tv.texture->image;
+        if (img->buffer_view != nullptr && img->buffer_view->buffer != nullptr && img->buffer_view->buffer->data != nullptr) {
+            const auto* src = static_cast<const std::uint8_t*>(img->buffer_view->buffer->data) + img->buffer_view->offset;
+            bytes.assign(src, src + img->buffer_view->size);
+        }
+        return bytes;
+    };
+
+    std::unordered_map<const cgltf_material*, std::uint32_t> mat_slice_map;
+    auto resolve_material_id = [&](const cgltf_material* mat) -> std::uint32_t {
+        if (mat != nullptr) {
+            auto it = mat_slice_map.find(mat);
+            if (it != mat_slice_map.end()) {
+                return it->second;
+            }
+            ArsenalPbrMaterialDesc desc{};
+            if (mat->has_pbr_metallic_roughness) {
+                const auto& mr = mat->pbr_metallic_roughness;
+                desc.fallback_r = mr.base_color_factor[0];
+                desc.fallback_g = mr.base_color_factor[1];
+                desc.fallback_b = mr.base_color_factor[2];
+                desc.roughness_factor = mr.roughness_factor;
+                desc.metallic_factor = mr.metallic_factor;
+                desc.albedo_encoded = read_image_bytes(mr.base_color_texture);
+                desc.orm_encoded = read_image_bytes(mr.metallic_roughness_texture);
+            }
+            desc.normal_encoded = read_image_bytes(mat->normal_texture);
+            if (!desc.albedo_encoded.empty() || !desc.normal_encoded.empty() || !desc.orm_encoded.empty()) {
+                if (desc.orm_encoded.empty() && !desc.normal_encoded.empty()) {
+                    desc.normal_alpha_is_specular = true;
+                }
+                const auto slice_idx = static_cast<std::uint32_t>(out_materials.size());
+                if (slice_idx < 64U) {
+                    out_materials.push_back(std::move(desc));
+                    const std::uint32_t mat_id = k_arsenal_pbr_material_flag | slice_idx;
+                    mat_slice_map[mat] = mat_id;
+                    return mat_id;
+                }
+            }
+            const std::uint32_t packed = pack_inline_pbr_material(
+                desc.fallback_r, desc.fallback_g, desc.fallback_b, desc.roughness_factor, desc.metallic_factor);
+            mat_slice_map[mat] = packed;
+            return packed;
+        }
+        return pack_inline_pbr_material(0.08f, 0.09f, 0.11f, 0.38f, 0.72f);
+    };
+
+    auto apply_axis = [&](Float3 v) -> Float3 {
+        if (axis_mode == WeaponAxisMode::z_neg) return {-v.x, v.y, -v.z};
+        if (axis_mode == WeaponAxisMode::x_pos) return {-v.z, v.y, v.x};
+        if (axis_mode == WeaponAxisMode::x_neg) return {v.z, v.y, -v.x};
+        return v;
+    };
 
     auto xform_pt = [](const cgltf_float m[16], float x, float y, float z) -> Float3 {
         return {
@@ -296,16 +358,23 @@ LoadedWeaponMesh load_weapon_glb_merged(
         const cgltf_node& node = data->nodes[ni];
         if (node.mesh == nullptr) continue;
         const std::string nm = node.name != nullptr ? node.name : "";
-        if (skip_arms && (nm.find("Hand") != std::string::npos || nm.find("Arm") != std::string::npos)) {
+        if (skip_arms && (nm.find("Hand") != std::string::npos || nm.find("Arm") != std::string::npos || nm.find("SkeletalMesh") != std::string::npos)) {
             continue;
         }
-        cgltf_float wm[16]{};
-        cgltf_node_transform_world(&node, wm);
-        const float det3 =
-            wm[0] * (wm[5] * wm[10] - wm[6] * wm[9]) -
-            wm[4] * (wm[1] * wm[10] - wm[2] * wm[9]) +
-            wm[8] * (wm[1] * wm[6] - wm[2] * wm[5]);
-        const bool flip_wind = (det3 < 0.0f);
+        cgltf_float wm[16] = {
+            1.0f, 0.0f, 0.0f, 0.0f,
+            0.0f, 1.0f, 0.0f, 0.0f,
+            0.0f, 0.0f, 1.0f, 0.0f,
+            0.0f, 0.0f, 0.0f, 1.0f};
+        bool flip_wind = false;
+        if (use_world_transform) {
+            cgltf_node_transform_world(&node, wm);
+            const float det3 =
+                wm[0] * (wm[5] * wm[10] - wm[6] * wm[9]) -
+                wm[4] * (wm[1] * wm[10] - wm[2] * wm[9]) +
+                wm[8] * (wm[1] * wm[6] - wm[2] * wm[5]);
+            flip_wind = (det3 < 0.0f);
+        }
 
         for (cgltf_size pi = 0; pi < node.mesh->primitives_count; ++pi) {
             const cgltf_primitive& prim = node.mesh->primitives[pi];
@@ -321,38 +390,7 @@ LoadedWeaponMesh load_weapon_glb_merged(
             }
             if (pos_acc == nullptr || pos_acc->count == 0U) continue;
 
-            float r = 0.08f, g = 0.09f, b = 0.11f, rough = 0.38f, metal = 0.72f;
-            if (shotgun_material_fallback) {
-                const std::uint32_t h = static_cast<std::uint32_t>(ni * 7U + pi * 3U);
-                if (ni >= 9U) {
-                    r = 0.18f; g = 0.08f; b = 0.032f; rough = 0.52f; metal = 0.04f;
-                } else if ((h & 1U) == 0U) {
-                    r = 0.045f; g = 0.050f; b = 0.058f; rough = 0.34f; metal = 0.85f;
-                } else {
-                    r = 0.11f; g = 0.12f; b = 0.13f; rough = 0.42f; metal = 0.78f;
-                }
-            } else if (prim.material != nullptr && prim.material->has_pbr_metallic_roughness) {
-                const auto& mr = prim.material->pbr_metallic_roughness;
-                r = mr.base_color_factor[0];
-                g = mr.base_color_factor[1];
-                b = mr.base_color_factor[2];
-                rough = mr.roughness_factor;
-                metal = mr.metallic_factor;
-                const std::string mname = prim.material->name != nullptr ? prim.material->name : "";
-                if (mname.find("wood") != std::string::npos || mname.find("bakelite") != std::string::npos) {
-                    rough = 0.48f; metal = 0.04f;
-                } else if (mname.find("chrome") != std::string::npos || mname.find("steel") != std::string::npos || mname.find("gunmetal") != std::string::npos) {
-                    rough = 0.28f; metal = 0.88f;
-                } else if (mname.find("scope") != std::string::npos) {
-                    rough = 0.12f; metal = 0.20f;
-                } else if (mname.find("green") != std::string::npos || mname.find("awp") != std::string::npos) {
-                    rough = 0.56f; metal = 0.08f;
-                } else if (mname.find("polymer") != std::string::npos || mname.find("rubber") != std::string::npos || mname.find("black") != std::string::npos) {
-                    rough = 0.52f; metal = 0.22f;
-                }
-            }
-            const std::uint32_t packed_mat = pack_inline_pbr_material(r, g, b, rough, metal);
-
+            const std::uint32_t mat_id = resolve_material_id(prim.material);
             const auto base_v = static_cast<std::uint32_t>(out.vertices.size());
             out.vertices.resize(base_v + static_cast<std::uint32_t>(pos_acc->count));
             for (cgltf_size vi = 0; vi < pos_acc->count; ++vi) {
@@ -363,14 +401,8 @@ LoadedWeaponMesh load_weapon_glb_merged(
                 if (norm_acc != nullptr) cgltf_accessor_read_float(norm_acc, vi, n, 3);
                 if (uv_acc != nullptr) cgltf_accessor_read_float(uv_acc, vi, uv, 2);
 
-                Float3 wp = xform_pt(wm, p[0], p[1], p[2]);
-                Float3 wn = normalize_or(xform_dir(wm, n[0], n[1], n[2]), {0.0f, 1.0f, 0.0f});
-                if (flip_z_forward) {
-                    wp.x = -wp.x;
-                    wp.z = -wp.z;
-                    wn.x = -wn.x;
-                    wn.z = -wn.z;
-                }
+                Float3 wp = apply_axis(use_world_transform ? xform_pt(wm, p[0], p[1], p[2]) : Float3{p[0], p[1], p[2]});
+                Float3 wn = normalize_or(apply_axis(use_world_transform ? xform_dir(wm, n[0], n[1], n[2]) : Float3{n[0], n[1], n[2]}), {0.0f, 1.0f, 0.0f});
                 RangeVertex rv{};
                 rv.px = wp.x;
                 rv.py = wp.y;
@@ -383,7 +415,7 @@ LoadedWeaponMesh load_weapon_glb_merged(
                 rv.tz = 0.0f;
                 rv.u = uv[0];
                 rv.v = uv[1];
-                rv.material_id = packed_mat;
+                rv.material_id = mat_id;
                 rv.emissive_weight = 0.0f;
                 out.vertices[base_v + static_cast<std::uint32_t>(vi)] = rv;
                 bmin.x = std::min(bmin.x, wp.x);
@@ -425,7 +457,7 @@ LoadedWeaponMesh load_weapon_glb_merged(
     const float raw_len = std::max(bmax.z - bmin.z, 0.01f);
     const float scale = target_length_m / raw_len;
     const float cx = 0.5f * (bmin.x + bmax.x);
-    const float cy = bmin.y + 0.45f * (bmax.y - bmin.y);
+    const float cy = bmin.y + 0.48f * (bmax.y - bmin.y);
     const float cz = bmin.z + 0.36f * (bmax.z - bmin.z);
 
     Float3 nmin{std::numeric_limits<float>::max(), std::numeric_limits<float>::max(), std::numeric_limits<float>::max()};

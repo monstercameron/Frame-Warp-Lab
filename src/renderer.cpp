@@ -2515,11 +2515,15 @@ void Renderer::create_pipelines() {
     compute_desc.CS = {tile_shade_indirect_cs.data(), tile_shade_indirect_cs.size()};
     check(device_->CreateComputePipelineState(&compute_desc, IID_PPV_ARGS(&tile_shade_indirect_pipeline_)), "Create tile shade indirect compute pipeline");
 
-    D3D12_DESCRIPTOR_RANGE range_ext_srv_range{};
-    range_ext_srv_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    range_ext_srv_range.NumDescriptors = ext_srv_descriptor_count;
-    range_ext_srv_range.BaseShaderRegister = 16;
-    range_ext_srv_range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+    std::array<D3D12_DESCRIPTOR_RANGE, 2> range_ext_srv_ranges{};
+    range_ext_srv_ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    range_ext_srv_ranges[0].NumDescriptors = 6;
+    range_ext_srv_ranges[0].BaseShaderRegister = 16;
+    range_ext_srv_ranges[0].OffsetInDescriptorsFromTableStart = 0;
+    range_ext_srv_ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    range_ext_srv_ranges[1].NumDescriptors = 3;
+    range_ext_srv_ranges[1].BaseShaderRegister = 23;
+    range_ext_srv_ranges[1].OffsetInDescriptorsFromTableStart = 6;
 
     std::array<D3D12_ROOT_PARAMETER, 5> range_params{};
     range_params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
@@ -2537,8 +2541,8 @@ void Renderer::create_pipelines() {
     range_params[3].DescriptorTable.pDescriptorRanges = &scene_pbr_srv_range;
     range_params[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
     range_params[4].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    range_params[4].DescriptorTable.NumDescriptorRanges = 1;
-    range_params[4].DescriptorTable.pDescriptorRanges = &range_ext_srv_range;
+    range_params[4].DescriptorTable.NumDescriptorRanges = static_cast<UINT>(range_ext_srv_ranges.size());
+    range_params[4].DescriptorTable.pDescriptorRanges = range_ext_srv_ranges.data();
     range_params[4].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
     D3D12_ROOT_SIGNATURE_DESC range_root_desc{};
@@ -2730,8 +2734,8 @@ void Renderer::create_pipelines() {
     range_vis_params[12].DescriptorTable.pDescriptorRanges = &curr_mat_uav_range;
     range_vis_params[12].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
     range_vis_params[13].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    range_vis_params[13].DescriptorTable.NumDescriptorRanges = 1;
-    range_vis_params[13].DescriptorTable.pDescriptorRanges = &range_ext_srv_range;
+    range_vis_params[13].DescriptorTable.NumDescriptorRanges = static_cast<UINT>(range_ext_srv_ranges.size());
+    range_vis_params[13].DescriptorTable.pDescriptorRanges = range_ext_srv_ranges.data();
     range_vis_params[13].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
     range_vis_params[14].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     range_vis_params[14].DescriptorTable.NumDescriptorRanges = 1;
@@ -3273,6 +3277,41 @@ void Renderer::create_range_resources() {
         dust2_probes_buf_ ? dust2_probes_buf_.Get() : range_probes_buf_.Get(),
         dust2_probes_buf_ ? static_cast<UINT>(dust2_map_.probes.size()) : range_probe_count_,
         dust2_tlas_ ? dust2_tlas_.Get() : range_tlas_.Get());
+
+    D3D12_CPU_DESCRIPTOR_HANDLE range_ars_cpu{range_ext_cpu.ptr + 6ULL * shader_resource_descriptor_stride_};
+    D3D12_CPU_DESCRIPTOR_HANDLE dust2_ars_cpu{dust2_ext_cpu.ptr + 6ULL * shader_resource_descriptor_stride_};
+    arsenal_pbr_ = create_and_upload_arsenal_pbr_assets(
+        device_.Get(),
+        scene_queue_.Get(),
+        source_slots_[0].command_allocator.Get(),
+        scene_command_list_.Get(),
+        scene_fence_.Get(),
+        scene_fence_event_.get(),
+        next_scene_fence_value_,
+        pkg.arsenal_pbr_materials,
+        range_ars_cpu,
+        shader_resource_descriptor_stride_);
+    {
+        auto write_ars_array = [&](ID3D12Resource* res, DXGI_FORMAT fmt, D3D12_CPU_DESCRIPTOR_HANDLE dst) {
+            D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+            srv.Format = fmt;
+            srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+            srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            srv.Texture2DArray.MostDetailedMip = 0;
+            srv.Texture2DArray.MipLevels = 11;
+            srv.Texture2DArray.FirstArraySlice = 0;
+            srv.Texture2DArray.ArraySize = std::max<UINT>(1U, arsenal_pbr_.material_count);
+            device_->CreateShaderResourceView(res, &srv, dst);
+        };
+        D3D12_CPU_DESCRIPTOR_HANDLE dc = dust2_ars_cpu;
+        write_ars_array(arsenal_pbr_.albedo_array.Get(), DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, dc);
+        dc.ptr += shader_resource_descriptor_stride_;
+        write_ars_array(arsenal_pbr_.normal_array.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, dc);
+        dc.ptr += shader_resource_descriptor_stride_;
+        write_ars_array(arsenal_pbr_.orm_array.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, dc);
+    }
+    range_geometry_meta_.arsenal_pbr_materials.clear();
+    range_geometry_meta_.arsenal_pbr_materials.shrink_to_fit();
 }
 
 void Renderer::create_vrs_resources() {

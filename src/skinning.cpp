@@ -113,6 +113,189 @@ inline Quat4 quat_from_axis_x(float rad) {
     return {std::sin(h), 0.0f, 0.0f, std::cos(h)};
 }
 
+inline Quat4 quat_from_axis_y(float rad) {
+    const float h = rad * 0.5f;
+    return {0.0f, std::sin(h), 0.0f, std::cos(h)};
+}
+
+inline Quat4 quat_from_axis_z(float rad) {
+    const float h = rad * 0.5f;
+    return {0.0f, 0.0f, std::sin(h), std::cos(h)};
+}
+
+inline Mat4x4 mat4_rot_x(float rad) {
+    const float c = std::cos(rad);
+    const float s = std::sin(rad);
+    Mat4x4 r = mat4_identity();
+    r.m[5] = c;
+    r.m[6] = -s;
+    r.m[9] = s;
+    r.m[10] = c;
+    return r;
+}
+
+void compute_skinned_tangents(std::vector<SkinnedSourceVertex>& verts, const std::vector<std::uint32_t>& indices) {
+    std::vector<Float3> tan_acc(verts.size(), {0.0f, 0.0f, 0.0f});
+    for (std::size_t i = 0; i + 2U < indices.size(); i += 3U) {
+        const std::uint32_t i0 = indices[i + 0U];
+        const std::uint32_t i1 = indices[i + 1U];
+        const std::uint32_t i2 = indices[i + 2U];
+        if (i0 >= verts.size() || i1 >= verts.size() || i2 >= verts.size()) continue;
+        const auto& v0 = verts[i0];
+        const auto& v1 = verts[i1];
+        const auto& v2 = verts[i2];
+        const float dx1 = v1.pos.x - v0.pos.x;
+        const float dy1 = v1.pos.y - v0.pos.y;
+        const float dz1 = v1.pos.z - v0.pos.z;
+        const float dx2 = v2.pos.x - v0.pos.x;
+        const float dy2 = v2.pos.y - v0.pos.y;
+        const float dz2 = v2.pos.z - v0.pos.z;
+        const float du1 = v1.u - v0.u;
+        const float dv1 = v1.v - v0.v;
+        const float du2 = v2.u - v0.u;
+        const float dv2 = v2.v - v0.v;
+        const float det = du1 * dv2 - du2 * dv1;
+        if (std::fabs(det) < 1e-8f) continue;
+        const float inv = 1.0f / det;
+        const Float3 t{
+            (dx1 * dv2 - dx2 * dv1) * inv,
+            (dy1 * dv2 - dy2 * dv1) * inv,
+            (dz1 * dv2 - dz2 * dv1) * inv};
+        tan_acc[i0] = {tan_acc[i0].x + t.x, tan_acc[i0].y + t.y, tan_acc[i0].z + t.z};
+        tan_acc[i1] = {tan_acc[i1].x + t.x, tan_acc[i1].y + t.y, tan_acc[i1].z + t.z};
+        tan_acc[i2] = {tan_acc[i2].x + t.x, tan_acc[i2].y + t.y, tan_acc[i2].z + t.z};
+    }
+    for (std::size_t i = 0; i < verts.size(); ++i) {
+        const Float3 n = verts[i].normal;
+        const Float3 t0 = tan_acc[i];
+        const float d = t0.x * n.x + t0.y * n.y + t0.z * n.z;
+        const Float3 ortho{t0.x - n.x * d, t0.y - n.y * d, t0.z - n.z * d};
+        const float len = std::sqrt(ortho.x * ortho.x + ortho.y * ortho.y + ortho.z * ortho.z);
+        if (len > 1e-5f) {
+            verts[i].tangent = {ortho.x / len, ortho.y / len, ortho.z / len};
+        }
+    }
+}
+
+inline Quat4 quat_conj(Quat4 q) {
+    return {-q.x, -q.y, -q.z, q.w};
+}
+
+inline Float3 quat_rotate(Quat4 q, Float3 v) {
+    const Quat4 qv{v.x, v.y, v.z, 0.0f};
+    const Quat4 r = quat_mul(quat_mul(q, qv), quat_conj(q));
+    return {r.x, r.y, r.z};
+}
+
+void compute_rest_world_rotations(SkinnedCharacterTemplate& tpl) {
+    const std::size_t n = tpl.nodes.size();
+    tpl.rest_world_rot.resize(n);
+    std::vector<std::uint8_t> done(n, 0U);
+    const Quat4 root_q = quat_mul(quat_from_axis_y(tpl.yaw_correction), quat_from_axis_x(tpl.pitch_correction));
+    auto eval_q = [&](auto&& self, std::size_t i) -> Quat4 {
+        if (done[i] != 0U) return tpl.rest_world_rot[i];
+        const std::int32_t p = tpl.nodes[i].parent;
+        if (p >= 0 && static_cast<std::size_t>(p) < n) {
+            tpl.rest_world_rot[i] = quat_mul(self(self, static_cast<std::size_t>(p)), tpl.nodes[i].rest_r);
+        } else {
+            tpl.rest_world_rot[i] = quat_mul(root_q, tpl.nodes[i].rest_r);
+        }
+        done[i] = 1U;
+        return tpl.rest_world_rot[i];
+    };
+    for (std::size_t i = 0; i < n; ++i) {
+        eval_q(eval_q, i);
+    }
+}
+
+void apply_valve_biped_procedural_pose(
+    const SkinnedCharacterTemplate& tpl,
+    std::int32_t clip_index,
+    float clip_time,
+    std::vector<Float3>& out_t,
+    std::vector<Quat4>& out_r) {
+    if (tpl.rest_world_rot.size() != tpl.nodes.size()) {
+        return;
+    }
+    const auto& bp = tpl.biped;
+    auto rot_world = [&](std::int32_t idx, Quat4 q_world) {
+        if (idx < 0 || static_cast<std::size_t>(idx) >= out_r.size()) return;
+        const auto u = static_cast<std::size_t>(idx);
+        const Quat4 w = tpl.rest_world_rot[u];
+        const Quat4 local_delta = quat_mul(quat_mul(quat_conj(w), q_world), w);
+        out_r[u] = quat_mul(out_r[u], local_delta);
+    };
+
+    const float t = clip_time;
+    const float breath = std::sin(t * 2.4f) * 0.025f;
+    float stride_freq = 0.0f;
+    float stride_amp = 0.0f;
+    float crouch = 0.0f;
+    float shoot_kick = 0.0f;
+    float flinch = 0.0f;
+    float death_u = 0.0f;
+
+    if (clip_index == 1) {
+        stride_freq = 6.5f;
+        stride_amp = 0.36f;
+    } else if (clip_index == 2) {
+        stride_freq = 9.5f;
+        stride_amp = 0.54f;
+    } else if (clip_index == 3) {
+        stride_freq = 6.2f;
+        stride_amp = 0.30f;
+        shoot_kick = std::fabs(std::sin(t * 16.0f)) * 0.08f;
+    } else if (clip_index == 4) {
+        shoot_kick = std::fabs(std::sin(t * 16.0f)) * 0.09f;
+    } else if (clip_index == 5) {
+        crouch = 1.0f;
+    } else if (clip_index == 6) {
+        flinch = std::sin(std::clamp(t / 0.30f, 0.0f, 1.0f) * 3.14159265f);
+    } else if (clip_index == 7) {
+        death_u = std::clamp(t / 0.65f, 0.0f, 1.0f);
+        death_u = death_u * death_u * (3.0f - 2.0f * death_u);
+    }
+
+    const float ph = t * stride_freq;
+    const float leg_l = std::sin(ph) * stride_amp;
+    const float leg_r = -leg_l;
+    const float knee_l = std::max(0.0f, -std::cos(ph)) * stride_amp * 0.90f + crouch * 0.68f;
+    const float knee_r = std::max(0.0f, std::cos(ph)) * stride_amp * 0.90f + crouch * 0.68f;
+
+    const float arm_sway = std::sin(ph) * stride_amp * 0.14f;
+    rot_world(bp.arm_upper_l, quat_mul(quat_from_axis_x(-0.58f + arm_sway - shoot_kick * 0.6f), quat_mul(quat_from_axis_y(0.32f), quat_from_axis_z(-1.05f))));
+    rot_world(bp.arm_lower_l, quat_mul(quat_from_axis_x(-0.78f), quat_from_axis_y(0.55f)));
+    rot_world(bp.arm_upper_r, quat_mul(quat_from_axis_x(-0.52f - arm_sway - shoot_kick * 0.9f), quat_mul(quat_from_axis_y(-0.26f), quat_from_axis_z(1.05f))));
+    rot_world(bp.arm_lower_r, quat_mul(quat_from_axis_x(-0.82f - shoot_kick), quat_from_axis_y(-0.48f)));
+
+    rot_world(bp.leg_upper_l, quat_from_axis_x(-leg_l - crouch * 0.55f));
+    rot_world(bp.leg_lower_l, quat_from_axis_x(knee_l));
+    rot_world(bp.leg_upper_r, quat_from_axis_x(-leg_r - crouch * 0.55f));
+    rot_world(bp.leg_lower_r, quat_from_axis_x(knee_r));
+
+    rot_world(bp.spine0, quat_from_axis_x(breath + crouch * 0.22f - flinch * 0.26f));
+    rot_world(bp.spine1, quat_from_axis_x(breath * 0.8f - shoot_kick * 0.45f));
+    rot_world(bp.head, quat_from_axis_x(-breath * 0.5f + flinch * 0.20f));
+
+    if (bp.pelvis >= 0 && static_cast<std::size_t>(bp.pelvis) < out_t.size()) {
+        const auto pi = static_cast<std::size_t>(bp.pelvis);
+        const float bob_m = std::fabs(std::sin(ph)) * stride_amp * 0.045f;
+        const float drop_m = crouch * 0.34f + death_u * 0.78f - bob_m;
+        const float inv_s = tpl.root_scale > 1e-4f ? (1.0f / tpl.root_scale) : 1.0f;
+        const std::int32_t parent_idx = tpl.nodes[pi].parent;
+        const Quat4 parent_w = (parent_idx >= 0 && static_cast<std::size_t>(parent_idx) < tpl.rest_world_rot.size())
+            ? tpl.rest_world_rot[static_cast<std::size_t>(parent_idx)]
+            : quat_mul(quat_from_axis_y(tpl.yaw_correction), quat_from_axis_x(tpl.pitch_correction));
+        const Float3 local_shift = quat_rotate(quat_conj(parent_w), {0.0f, -drop_m * inv_s, 0.0f});
+        out_t[pi].x += local_shift.x;
+        out_t[pi].y += local_shift.y;
+        out_t[pi].z += local_shift.z;
+        if (death_u > 0.001f) {
+            rot_world(bp.pelvis, quat_from_axis_x(-death_u * 1.48f));
+        }
+    }
+}
+
 inline Quat4 quat_slerp(Quat4 a, Quat4 b, float t) {
     float dot = a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
     if (dot < 0.0f) {
@@ -318,7 +501,8 @@ std::int32_t SkinnedCharacterTemplate::find_clip(const std::string& clip_name) c
 
 SkinnedCharacterTemplate load_skinned_character_glb(
     const std::filesystem::path& relative_glb_path,
-    bool is_ct_fbi) {
+    bool is_ct_fbi,
+    std::vector<ArsenalPbrMaterialDesc>& out_materials) {
     SkinnedCharacterTemplate tpl{};
     tpl.is_ct_fbi = is_ct_fbi;
     const std::filesystem::path full_path = resolve_asset_path(relative_glb_path);
@@ -338,6 +522,48 @@ SkinnedCharacterTemplate load_skinned_character_glb(
         return tpl;
     }
 
+    auto read_img = [](const cgltf_texture_view& tv) -> std::vector<std::uint8_t> {
+        std::vector<std::uint8_t> bytes;
+        if (tv.texture == nullptr || tv.texture->image == nullptr) return bytes;
+        const cgltf_image* img = tv.texture->image;
+        if (img->buffer_view != nullptr && img->buffer_view->buffer != nullptr && img->buffer_view->buffer->data != nullptr) {
+            const auto* src = static_cast<const std::uint8_t*>(img->buffer_view->buffer->data) + img->buffer_view->offset;
+            bytes.assign(src, src + img->buffer_view->size);
+        }
+        return bytes;
+    };
+
+    std::unordered_map<const cgltf_material*, std::uint32_t> char_mat_map;
+    auto resolve_char_material = [&](const cgltf_material* mat) -> std::uint32_t {
+        if (mat != nullptr) {
+            auto it = char_mat_map.find(mat);
+            if (it != char_mat_map.end()) return it->second;
+            ArsenalPbrMaterialDesc desc{};
+            desc.character_fabric_orm = true;
+            if (mat->has_pbr_metallic_roughness) {
+                const auto& mr = mat->pbr_metallic_roughness;
+                desc.fallback_r = mr.base_color_factor[0];
+                desc.fallback_g = mr.base_color_factor[1];
+                desc.fallback_b = mr.base_color_factor[2];
+                desc.roughness_factor = mr.roughness_factor;
+                desc.metallic_factor = mr.metallic_factor;
+                desc.albedo_encoded = read_img(mr.base_color_texture);
+                desc.orm_encoded = read_img(mr.metallic_roughness_texture);
+            }
+            desc.normal_encoded = read_img(mat->normal_texture);
+            if (!desc.albedo_encoded.empty() || !desc.normal_encoded.empty()) {
+                const auto slice_idx = static_cast<std::uint32_t>(out_materials.size());
+                if (slice_idx < 64U) {
+                    out_materials.push_back(std::move(desc));
+                    const std::uint32_t mat_id = k_arsenal_pbr_material_flag | slice_idx;
+                    char_mat_map[mat] = mat_id;
+                    return mat_id;
+                }
+            }
+        }
+        return classify_character_material(mat, is_ct_fbi);
+    };
+
     tpl.source_path = utf8;
     std::unordered_map<const cgltf_node*, std::int32_t> node_to_idx;
     tpl.nodes.resize(data->nodes_count);
@@ -355,10 +581,26 @@ SkinnedCharacterTemplate load_skinned_character_glb(
         if (cn.has_translation) rn.rest_t = {cn.translation[0], cn.translation[1], cn.translation[2]};
         if (cn.has_rotation) rn.rest_r = quat_norm({cn.rotation[0], cn.rotation[1], cn.rotation[2], cn.rotation[3]});
         if (cn.has_scale) rn.rest_s = {cn.scale[0], cn.scale[1], cn.scale[2]};
-        if (rn.name == "Head" && tpl.head_node_index < 0) tpl.head_node_index = static_cast<std::int32_t>(i);
-        if ((rn.name == "Torso" || rn.name == "Chest" || rn.name == "UpperBody" || rn.name == "Spine2") && tpl.torso_node_index < 0) {
-            tpl.torso_node_index = static_cast<std::int32_t>(i);
+        const auto ii = static_cast<std::int32_t>(i);
+        if ((rn.name == "Head" || rn.name.rfind("head_0_", 0) == 0) && tpl.head_node_index < 0) tpl.head_node_index = ii;
+        if ((rn.name == "Torso" || rn.name == "Chest" || rn.name == "UpperBody" || rn.name == "Spine2" || rn.name.rfind("spine_2_", 0) == 0) && tpl.torso_node_index < 0) {
+            tpl.torso_node_index = ii;
         }
+        if (rn.name.rfind("weapon_hand_R_", 0) == 0 && tpl.weapon_node_index < 0) tpl.weapon_node_index = ii;
+        if (rn.name.rfind("pelvis_", 0) == 0 && tpl.biped.pelvis < 0) tpl.biped.pelvis = ii;
+        if (rn.name.rfind("spine_0_", 0) == 0 && tpl.biped.spine0 < 0) tpl.biped.spine0 = ii;
+        if (rn.name.rfind("spine_1_", 0) == 0 && tpl.biped.spine1 < 0) tpl.biped.spine1 = ii;
+        if (rn.name.rfind("spine_2_", 0) == 0 && tpl.biped.spine2 < 0) tpl.biped.spine2 = ii;
+        if (rn.name.rfind("neck_0_", 0) == 0 && tpl.biped.neck < 0) tpl.biped.neck = ii;
+        if (rn.name.rfind("head_0_", 0) == 0 && tpl.biped.head < 0) tpl.biped.head = ii;
+        if (rn.name.rfind("arm_upper_L_", 0) == 0 && rn.name.find("TWIST") == std::string::npos && tpl.biped.arm_upper_l < 0) tpl.biped.arm_upper_l = ii;
+        if (rn.name.rfind("arm_lower_L_", 0) == 0 && rn.name.find("TWIST") == std::string::npos && tpl.biped.arm_lower_l < 0) tpl.biped.arm_lower_l = ii;
+        if (rn.name.rfind("arm_upper_R_", 0) == 0 && rn.name.find("TWIST") == std::string::npos && tpl.biped.arm_upper_r < 0) tpl.biped.arm_upper_r = ii;
+        if (rn.name.rfind("arm_lower_R_", 0) == 0 && rn.name.find("TWIST") == std::string::npos && tpl.biped.arm_lower_r < 0) tpl.biped.arm_lower_r = ii;
+        if (rn.name.rfind("leg_upper_L_", 0) == 0 && rn.name.find("TWIST") == std::string::npos && tpl.biped.leg_upper_l < 0) tpl.biped.leg_upper_l = ii;
+        if (rn.name.rfind("leg_lower_L_", 0) == 0 && rn.name.find("TWIST") == std::string::npos && tpl.biped.leg_lower_l < 0) tpl.biped.leg_lower_l = ii;
+        if (rn.name.rfind("leg_upper_R_", 0) == 0 && rn.name.find("TWIST") == std::string::npos && tpl.biped.leg_upper_r < 0) tpl.biped.leg_upper_r = ii;
+        if (rn.name.rfind("leg_lower_R_", 0) == 0 && rn.name.find("TWIST") == std::string::npos && tpl.biped.leg_lower_r < 0) tpl.biped.leg_lower_r = ii;
     }
 
     if (data->skins_count > 0U) {
@@ -450,7 +692,7 @@ SkinnedCharacterTemplate load_skinned_character_glb(
                 else if (attr.type == cgltf_attribute_type_weights && attr.index == 0) w_acc = attr.data;
             }
             if (pos_acc == nullptr || pos_acc->count == 0U) continue;
-            const std::uint32_t mat_id = classify_character_material(prim.material, is_ct_fbi);
+            const std::uint32_t mat_id = resolve_char_material(prim.material);
             const auto base_v = static_cast<std::uint32_t>(tpl.source_vertices.size());
             tpl.source_vertices.resize(base_v + static_cast<std::uint32_t>(pos_acc->count));
             for (cgltf_size vi = 0; vi < pos_acc->count; ++vi) {
@@ -524,8 +766,23 @@ SkinnedCharacterTemplate load_skinned_character_glb(
         return tpl;
     }
 
+    compute_skinned_tangents(tpl.source_vertices, tpl.indices);
+
+    if (tpl.clips.empty() && tpl.biped.pelvis >= 0) {
+        tpl.procedural_valve_biped = true;
+        const std::array<const char*, 8> pnames = {{
+            "Idle", "Walk", "Run_Gun", "Walk_Shoot", "Idle_Shoot", "Duck", "HitReact", "Death"}};
+        for (const char* pn : pnames) {
+            AnimClip c{};
+            c.name = pn;
+            c.duration = 1.0f;
+            tpl.clips.push_back(std::move(c));
+        }
+    }
+
     tpl.root_scale = 1.0f;
     tpl.y_offset = 0.0f;
+    tpl.pitch_correction = 0.0f;
     tpl.yaw_correction = 0.0f;
     std::vector<RangeVertex> probe(tpl.source_vertices.size());
     SkinnedPoseParams idle_pose{};
@@ -534,13 +791,28 @@ SkinnedCharacterTemplate load_skinned_character_glb(
     evaluate_skinned_character(tpl, idle_pose, probe.data(), head_l, chest_l, muz_l);
     float min_y = std::numeric_limits<float>::max();
     float max_y = -std::numeric_limits<float>::max();
+    float min_z = std::numeric_limits<float>::max();
+    float max_z = -std::numeric_limits<float>::max();
     for (const auto& rv : probe) {
         if (rv.py < min_y) min_y = rv.py;
         if (rv.py > max_y) max_y = rv.py;
+        if (rv.pz < min_z) min_z = rv.pz;
+        if (rv.pz > max_z) max_z = rv.pz;
+    }
+    if ((max_z - min_z) > (max_y - min_y) * 1.4f) {
+        tpl.pitch_correction = (min_z < -max_z) ? 1.57079633f : -1.57079633f;
+        evaluate_skinned_character(tpl, idle_pose, probe.data(), head_l, chest_l, muz_l);
+        min_y = std::numeric_limits<float>::max();
+        max_y = -std::numeric_limits<float>::max();
+        for (const auto& rv : probe) {
+            if (rv.py < min_y) min_y = rv.py;
+            if (rv.py > max_y) max_y = rv.py;
+        }
     }
     const float raw_h = std::max(max_y - min_y, 0.2f);
     tpl.root_scale = 1.78f / raw_h;
     tpl.y_offset = -min_y * tpl.root_scale;
+    compute_rest_world_rotations(tpl);
     tpl.loaded = true;
     return tpl;
 }
@@ -561,10 +833,13 @@ void evaluate_skinned_character(
         r_cur[i] = tpl.nodes[i].rest_r;
         s_cur[i] = tpl.nodes[i].rest_s;
     }
-    if (pose.clip_index >= 0 && static_cast<std::size_t>(pose.clip_index) < tpl.clips.size()) {
+    if (tpl.procedural_valve_biped) {
+        apply_valve_biped_procedural_pose(tpl, pose.clip_index, pose.clip_time, t_cur, r_cur);
+    } else if (pose.clip_index >= 0 && static_cast<std::size_t>(pose.clip_index) < tpl.clips.size()) {
         sample_clip_trs(tpl.clips[static_cast<std::size_t>(pose.clip_index)], pose.clip_time, pose.loop_clip, t_cur, r_cur, s_cur);
     }
-    if (pose.prev_clip_index >= 0
+    if (!tpl.procedural_valve_biped
+        && pose.prev_clip_index >= 0
         && static_cast<std::size_t>(pose.prev_clip_index) < tpl.clips.size()
         && pose.blend_alpha < 0.995f) {
         std::vector<Float3> t_prev(node_count);
@@ -592,13 +867,19 @@ void evaluate_skinned_character(
 
     if (tpl.torso_node_index >= 0 && std::fabs(pose.aim_pitch_rad) > 1e-4f) {
         const auto ti = static_cast<std::size_t>(tpl.torso_node_index);
-        r_cur[ti] = quat_mul(r_cur[ti], quat_from_axis_x(std::clamp(pose.aim_pitch_rad, -0.55f, 0.55f)));
+        const Quat4 qp = quat_from_axis_x(std::clamp(pose.aim_pitch_rad, -0.55f, 0.55f));
+        if (tpl.procedural_valve_biped && ti < tpl.rest_world_rot.size()) {
+            const Quat4 w = tpl.rest_world_rot[ti];
+            r_cur[ti] = quat_mul(r_cur[ti], quat_mul(quat_mul(quat_conj(w), qp), w));
+        } else {
+            r_cur[ti] = quat_mul(r_cur[ti], qp);
+        }
     }
 
     std::vector<Mat4x4> node_world;
     compute_world_matrices(tpl.nodes, t_cur, r_cur, s_cur, node_world);
 
-    Mat4x4 root_xform = mat4_rot_y(tpl.yaw_correction);
+    Mat4x4 root_xform = mat4_mul(mat4_rot_y(tpl.yaw_correction), mat4_rot_x(tpl.pitch_correction));
     root_xform.m[0] *= tpl.root_scale;
     root_xform.m[1] *= tpl.root_scale;
     root_xform.m[2] *= tpl.root_scale;

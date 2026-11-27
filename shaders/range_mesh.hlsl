@@ -122,7 +122,7 @@ SceneOutput range_ps_main(RangeVertexOut input) {
     if (eval_range_alpha_cutout_discard(input.uv, input.material_id, sflags)) {
         discard;
     }
-    if (input.material_id >= 16u && (input.material_id & 0x80000000u) == 0u) {
+    if (input.material_id >= 16u && (input.material_id & 0xC0000000u) == 0u) {
         float d2_slice = clamp((float)(input.material_id - 16u), 0.0, 99.0);
         if (dust2_albedo_array.Sample(pbr_aniso_sampler, float3(input.uv, d2_slice)).a < 0.45) {
             discard;
@@ -172,7 +172,7 @@ VisBufferOut range_vis_ps_main(RangeVertexOut input, uint prim_id : SV_Primitive
     if (eval_range_alpha_cutout_discard(input.uv, input.material_id, sflags)) {
         discard;
     }
-    if (input.material_id >= 16u && (input.material_id & 0x80000000u) == 0u) {
+    if (input.material_id >= 16u && (input.material_id & 0xC0000000u) == 0u) {
         float d2_slice = clamp((float)(input.material_id - 16u), 0.0, 99.0);
         if (dust2_albedo_array.Sample(pbr_aniso_sampler, float3(input.uv, d2_slice)).a < 0.45) {
             discard;

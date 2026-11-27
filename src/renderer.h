@@ -198,7 +198,7 @@ private:
     static constexpr UINT targets_per_source_slot = 3;
     static constexpr UINT compute_descriptors_per_source_slot = 15;
     static constexpr UINT pbr_srv_descriptor_count = 8;
-    static constexpr UINT ext_srv_descriptor_count = 6;
+    static constexpr UINT ext_srv_descriptor_count = 9;
     static constexpr UINT surface_cache_max_cells = 4194304;
     static constexpr UINT max_dirty_tile_capacity = 131072;
     static constexpr UINT tile_indirect_u32_count = 32;
@@ -347,6 +347,7 @@ private:
     std::uint32_t range_probe_count_ = 0;
     Dust2MapPackage dust2_map_{};
     Dust2PbrBundle dust2_pbr_{};
+    Dust2PbrBundle arsenal_pbr_{};
     Microsoft::WRL::ComPtr<ID3D12Resource> dust2_vertex_buffer_;
     Microsoft::WRL::ComPtr<ID3D12Resource> dust2_index_buffer_;
     D3D12_VERTEX_BUFFER_VIEW dust2_vb_view_{};

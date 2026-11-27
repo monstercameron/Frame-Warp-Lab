@@ -12,8 +12,10 @@
 namespace frame_warp_lab {
 
 struct RangeVertex;
+struct ArsenalPbrMaterialDesc;
 
 inline constexpr std::uint32_t k_inline_pbr_material_flag = 0x80000000U;
+inline constexpr std::uint32_t k_arsenal_pbr_material_flag = 0x40000000U;
 inline constexpr std::uint32_t k_max_cs_bots = 8U;
 
 inline std::uint32_t pack_inline_pbr_material(float lin_r, float lin_g, float lin_b, float roughness, float metallic) {
@@ -81,17 +83,38 @@ struct SkinnedSourceVertex {
     std::int32_t rigid_node_index;
 };
 
+struct ValveBipedBones {
+    std::int32_t pelvis = -1;
+    std::int32_t spine0 = -1;
+    std::int32_t spine1 = -1;
+    std::int32_t spine2 = -1;
+    std::int32_t neck = -1;
+    std::int32_t head = -1;
+    std::int32_t arm_upper_l = -1;
+    std::int32_t arm_lower_l = -1;
+    std::int32_t arm_upper_r = -1;
+    std::int32_t arm_lower_r = -1;
+    std::int32_t leg_upper_l = -1;
+    std::int32_t leg_lower_l = -1;
+    std::int32_t leg_upper_r = -1;
+    std::int32_t leg_lower_r = -1;
+};
+
 struct SkinnedCharacterTemplate {
     bool loaded = false;
     bool is_ct_fbi = false;
+    bool procedural_valve_biped = false;
     std::string source_path;
     float root_scale = 1.0f;
     float y_offset = 0.0f;
+    float pitch_correction = 0.0f;
     float yaw_correction = 0.0f;
     std::int32_t head_node_index = -1;
     std::int32_t torso_node_index = -1;
     std::int32_t weapon_node_index = -1;
+    ValveBipedBones biped{};
     std::vector<RigNode> nodes;
+    std::vector<Quat4> rest_world_rot;
     std::vector<std::int32_t> joint_nodes;
     std::vector<Mat4x4> inverse_bind_matrices;
     std::vector<AnimClip> clips;
@@ -113,7 +136,8 @@ struct SkinnedPoseParams {
 
 SkinnedCharacterTemplate load_skinned_character_glb(
     const std::filesystem::path& relative_glb_path,
-    bool is_ct_fbi);
+    bool is_ct_fbi,
+    std::vector<ArsenalPbrMaterialDesc>& out_materials);
 
 void evaluate_skinned_character(
     const SkinnedCharacterTemplate& tpl,

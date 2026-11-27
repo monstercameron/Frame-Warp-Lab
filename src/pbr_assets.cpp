@@ -1868,4 +1868,414 @@ Dust2PbrBundle create_and_upload_dust2_pbr_assets(
     return bundle;
 }
 
+Dust2PbrBundle create_and_upload_arsenal_pbr_assets(
+    ID3D12Device* device,
+    ID3D12CommandQueue* upload_queue,
+    ID3D12CommandAllocator* command_allocator,
+    ID3D12GraphicsCommandList* command_list,
+    ID3D12Fence* fence,
+    HANDLE fence_event,
+    std::uint64_t& next_fence_value,
+    const std::vector<ArsenalPbrMaterialDesc>& materials,
+    D3D12_CPU_DESCRIPTOR_HANDLE srv_heap_start,
+    UINT srv_descriptor_stride) {
+    const auto t0 = std::chrono::steady_clock::now();
+    Dust2PbrBundle bundle{};
+    constexpr UINT k_ars_size = 1024;
+    constexpr UINT k_ars_mips = 11;
+    const UINT slice_count = std::max<UINT>(1U, static_cast<UINT>(std::min<std::size_t>(materials.size(), 64U)));
+    bundle.material_count = slice_count;
+
+    std::vector<std::vector<MipLevelRgba8>> albedo_data(slice_count);
+    std::vector<std::vector<MipLevelRgba8>> normal_data(slice_count);
+    std::vector<std::vector<MipLevelRgba8>> orm_data(slice_count);
+
+    auto sample_bilinear_rgba = [](const stbi_uc* img, int w, int h, float u, float v, float out[4]) {
+        const float fx = std::clamp(u, 0.0f, 1.0f) * static_cast<float>(w - 1);
+        const float fy = std::clamp(v, 0.0f, 1.0f) * static_cast<float>(h - 1);
+        const int x0 = std::clamp(static_cast<int>(fx), 0, w - 1);
+        const int y0 = std::clamp(static_cast<int>(fy), 0, h - 1);
+        const int x1 = std::min(x0 + 1, w - 1);
+        const int y1 = std::min(y0 + 1, h - 1);
+        const float tx = fx - static_cast<float>(x0);
+        const float ty = fy - static_cast<float>(y0);
+        const stbi_uc* p00 = img + (static_cast<std::size_t>(y0) * w + x0) * 4U;
+        const stbi_uc* p10 = img + (static_cast<std::size_t>(y0) * w + x1) * 4U;
+        const stbi_uc* p01 = img + (static_cast<std::size_t>(y1) * w + x0) * 4U;
+        const stbi_uc* p11 = img + (static_cast<std::size_t>(y1) * w + x1) * 4U;
+        for (int c = 0; c < 4; ++c) {
+            const float a = static_cast<float>(p00[c]) * (1.0f - tx) + static_cast<float>(p10[c]) * tx;
+            const float b = static_cast<float>(p01[c]) * (1.0f - tx) + static_cast<float>(p11[c]) * tx;
+            out[c] = (a * (1.0f - ty) + b * ty) * (1.0f / 255.0f);
+        }
+    };
+
+    EngineJobSystem::global().parallel_for(slice_count, 1U, [&](std::size_t begin, std::size_t end) {
+        for (std::size_t s = begin; s < end; ++s) {
+            const std::size_t total_px = static_cast<std::size_t>(k_ars_size) * k_ars_size;
+            ArsenalPbrMaterialDesc desc{};
+            if (s < materials.size()) {
+                desc = materials[s];
+            }
+
+            std::vector<Vec3> lin_albedo(total_px, Vec3{desc.fallback_r, desc.fallback_g, desc.fallback_b});
+            std::vector<Vec3> normals(total_px, Vec3{0.0f, 0.0f, 1.0f});
+            std::vector<float> ao_map(total_px, 1.0f);
+            std::vector<float> rough_map(total_px, std::clamp(desc.roughness_factor, 0.14f, 0.94f));
+            std::vector<float> metal_map(total_px, std::clamp(desc.metallic_factor, 0.0f, 1.0f));
+            std::vector<float> coat_map(total_px, desc.character_fabric_orm ? 0.02f : 0.08f);
+            std::vector<float> spec_from_norm_alpha(total_px, 0.0f);
+
+            if (!desc.albedo_encoded.empty()) {
+                int iw = 0, ih = 0, ic = 0;
+                stbi_uc* px = stbi_load_from_memory(
+                    desc.albedo_encoded.data(),
+                    static_cast<int>(desc.albedo_encoded.size()),
+                    &iw, &ih, &ic, 4);
+                if (px != nullptr && iw > 0 && ih > 0) {
+                    const float inv = 1.0f / static_cast<float>(k_ars_size);
+                    for (UINT y = 0; y < k_ars_size; ++y) {
+                        const float v = (static_cast<float>(y) + 0.5f) * inv;
+                        for (UINT x = 0; x < k_ars_size; ++x) {
+                            const float u = (static_cast<float>(x) + 0.5f) * inv;
+                            float c[4];
+                            sample_bilinear_rgba(px, iw, ih, u, v, c);
+                            lin_albedo[static_cast<std::size_t>(y) * k_ars_size + x] = {
+                                srgb_to_linear(c[0]),
+                                srgb_to_linear(c[1]),
+                                srgb_to_linear(c[2])};
+                        }
+                    }
+                    stbi_image_free(px);
+                }
+            }
+
+            bool has_normal = false;
+            bool has_spec_alpha = false;
+            if (!desc.normal_encoded.empty()) {
+                int iw = 0, ih = 0, ic = 0;
+                stbi_uc* px = stbi_load_from_memory(
+                    desc.normal_encoded.data(),
+                    static_cast<int>(desc.normal_encoded.size()),
+                    &iw, &ih, &ic, 4);
+                if (px != nullptr && iw > 0 && ih > 0) {
+                    has_normal = true;
+                    has_spec_alpha = desc.normal_alpha_is_specular && (ic == 4);
+                    const float inv = 1.0f / static_cast<float>(k_ars_size);
+                    for (UINT y = 0; y < k_ars_size; ++y) {
+                        const float v = (static_cast<float>(y) + 0.5f) * inv;
+                        for (UINT x = 0; x < k_ars_size; ++x) {
+                            const float u = (static_cast<float>(x) + 0.5f) * inv;
+                            float c[4];
+                            sample_bilinear_rgba(px, iw, ih, u, v, c);
+                            const float nx = c[0] * 2.0f - 1.0f;
+                            const float ny = c[1] * 2.0f - 1.0f;
+                            const float nz = std::max(c[2] * 2.0f - 1.0f, 0.15f);
+                            const std::size_t idx = static_cast<std::size_t>(y) * k_ars_size + x;
+                            normals[idx] = normalize3({nx, ny, nz});
+                            if (has_spec_alpha) {
+                                spec_from_norm_alpha[idx] = c[3];
+                            }
+                        }
+                    }
+                    stbi_image_free(px);
+                }
+            }
+
+            bool has_orm = false;
+            if (!desc.orm_encoded.empty()) {
+                int iw = 0, ih = 0, ic = 0;
+                stbi_uc* px = stbi_load_from_memory(
+                    desc.orm_encoded.data(),
+                    static_cast<int>(desc.orm_encoded.size()),
+                    &iw, &ih, &ic, 4);
+                if (px != nullptr && iw > 0 && ih > 0) {
+                    has_orm = true;
+                    const float inv = 1.0f / static_cast<float>(k_ars_size);
+                    for (UINT y = 0; y < k_ars_size; ++y) {
+                        const float v = (static_cast<float>(y) + 0.5f) * inv;
+                        for (UINT x = 0; x < k_ars_size; ++x) {
+                            const float u = (static_cast<float>(x) + 0.5f) * inv;
+                            float c[4];
+                            sample_bilinear_rgba(px, iw, ih, u, v, c);
+                            const std::size_t idx = static_cast<std::size_t>(y) * k_ars_size + x;
+                            ao_map[idx] = std::clamp(c[0] > 0.02f ? c[0] : 1.0f, 0.18f, 1.0f);
+                            rough_map[idx] = std::clamp(c[1] * desc.roughness_factor, 0.12f, 0.96f);
+                            metal_map[idx] = std::clamp(c[2] * desc.metallic_factor, 0.0f, 1.0f);
+                            coat_map[idx] = metal_map[idx] > 0.45f ? 0.16f : 0.05f;
+                        }
+                    }
+                    stbi_image_free(px);
+                }
+            }
+
+            if (!has_orm) {
+                for (std::size_t i = 0; i < total_px; ++i) {
+                    const Vec3& a = lin_albedo[i];
+                    const float luma = a.x * 0.2126f + a.y * 0.7152f + a.z * 0.0722f;
+                    const float sat = std::max({a.x, a.y, a.z}) - std::min({a.x, a.y, a.z});
+                    const float n_flat = std::clamp(normals[i].z, 0.0f, 1.0f);
+                    ao_map[i] = std::clamp(0.65f + 0.35f * n_flat * (0.4f + 0.6f * std::sqrt(saturate(luma * 2.5f))), 0.28f, 1.0f);
+                    if (has_spec_alpha) {
+                        const float sp = spec_from_norm_alpha[i];
+                        const bool looks_wood = (a.x > a.z * 1.45f && sat > 0.04f);
+                        rough_map[i] = looks_wood
+                            ? std::clamp(0.58f - sp * 0.22f, 0.34f, 0.78f)
+                            : std::clamp(0.68f - sp * 0.44f, 0.18f, 0.85f);
+                        metal_map[i] = looks_wood ? 0.04f : std::clamp(0.25f + sp * 0.68f, 0.15f, 0.92f);
+                        coat_map[i] = looks_wood ? 0.10f : 0.14f;
+                    } else if (desc.character_fabric_orm) {
+                        rough_map[i] = std::clamp(0.76f - luma * 0.14f + (1.0f - n_flat) * 0.18f, 0.50f, 0.92f);
+                        metal_map[i] = (sat < 0.035f && luma < 0.18f) ? 0.14f : 0.02f;
+                        coat_map[i] = 0.02f;
+                    } else {
+                        const bool dark_metal = (sat < 0.04f && luma < 0.28f);
+                        rough_map[i] = dark_metal
+                            ? std::clamp(0.32f + (1.0f - luma) * 0.22f, 0.22f, 0.65f)
+                            : std::clamp(0.48f + (1.0f - n_flat) * 0.20f, 0.30f, 0.80f);
+                        metal_map[i] = dark_metal ? 0.78f : 0.12f;
+                        coat_map[i] = dark_metal ? 0.14f : 0.06f;
+                    }
+                }
+            }
+
+            if (!has_normal) {
+                auto sample_l = [&](int x, int y) -> float {
+                    const int cx = std::clamp(x, 0, static_cast<int>(k_ars_size) - 1);
+                    const int cy = std::clamp(y, 0, static_cast<int>(k_ars_size) - 1);
+                    const Vec3& a = lin_albedo[static_cast<std::size_t>(cy) * k_ars_size + cx];
+                    return a.x * 0.2126f + a.y * 0.7152f + a.z * 0.0722f;
+                };
+                for (UINT y = 0; y < k_ars_size; ++y) {
+                    for (UINT x = 0; x < k_ars_size; ++x) {
+                        const float dx = sample_l(static_cast<int>(x) + 1, static_cast<int>(y)) - sample_l(static_cast<int>(x) - 1, static_cast<int>(y));
+                        const float dy = sample_l(static_cast<int>(x), static_cast<int>(y) + 1) - sample_l(static_cast<int>(x), static_cast<int>(y) - 1);
+                        normals[static_cast<std::size_t>(y) * k_ars_size + x] = normalize3({-dx * 1.4f, -dy * 1.4f, 1.0f});
+                    }
+                }
+            }
+
+            albedo_data[s].resize(k_ars_mips);
+            normal_data[s].resize(k_ars_mips);
+            orm_data[s].resize(k_ars_mips);
+
+            UINT w = k_ars_size;
+            UINT h = k_ars_size;
+            for (UINT mip = 0; mip < k_ars_mips; ++mip) {
+                const std::size_t n_px = static_cast<std::size_t>(w) * h;
+                albedo_data[s][mip] = {w, h, std::vector<std::uint8_t>(n_px * 4U)};
+                normal_data[s][mip] = {w, h, std::vector<std::uint8_t>(n_px * 4U)};
+                orm_data[s][mip] = {w, h, std::vector<std::uint8_t>(n_px * 4U)};
+                for (std::size_t i = 0; i < n_px; ++i) {
+                    const std::size_t o = i * 4U;
+                    albedo_data[s][mip].pixels[o + 0] = float_to_u8(linear_to_srgb(lin_albedo[i].x));
+                    albedo_data[s][mip].pixels[o + 1] = float_to_u8(linear_to_srgb(lin_albedo[i].y));
+                    albedo_data[s][mip].pixels[o + 2] = float_to_u8(linear_to_srgb(lin_albedo[i].z));
+                    albedo_data[s][mip].pixels[o + 3] = 255U;
+
+                    const Vec3 nn = normalize3(normals[i]);
+                    normal_data[s][mip].pixels[o + 0] = float_to_u8(nn.x * 0.5f + 0.5f);
+                    normal_data[s][mip].pixels[o + 1] = float_to_u8(nn.y * 0.5f + 0.5f);
+                    normal_data[s][mip].pixels[o + 2] = float_to_u8(nn.z * 0.5f + 0.5f);
+                    normal_data[s][mip].pixels[o + 3] = 128U;
+
+                    orm_data[s][mip].pixels[o + 0] = float_to_u8(ao_map[i]);
+                    orm_data[s][mip].pixels[o + 1] = float_to_u8(rough_map[i]);
+                    orm_data[s][mip].pixels[o + 2] = float_to_u8(metal_map[i]);
+                    orm_data[s][mip].pixels[o + 3] = float_to_u8(coat_map[i]);
+                }
+                if (mip + 1U >= k_ars_mips) break;
+                const UINT nw = std::max<UINT>(1U, w / 2U);
+                const UINT nh = std::max<UINT>(1U, h / 2U);
+                const std::size_t nn_px = static_cast<std::size_t>(nw) * nh;
+                std::vector<Vec3> na(nn_px);
+                std::vector<Vec3> nn(nn_px);
+                std::vector<float> nao(nn_px);
+                std::vector<float> nr(nn_px);
+                std::vector<float> nm(nn_px);
+                std::vector<float> ncoat(nn_px);
+                for (UINT y = 0; y < nh; ++y) {
+                    for (UINT x = 0; x < nw; ++x) {
+                        const UINT sx0 = std::min(x * 2U, w - 1U);
+                        const UINT sx1 = std::min(x * 2U + 1U, w - 1U);
+                        const UINT sy0 = std::min(y * 2U, h - 1U);
+                        const UINT sy1 = std::min(y * 2U + 1U, h - 1U);
+                        const std::size_t idx4[4] = {
+                            static_cast<std::size_t>(sy0) * w + sx0,
+                            static_cast<std::size_t>(sy0) * w + sx1,
+                            static_cast<std::size_t>(sy1) * w + sx0,
+                            static_cast<std::size_t>(sy1) * w + sx1};
+                        Vec3 as{0, 0, 0};
+                        Vec3 ns{0, 0, 0};
+                        float aos = 0.0f, a2s = 0.0f, ms = 0.0f, cs = 0.0f;
+                        for (int k = 0; k < 4; ++k) {
+                            const std::size_t ii = idx4[k];
+                            as = as + lin_albedo[ii];
+                            ns = ns + normals[ii];
+                            aos += ao_map[ii];
+                            const float r = rough_map[ii];
+                            a2s += r * r * r * r;
+                            ms += metal_map[ii];
+                            cs += coat_map[ii];
+                        }
+                        const Vec3 navg = ns * 0.25f;
+                        const float nlen = std::clamp(length3(navg), 0.15f, 1.0f);
+                        const float tvar = std::max(0.0f, (1.0f - nlen) / std::max(nlen, 0.25f));
+                        const float a2f = std::clamp(a2s * 0.25f + tvar * 0.35f, 0.0004f, 1.0f);
+                        const std::size_t dst = static_cast<std::size_t>(y) * nw + x;
+                        na[dst] = as * 0.25f;
+                        nn[dst] = normalize3(navg);
+                        nao[dst] = aos * 0.25f;
+                        nr[dst] = saturate(std::sqrt(std::sqrt(a2f)));
+                        nm[dst] = ms * 0.25f;
+                        ncoat[dst] = cs * 0.25f;
+                    }
+                }
+                lin_albedo = std::move(na);
+                normals = std::move(nn);
+                ao_map = std::move(nao);
+                rough_map = std::move(nr);
+                metal_map = std::move(nm);
+                coat_map = std::move(ncoat);
+                w = nw;
+                h = nh;
+            }
+        }
+    });
+
+    bundle.albedo_array = create_default_texture(device, k_ars_size, k_ars_size, static_cast<UINT16>(slice_count), k_ars_mips, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, "Create Arsenal albedo array");
+    bundle.normal_array = create_default_texture(device, k_ars_size, k_ars_size, static_cast<UINT16>(slice_count), k_ars_mips, DXGI_FORMAT_R8G8B8A8_UNORM, "Create Arsenal normal array");
+    bundle.orm_array = create_default_texture(device, k_ars_size, k_ars_size, static_cast<UINT16>(slice_count), k_ars_mips, DXGI_FORMAT_R8G8B8A8_UNORM, "Create Arsenal ORM array");
+
+    std::vector<UploadTask> tasks;
+    UINT64 total_staging_bytes = 0;
+    const UINT sub_count = slice_count * k_ars_mips;
+    auto add_task = [&](ID3D12Resource* tex, const std::vector<std::vector<MipLevelRgba8>>& data) {
+        UploadTask task{};
+        task.destination = tex;
+        task.subresource_count = sub_count;
+        task.footprints.resize(sub_count);
+        task.num_rows.resize(sub_count);
+        task.row_sizes.resize(sub_count);
+        task.src_data.resize(sub_count);
+        task.src_row_pitch.resize(sub_count);
+        const D3D12_RESOURCE_DESC desc = tex->GetDesc();
+        UINT64 required_bytes = 0;
+        total_staging_bytes = (total_staging_bytes + 511ULL) & ~511ULL;
+        task.staging_offset = total_staging_bytes;
+        device->GetCopyableFootprints(&desc, 0, sub_count, task.staging_offset, task.footprints.data(), task.num_rows.data(), task.row_sizes.data(), &required_bytes);
+        total_staging_bytes += required_bytes;
+        for (UINT s = 0; s < slice_count; ++s) {
+            for (UINT m = 0; m < k_ars_mips; ++m) {
+                const UINT idx = s * k_ars_mips + m;
+                task.src_data[idx] = data[s][m].pixels.data();
+                task.src_row_pitch[idx] = static_cast<std::size_t>(data[s][m].width) * 4U;
+            }
+        }
+        tasks.push_back(std::move(task));
+    };
+
+    add_task(bundle.albedo_array.Get(), albedo_data);
+    add_task(bundle.normal_array.Get(), normal_data);
+    add_task(bundle.orm_array.Get(), orm_data);
+
+    D3D12_HEAP_PROPERTIES upload_heap{};
+    upload_heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+    D3D12_RESOURCE_DESC upload_desc{};
+    upload_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    upload_desc.Width = total_staging_bytes;
+    upload_desc.Height = 1;
+    upload_desc.DepthOrArraySize = 1;
+    upload_desc.MipLevels = 1;
+    upload_desc.SampleDesc.Count = 1;
+    upload_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    ComPtr<ID3D12Resource> staging;
+    check_hr(device->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE, &upload_desc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&staging)), "Create Arsenal PBR staging");
+
+    std::uint8_t* mapped = nullptr;
+    D3D12_RANGE empty_range{0, 0};
+    check_hr(staging->Map(0, &empty_range, reinterpret_cast<void**>(&mapped)), "Map Arsenal PBR staging");
+    for (const auto& task : tasks) {
+        for (UINT sub = 0; sub < task.subresource_count; ++sub) {
+            const auto& fp = task.footprints[sub];
+            const auto* src_bytes = static_cast<const std::uint8_t*>(task.src_data[sub]);
+            std::uint8_t* dst_bytes = mapped + fp.Offset;
+            const std::size_t copy_bytes = static_cast<std::size_t>(task.row_sizes[sub]);
+            for (UINT row = 0; row < task.num_rows[sub]; ++row) {
+                std::memcpy(
+                    dst_bytes + static_cast<std::size_t>(row) * fp.Footprint.RowPitch,
+                    src_bytes + static_cast<std::size_t>(row) * task.src_row_pitch[sub],
+                    copy_bytes);
+            }
+        }
+    }
+    staging->Unmap(0, nullptr);
+
+    check_hr(command_allocator->Reset(), "Reset Arsenal PBR upload allocator");
+    check_hr(command_list->Reset(command_allocator, nullptr), "Reset Arsenal PBR upload command list");
+    for (const auto& task : tasks) {
+        for (UINT sub = 0; sub < task.subresource_count; ++sub) {
+            D3D12_TEXTURE_COPY_LOCATION dst_loc{};
+            dst_loc.pResource = task.destination;
+            dst_loc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            dst_loc.SubresourceIndex = sub;
+            D3D12_TEXTURE_COPY_LOCATION src_loc{};
+            src_loc.pResource = staging.Get();
+            src_loc.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            src_loc.PlacedFootprint = task.footprints[sub];
+            command_list->CopyTextureRegion(&dst_loc, 0, 0, 0, &src_loc, nullptr);
+        }
+    }
+
+    constexpr D3D12_RESOURCE_STATES final_state =
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    std::array<D3D12_RESOURCE_BARRIER, 3> barriers{};
+    ID3D12Resource* all_res[3] = {
+        bundle.albedo_array.Get(),
+        bundle.normal_array.Get(),
+        bundle.orm_array.Get()};
+    for (std::size_t i = 0; i < 3U; ++i) {
+        barriers[i].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barriers[i].Transition.pResource = all_res[i];
+        barriers[i].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        barriers[i].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+        barriers[i].Transition.StateAfter = final_state;
+    }
+    command_list->ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());
+    check_hr(command_list->Close(), "Close Arsenal PBR upload command list");
+
+    ID3D12CommandList* lists[] = {command_list};
+    upload_queue->ExecuteCommandLists(1, lists);
+    const std::uint64_t upload_fence = next_fence_value++;
+    check_hr(upload_queue->Signal(fence, upload_fence), "Signal Arsenal PBR upload fence");
+    if (fence->GetCompletedValue() < upload_fence) {
+        check_hr(fence->SetEventOnCompletion(upload_fence, fence_event), "Wait Arsenal PBR upload fence");
+        WaitForSingleObject(fence_event, 15000);
+    }
+
+    auto write_array_srv = [&](ID3D12Resource* res, DXGI_FORMAT fmt, D3D12_CPU_DESCRIPTOR_HANDLE dst) {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = fmt;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Texture2DArray.MostDetailedMip = 0;
+        srv.Texture2DArray.MipLevels = k_ars_mips;
+        srv.Texture2DArray.FirstArraySlice = 0;
+        srv.Texture2DArray.ArraySize = slice_count;
+        device->CreateShaderResourceView(res, &srv, dst);
+    };
+
+    D3D12_CPU_DESCRIPTOR_HANDLE cursor = srv_heap_start;
+    write_array_srv(bundle.albedo_array.Get(), DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, cursor);
+    cursor.ptr += srv_descriptor_stride;
+    write_array_srv(bundle.normal_array.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, cursor);
+    cursor.ptr += srv_descriptor_stride;
+    write_array_srv(bundle.orm_array.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, cursor);
+
+    const auto t1 = std::chrono::steady_clock::now();
+    bundle.build_time_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+    bundle.loaded = !materials.empty();
+    return bundle;
+}
+
 }

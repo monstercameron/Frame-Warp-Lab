@@ -499,20 +499,26 @@ RangeGeometryPackage build_tactical_range_geometry() {
         RangeMeshKind kind;
         const char* path;
         float length_m;
-        bool flip_z;
+        WeaponAxisMode axis_mode;
+        bool use_world_transform;
         bool skip_arms;
-        bool shotgun_fb;
     };
     const std::array<WeaponLoadSpec, 5> weapon_specs = {{
-        {1, RangeMeshKind::weapon_smg, "assets/models/weapons/mp5.glb", 0.50f, true, false, false},
-        {2, RangeMeshKind::weapon_rifle, "assets/models/weapons/ak47.glb", 0.78f, true, true, false},
-        {3, RangeMeshKind::weapon_scout, "assets/models/weapons/scout.glb", 0.94f, true, true, false},
-        {4, RangeMeshKind::weapon_shotgun, "assets/models/weapons/shotgun.glb", 0.84f, true, false, true},
-        {5, RangeMeshKind::weapon_dual_pistol, "assets/models/weapons/dual_pistol.glb", 0.25f, true, false, false},
+        {1, RangeMeshKind::weapon_smg, "assets/models/weapons/mp5.glb", 0.48f, WeaponAxisMode::x_neg, true, false},
+        {2, RangeMeshKind::weapon_rifle, "assets/models/weapons/ak47.glb", 0.80f, WeaponAxisMode::z_pos, true, true},
+        {3, RangeMeshKind::weapon_scout, "assets/models/weapons/scout.glb", 1.02f, WeaponAxisMode::z_pos, false, false},
+        {4, RangeMeshKind::weapon_shotgun, "assets/models/weapons/shotgun.glb", 0.88f, WeaponAxisMode::x_pos, true, false},
+        {5, RangeMeshKind::weapon_dual_pistol, "assets/models/weapons/dual_pistol.glb", 0.24f, WeaponAxisMode::z_neg, true, false},
     }};
     for (const auto& ws : weapon_specs) {
         const auto s = begin_sub(ws.kind);
-        const LoadedWeaponMesh wm = load_weapon_glb_merged(ws.path, ws.length_m, ws.flip_z, ws.skip_arms, ws.shotgun_fb);
+        const LoadedWeaponMesh wm = load_weapon_glb_merged(
+            ws.path,
+            ws.length_m,
+            ws.axis_mode,
+            ws.use_world_transform,
+            ws.skip_arms,
+            pkg.arsenal_pbr_materials);
         if (wm.loaded) {
             const auto base_v = static_cast<std::uint32_t>(pkg.vertices.size());
             pkg.vertices.insert(pkg.vertices.end(), wm.vertices.begin(), wm.vertices.end());
@@ -533,8 +539,8 @@ RangeGeometryPackage build_tactical_range_geometry() {
         end_sub(ws.kind, s);
     }
 
-    pkg.ct_bot_template = load_skinned_character_glb("assets/models/characters/fbi_ct.glb", true);
-    pkg.t_bot_template = load_skinned_character_glb("assets/models/characters/terrorist.glb", false);
+    pkg.ct_bot_template = load_skinned_character_glb("assets/models/characters/fbi_ct.glb", true, pkg.arsenal_pbr_materials);
+    pkg.t_bot_template = load_skinned_character_glb("assets/models/characters/terrorist.glb", false, pkg.arsenal_pbr_materials);
     pkg.bots_vb_base_vertex = static_cast<std::uint32_t>(pkg.vertices.size());
     std::uint32_t rel_v_cursor = 0U;
     for (std::uint32_t bi = 0; bi < 8U; ++bi) {

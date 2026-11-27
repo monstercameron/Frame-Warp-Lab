@@ -20,6 +20,9 @@ StructuredBuffer<OctreeVisProbeGpu> octree_probes_srv : register(t20);
 #ifdef ENABLE_DXR_INLINE
 RaytracingAccelerationStructure scene_tlas_srv : register(t21);
 #endif
+Texture2DArray<float4> arsenal_albedo_array : register(t23);
+Texture2DArray<float4> arsenal_normal_array : register(t24);
+Texture2DArray<float4> arsenal_orm_array : register(t25);
 
 float3 eval_octree_probe_irradiance(float3 world_pos, float3 n, uint probe_count, bool is_dust2) {
     if (probe_count == 0u) {
@@ -715,7 +718,18 @@ void sample_range_pbr_material(
 
     float3 ts_n;
     float4 orm;
-    if ((material_id & 0x80000000u) != 0u) {
+    if ((material_id & 0x40000000u) != 0u) {
+        float a_slice = (float)(material_id & 0xFFu);
+        if (aniso_enabled) {
+            out_albedo = arsenal_albedo_array.SampleGrad(pbr_aniso_sampler, float3(uv, a_slice), duv_dx, duv_dy).rgb;
+            ts_n = arsenal_normal_array.SampleGrad(pbr_aniso_sampler, float3(uv, a_slice), duv_dx, duv_dy).xyz * 2.0 - 1.0;
+            orm = arsenal_orm_array.SampleGrad(pbr_aniso_sampler, float3(uv, a_slice), duv_dx, duv_dy);
+        } else {
+            out_albedo = arsenal_albedo_array.SampleLevel(pbr_aniso_sampler, float3(uv, a_slice), 0.0).rgb;
+            ts_n = arsenal_normal_array.SampleLevel(pbr_aniso_sampler, float3(uv, a_slice), 0.0).xyz * 2.0 - 1.0;
+            orm = arsenal_orm_array.SampleLevel(pbr_aniso_sampler, float3(uv, a_slice), 0.0);
+        }
+    } else if ((material_id & 0x80000000u) != 0u) {
         float3 srgb = float3(
             (float)(material_id & 255u),
             (float)((material_id >> 8u) & 255u),
